@@ -1,0 +1,27 @@
+{
+  "name": "tally-dashboard-server",
+  "version": "1.0.0",
+  "description": "Tally Prime Dashboard Backend - Wholesale Business Management",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test tests/"
+  },
+  "keywords": ["tally", "dashboard", "wholesale", "billing"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "better-sqlite3": "^9.4.3",
+    "xml2js": "^0.6.2",
+    "socket.io": "^4.7.4",
+    "dotenv": "^16.4.1",
+    "axios": "^1.6.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  }
+}
