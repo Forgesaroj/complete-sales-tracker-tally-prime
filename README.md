@@ -1,17 +1,26 @@
-# Tally Prime Dashboard
-## Wholesale Business Management System
+# Complete Sales Tracker
+## Web Application Integrated with Tally Prime
 
-A real-time dashboard that integrates with Tally Prime for wholesale clothing businesses in Nepal.
+A comprehensive real-time sales tracking dashboard that integrates with Tally Prime for wholesale clothing businesses in Nepal. Track bills, receive payments, monitor inventory, and manage your entire sales workflow from a single web interface.
 
 ---
 
 ## Features
 
+### Core Features
 - **Real-time Bill Sync** - Bills appear within seconds of creation in Tally
 - **One-Click Payment** - Receive payments from dashboard, auto-sync to Tally
-- **Bill Status Tracking** - Track payment and dispatch status
+- **Bill Status Tracking** - Track payment and dispatch status (Full Payment, Partial, Credit)
 - **Sack/Bundle Tracking** - Track multi-vendor bags in single delivery
 - **Columnar Daybook** - Party-wise debit/credit with balance
+
+### New Features
+- **Activity Log** - Track all payment changes with timestamps
+- **Bill Inventory Sync** - View line items of each bill synced from Tally
+- **Print Bills** - Print bills directly from the dashboard with inventory details
+- **UDF Field Support** - Custom payment modes (Cash Teller 1/2, Cheque, QR Code, Discount, Bank Deposit, Esewa)
+
+### User Experience
 - **Mobile Friendly** - Responsive design, works on phones
 - **Bilingual** - English & नेपाली
 
@@ -163,6 +172,11 @@ Tally connector/
 | POST | /api/sacks | Create new sack |
 | GET | /api/sync/status | Sync status |
 | GET | /api/tally/status | Tally connection status |
+| GET | /api/activity | Recent activity log |
+| GET | /api/activity/today | Today's activities |
+| GET | /api/activity/stats | Activity statistics |
+| GET | /api/pending-sales-bills/:masterId/inventory | Get bill inventory items |
+| POST | /api/pending-sales-bills/sync-inventory | Sync inventory from Tally |
 
 ---
 
@@ -214,4 +228,12 @@ For issues and feature requests, please document them in the PROJECT_ROADMAP.md 
 
 ---
 
-*Built for wholesale businesses using Tally Prime*
+---
+
+## License
+
+MIT License - Free to use and modify.
+
+---
+
+*Complete Sales Tracker - Built for wholesale businesses using Tally Prime in Nepal*
