@@ -91,6 +91,16 @@ class DatabaseService {
       // Column already exists
     }
 
+    // Add Tally timestamp columns (migration)
+    const tallyTimestampMigrations = [
+      'ALTER TABLE bills ADD COLUMN tally_created_date TEXT',
+      'ALTER TABLE bills ADD COLUMN tally_altered_date TEXT',
+      'ALTER TABLE bills ADD COLUMN tally_entry_time TEXT'
+    ];
+    for (const sql of tallyTimestampMigrations) {
+      try { this.db.exec(sql); } catch (e) { /* Column exists */ }
+    }
+
     // ==================== VOUCHER HISTORY SYSTEM ====================
     // Comprehensive tracking of all voucher changes
 
@@ -478,6 +488,51 @@ class DatabaseService {
       INSERT OR IGNORE INTO fonepay_sync_state (id, sync_status) VALUES (1, 'idle')
     `);
 
+    // ==================== RBB SMART BANKING ====================
+    // RBB Bank transactions (deposits from Fonepay settlements)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS rbb_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT UNIQUE,
+        transaction_date TEXT,
+        value_date TEXT,
+        description TEXT,
+        reference_number TEXT,
+        debit REAL DEFAULT 0,
+        credit REAL DEFAULT 0,
+        balance REAL DEFAULT 0,
+        transaction_type TEXT,
+        remarks TEXT,
+        raw_data TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create indexes for RBB transactions
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_rbb_txn_date ON rbb_transactions(transaction_date);
+      CREATE INDEX IF NOT EXISTS idx_rbb_txn_id ON rbb_transactions(transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_rbb_txn_ref ON rbb_transactions(reference_number);
+    `);
+
+    // RBB sync state
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS rbb_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_sync_time TEXT,
+        sync_status TEXT DEFAULT 'idle',
+        error_message TEXT,
+        total_syncs INTEGER DEFAULT 0,
+        account_number TEXT,
+        account_balance REAL DEFAULT 0
+      )
+    `);
+
+    // Initialize RBB sync state
+    this.db.exec(`
+      INSERT OR IGNORE INTO rbb_sync_state (id, sync_status) VALUES (1, 'idle')
+    `);
+
     // ==================== FULL HISTORICAL SYNC ====================
     // Tracks progress of full historical data fetch from Tally
 
@@ -529,13 +584,16 @@ class DatabaseService {
     const stmt = this.db.prepare(`
       INSERT INTO bills (
         tally_guid, tally_master_id, voucher_number, voucher_type,
-        voucher_date, party_name, amount, narration, alter_id, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        voucher_date, party_name, amount, narration, alter_id,
+        tally_created_date, tally_altered_date, tally_entry_time, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(tally_guid) DO UPDATE SET
         voucher_number = excluded.voucher_number,
         amount = excluded.amount,
         narration = excluded.narration,
         alter_id = excluded.alter_id,
+        tally_altered_date = excluded.tally_altered_date,
+        tally_entry_time = excluded.tally_entry_time,
         synced_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     `);
@@ -549,7 +607,10 @@ class DatabaseService {
       bill.partyName,
       Math.abs(bill.amount),  // Store as positive
       bill.narration,
-      bill.alterId || 0
+      bill.alterId || 0,
+      bill.createdDate || bill.date,  // Fall back to voucher date if no creation date
+      bill.alteredDate || null,
+      bill.entryTime || null
     );
   }
 
@@ -1853,6 +1914,132 @@ class DatabaseService {
   getMaxBillAlterId() {
     const result = this.db.prepare('SELECT MAX(alter_id) as max_id FROM bills').get();
     return result?.max_id || 0;
+  }
+
+  // ==================== RBB SMART BANKING ====================
+
+  /**
+   * Save RBB transaction
+   */
+  saveRBBTransaction(txn) {
+    const stmt = this.db.prepare(`
+      INSERT INTO rbb_transactions (
+        transaction_id, transaction_date, value_date, description, reference_number,
+        debit, credit, balance, transaction_type, remarks, raw_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(transaction_id) DO UPDATE SET
+        transaction_date = excluded.transaction_date,
+        value_date = excluded.value_date,
+        description = excluded.description,
+        reference_number = excluded.reference_number,
+        debit = excluded.debit,
+        credit = excluded.credit,
+        balance = excluded.balance,
+        transaction_type = excluded.transaction_type,
+        remarks = excluded.remarks,
+        raw_data = excluded.raw_data
+    `);
+
+    // Generate unique transaction ID
+    const txnId = txn.id || `RBB-${(txn.date || '').replace(/[^0-9]/g, '')}-${txn.reference || ''}-${txn.credit || txn.debit || 0}`;
+
+    return stmt.run(
+      txnId,
+      txn.date || txn.transactionDate || '',
+      txn.valueDate || txn.date || '',
+      txn.description || txn.particulars || '',
+      txn.reference || txn.referenceNumber || '',
+      txn.debit || 0,
+      txn.credit || 0,
+      txn.balance || 0,
+      txn.type || (txn.credit > 0 ? 'credit' : 'debit'),
+      txn.remarks || '',
+      JSON.stringify(txn)
+    );
+  }
+
+  /**
+   * Get RBB transactions
+   */
+  getRBBTransactions(limit = 100, offset = 0) {
+    return this.db.prepare(`
+      SELECT * FROM rbb_transactions ORDER BY transaction_date DESC, id DESC LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
+
+  /**
+   * Get RBB transactions by date range
+   */
+  getRBBTransactionsByDateRange(fromDate, toDate) {
+    return this.db.prepare(`
+      SELECT * FROM rbb_transactions
+      WHERE DATE(transaction_date) >= DATE(?) AND DATE(transaction_date) <= DATE(?)
+      ORDER BY transaction_date DESC, id DESC
+    `).all(fromDate, toDate);
+  }
+
+  /**
+   * Get RBB transactions count
+   */
+  getRBBTransactionsCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM rbb_transactions').get();
+    return result.count;
+  }
+
+  /**
+   * Get RBB sync state
+   */
+  getRBBSyncState() {
+    return this.db.prepare('SELECT * FROM rbb_sync_state WHERE id = 1').get();
+  }
+
+  /**
+   * Update RBB sync state
+   */
+  updateRBBSyncState(state) {
+    return this.db.prepare(`
+      UPDATE rbb_sync_state SET
+        last_sync_time = CURRENT_TIMESTAMP,
+        sync_status = ?,
+        error_message = ?,
+        total_syncs = total_syncs + 1,
+        account_number = COALESCE(?, account_number),
+        account_balance = COALESCE(?, account_balance)
+      WHERE id = 1
+    `).run(
+      state.status || 'idle',
+      state.error || null,
+      state.accountNumber || null,
+      state.accountBalance || null
+    );
+  }
+
+  /**
+   * Get RBB summary (credits from Fonepay)
+   */
+  getRBBSummary() {
+    const result = this.db.prepare(`
+      SELECT
+        COUNT(*) as totalCount,
+        COALESCE(SUM(credit), 0) as totalCredit,
+        COALESCE(SUM(debit), 0) as totalDebit,
+        COUNT(CASE WHEN credit > 0 THEN 1 END) as creditCount,
+        COUNT(CASE WHEN debit > 0 THEN 1 END) as debitCount
+      FROM rbb_transactions
+    `).get();
+    return result;
+  }
+
+  /**
+   * Get today's RBB transactions
+   */
+  getTodayRBBTransactions() {
+    const today = new Date().toISOString().split('T')[0];
+    return this.db.prepare(`
+      SELECT * FROM rbb_transactions
+      WHERE DATE(transaction_date) = DATE(?)
+      ORDER BY id DESC
+    `).all(today);
   }
 
   /**

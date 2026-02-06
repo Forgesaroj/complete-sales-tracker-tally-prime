@@ -34,6 +34,20 @@ A real-time dashboard connector for Tally Prime ERP that syncs vouchers, stock i
 
 ---
 
+## Timestamp Tracking
+
+### Bills/Vouchers Timestamps
+| Column | Description |
+|--------|-------------|
+| `tally_created_date` | Original creation date in Tally (from PRIORDATE) |
+| `tally_altered_date` | Last modification date in Tally (from ALTEREDDATE) |
+| `tally_entry_time` | Entry timestamp from Tally |
+| `synced_at` | When record was synced from Tally to our DB |
+| `created_at` | When record was first inserted in our DB |
+| `updated_at` | When record was last updated in our DB |
+
+---
+
 ## Database Schema (SQLite)
 
 ### Core Tables

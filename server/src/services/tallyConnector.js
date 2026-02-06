@@ -157,7 +157,7 @@ class TallyConnector {
 <TDLMESSAGE>
 <COLLECTION NAME="VchColl" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE</FETCH>
 </COLLECTION>
 </TDLMESSAGE>
 </TDL>
@@ -193,7 +193,7 @@ class TallyConnector {
 <TDLMESSAGE>
 <COLLECTION NAME="VchIncr" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE</FETCH>
 <FILTER>IncrFilter,NotCancelled,NotOptional</FILTER>
 </COLLECTION>
 <SYSTEM TYPE="Formulae" NAME="IncrFilter">$ALTERID > ${lastAlterId}</SYSTEM>
@@ -268,6 +268,16 @@ class TallyConnector {
           narration = narration._ || '';
         }
 
+        // Timestamp fields from Tally
+        const alteredDate = v.ALTEREDDATE?._ || v.ALTEREDDATE || '';
+        const priorDate = v.PRIORDATE?._ || v.PRIORDATE || '';
+        const statusDate = v.VCHSTATUSDATE?._ || v.VCHSTATUSDATE || '';
+
+        // Use PRIORDATE as creation date (when voucher was first entered)
+        // ALTEREDDATE is when it was last modified
+        const createdDate = priorDate || dateRaw;
+        const entryTime = statusDate || alteredDate;
+
         return {
           guid: String(guid),
           masterId: String(masterId).trim(),
@@ -277,7 +287,11 @@ class TallyConnector {
           voucherNumber: String(voucherNumber),
           partyName: String(partyName),
           amount: parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0,
-          narration: String(narration)
+          narration: String(narration),
+          // Tally timestamps
+          createdDate: String(createdDate),
+          alteredDate: String(alteredDate),
+          entryTime: String(entryTime)
         };
       });
 
