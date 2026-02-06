@@ -84,6 +84,79 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_bills_guid ON bills(tally_guid);
     `);
 
+    // Add alter_id column to bills if not exists (migration)
+    try {
+      this.db.exec(`ALTER TABLE bills ADD COLUMN alter_id INTEGER DEFAULT 0`);
+    } catch (e) {
+      // Column already exists
+    }
+
+    // ==================== VOUCHER HISTORY SYSTEM ====================
+    // Comprehensive tracking of all voucher changes
+
+    // Main voucher history table - stores complete snapshots
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS voucher_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        master_id TEXT NOT NULL,
+        alter_id INTEGER NOT NULL,
+        previous_alter_id INTEGER,
+        guid TEXT,
+        voucher_number TEXT,
+        voucher_type TEXT,
+        voucher_date TEXT,
+        party_name TEXT,
+        amount REAL,
+        narration TEXT,
+        payment_status TEXT,
+        dispatch_status TEXT,
+        amount_received REAL,
+        change_type TEXT DEFAULT 'modified',
+        change_reason TEXT,
+        version_number INTEGER DEFAULT 1,
+        captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        tally_sync_time TEXT
+      )
+    `);
+
+    // Change log table - tracks what fields changed
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS voucher_change_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        master_id TEXT NOT NULL,
+        old_alter_id INTEGER,
+        new_alter_id INTEGER,
+        field_name TEXT NOT NULL,
+        old_value TEXT,
+        new_value TEXT,
+        changed_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Migrations for voucher_history table (add new columns if not exist)
+    const vhMigrations = [
+      'ALTER TABLE voucher_history ADD COLUMN previous_alter_id INTEGER',
+      'ALTER TABLE voucher_history ADD COLUMN payment_status TEXT',
+      'ALTER TABLE voucher_history ADD COLUMN dispatch_status TEXT',
+      'ALTER TABLE voucher_history ADD COLUMN amount_received REAL',
+      'ALTER TABLE voucher_history ADD COLUMN change_reason TEXT',
+      'ALTER TABLE voucher_history ADD COLUMN version_number INTEGER DEFAULT 1',
+      'ALTER TABLE voucher_history ADD COLUMN tally_sync_time TEXT'
+    ];
+    for (const sql of vhMigrations) {
+      try { this.db.exec(sql); } catch (e) { /* Column exists */ }
+    }
+
+    // Indexes for fast history lookups
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_vh_master_id ON voucher_history(master_id);
+      CREATE INDEX IF NOT EXISTS idx_vh_alter_id ON voucher_history(alter_id);
+      CREATE INDEX IF NOT EXISTS idx_vh_date ON voucher_history(voucher_date);
+      CREATE INDEX IF NOT EXISTS idx_vh_captured ON voucher_history(captured_at);
+      CREATE INDEX IF NOT EXISTS idx_vcl_master_id ON voucher_change_log(master_id);
+      CREATE INDEX IF NOT EXISTS idx_vcl_changed ON voucher_change_log(changed_at);
+    `);
+
     // Receipts table (receipts created from Dashboard)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS receipts (
@@ -316,23 +389,153 @@ class DatabaseService {
       `).run('admin', 'admin123', 'Administrator', 'admin');
       console.log('Default admin user created (username: admin, password: admin123)');
     }
+
+    // ==================== FONEPAY TABLES ====================
+
+    // Fonepay balance/summary snapshots
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS fonepay_balance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        balance REAL DEFAULT 0,
+        today_transactions INTEGER DEFAULT 0,
+        today_amount REAL DEFAULT 0,
+        pending_settlement REAL DEFAULT 0,
+        captured_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Fonepay transactions
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS fonepay_transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id TEXT UNIQUE,
+        transaction_date TEXT,
+        description TEXT,
+        amount REAL DEFAULT 0,
+        status TEXT,
+        type TEXT,
+        prn_third_party TEXT,
+        terminal_id TEXT,
+        terminal_name TEXT,
+        prn_hub TEXT,
+        initiator TEXT,
+        issuer_name TEXT,
+        raw_data TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add new columns for existing tables (migration)
+    try {
+      this.db.exec(`ALTER TABLE fonepay_transactions ADD COLUMN prn_third_party TEXT`);
+      this.db.exec(`ALTER TABLE fonepay_transactions ADD COLUMN terminal_id TEXT`);
+      this.db.exec(`ALTER TABLE fonepay_transactions ADD COLUMN terminal_name TEXT`);
+      this.db.exec(`ALTER TABLE fonepay_transactions ADD COLUMN prn_hub TEXT`);
+      this.db.exec(`ALTER TABLE fonepay_transactions ADD COLUMN initiator TEXT`);
+      this.db.exec(`ALTER TABLE fonepay_transactions ADD COLUMN issuer_name TEXT`);
+    } catch (e) {
+      // Columns already exist, ignore
+    }
+
+    // Create index for transactions
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_fonepay_txn_date ON fonepay_transactions(transaction_date);
+      CREATE INDEX IF NOT EXISTS idx_fonepay_txn_id ON fonepay_transactions(transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_fonepay_txn_issuer ON fonepay_transactions(issuer_name);
+    `);
+
+    // Fonepay settlements
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS fonepay_settlements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        settlement_id TEXT UNIQUE,
+        settlement_date TEXT,
+        amount REAL DEFAULT 0,
+        status TEXT,
+        bank_ref TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create index for settlements
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_fonepay_settlement_date ON fonepay_settlements(settlement_date);
+    `);
+
+    // Fonepay sync state
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS fonepay_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_sync_time TEXT,
+        sync_status TEXT DEFAULT 'idle',
+        error_message TEXT,
+        total_syncs INTEGER DEFAULT 0
+      )
+    `);
+
+    // Initialize fonepay sync state
+    this.db.exec(`
+      INSERT OR IGNORE INTO fonepay_sync_state (id, sync_status) VALUES (1, 'idle')
+    `);
+
+    // ==================== FULL HISTORICAL SYNC ====================
+    // Tracks progress of full historical data fetch from Tally
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS full_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        status TEXT DEFAULT 'not_started',
+        start_date TEXT,
+        current_date TEXT,
+        end_date TEXT,
+        total_vouchers_synced INTEGER DEFAULT 0,
+        max_alter_id INTEGER DEFAULT 0,
+        batches_completed INTEGER DEFAULT 0,
+        started_at TEXT,
+        completed_at TEXT,
+        last_error TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Initialize full sync state
+    this.db.exec(`
+      INSERT OR IGNORE INTO full_sync_state (id, status) VALUES (1, 'not_started')
+    `);
   }
 
   // ==================== BILLS ====================
 
   /**
    * Upsert bill from Tally sync
+   * Now saves history and logs field changes when voucher is modified
    */
   upsertBill(bill) {
+    // Check if bill already exists
+    const existing = this.db.prepare('SELECT * FROM bills WHERE tally_guid = ?').get(bill.guid);
+
+    // If exists and alter_id changed, save old version to history and log changes
+    if (existing && bill.alterId && existing.alter_id !== bill.alterId) {
+      // Save complete snapshot to history
+      this.saveVoucherHistory(existing, 'modified', bill.alterId);
+
+      // Log field-level changes
+      const changes = this.logVoucherChanges(existing, bill);
+      if (changes.length > 0) {
+        console.log(`Voucher ${bill.masterId} modified:`, changes.map(c => `${c.field}: "${c.from}" → "${c.to}"`).join(', '));
+      }
+    }
+
     const stmt = this.db.prepare(`
       INSERT INTO bills (
         tally_guid, tally_master_id, voucher_number, voucher_type,
-        voucher_date, party_name, amount, narration, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        voucher_date, party_name, amount, narration, alter_id, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(tally_guid) DO UPDATE SET
         voucher_number = excluded.voucher_number,
         amount = excluded.amount,
         narration = excluded.narration,
+        alter_id = excluded.alter_id,
         synced_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     `);
@@ -345,8 +548,173 @@ class DatabaseService {
       bill.date,
       bill.partyName,
       Math.abs(bill.amount),  // Store as positive
-      bill.narration
+      bill.narration,
+      bill.alterId || 0
     );
+  }
+
+  /**
+   * Save voucher to history table (complete snapshot before modification)
+   */
+  saveVoucherHistory(voucher, changeType = 'modified', newAlterId = null) {
+    // Get version number for this voucher
+    const versionResult = this.db.prepare(`
+      SELECT COALESCE(MAX(version_number), 0) + 1 as next_version
+      FROM voucher_history WHERE master_id = ?
+    `).get(voucher.tally_master_id || voucher.master_id);
+    const versionNumber = versionResult?.next_version || 1;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO voucher_history (
+        master_id, alter_id, previous_alter_id, guid, voucher_number, voucher_type,
+        voucher_date, party_name, amount, narration, payment_status, dispatch_status,
+        amount_received, change_type, version_number, tally_sync_time
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    return stmt.run(
+      voucher.tally_master_id || voucher.master_id,
+      voucher.alter_id || 0,
+      newAlterId,  // The new alter_id that replaced this version
+      voucher.tally_guid || voucher.guid,
+      voucher.voucher_number,
+      voucher.voucher_type,
+      voucher.voucher_date,
+      voucher.party_name,
+      voucher.amount,
+      voucher.narration,
+      voucher.payment_status,
+      voucher.dispatch_status,
+      voucher.amount_received,
+      changeType,
+      versionNumber,
+      voucher.synced_at
+    );
+  }
+
+  /**
+   * Log field-level changes between old and new voucher
+   */
+  logVoucherChanges(oldVoucher, newVoucher) {
+    const masterId = oldVoucher.tally_master_id || oldVoucher.master_id;
+    const oldAlterId = oldVoucher.alter_id;
+    const newAlterId = newVoucher.alterId;
+
+    const fieldsToTrack = [
+      { db: 'voucher_number', new: 'voucherNumber' },
+      { db: 'voucher_type', new: 'voucherType' },
+      { db: 'voucher_date', new: 'date' },
+      { db: 'party_name', new: 'partyName' },
+      { db: 'amount', new: 'amount' },
+      { db: 'narration', new: 'narration' }
+    ];
+
+    const stmt = this.db.prepare(`
+      INSERT INTO voucher_change_log (
+        master_id, old_alter_id, new_alter_id, field_name, old_value, new_value
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    const changes = [];
+    for (const field of fieldsToTrack) {
+      const oldVal = String(oldVoucher[field.db] || '');
+      let newVal = String(newVoucher[field.new] || '');
+
+      // Handle amount specially (absolute value)
+      if (field.db === 'amount') {
+        newVal = String(Math.abs(parseFloat(newVoucher[field.new]) || 0));
+      }
+
+      if (oldVal !== newVal) {
+        stmt.run(masterId, oldAlterId, newAlterId, field.db, oldVal, newVal);
+        changes.push({ field: field.db, from: oldVal, to: newVal });
+      }
+    }
+
+    return changes;
+  }
+
+  /**
+   * Get voucher history by master_id (all versions)
+   */
+  getVoucherHistory(masterId) {
+    return this.db.prepare(`
+      SELECT * FROM voucher_history
+      WHERE master_id = ?
+      ORDER BY version_number ASC, alter_id ASC
+    `).all(masterId);
+  }
+
+  /**
+   * Get voucher by specific alter_id (from history)
+   */
+  getVoucherByAlterId(alterId) {
+    // First check current bills
+    const current = this.db.prepare('SELECT * FROM bills WHERE alter_id = ?').get(alterId);
+    if (current) return { ...current, source: 'current' };
+
+    // Then check history
+    const history = this.db.prepare('SELECT * FROM voucher_history WHERE alter_id = ?').get(alterId);
+    if (history) return { ...history, source: 'history' };
+
+    return null;
+  }
+
+  /**
+   * Get all voucher history (recent changes)
+   */
+  getAllVoucherHistory(limit = 100) {
+    return this.db.prepare(`
+      SELECT * FROM voucher_history
+      ORDER BY captured_at DESC
+      LIMIT ?
+    `).all(limit);
+  }
+
+  /**
+   * Get change log for a voucher
+   */
+  getVoucherChangeLog(masterId) {
+    return this.db.prepare(`
+      SELECT * FROM voucher_change_log
+      WHERE master_id = ?
+      ORDER BY changed_at ASC
+    `).all(masterId);
+  }
+
+  /**
+   * Get recent changes across all vouchers
+   */
+  getRecentChanges(limit = 50) {
+    return this.db.prepare(`
+      SELECT * FROM voucher_change_log
+      ORDER BY changed_at DESC
+      LIMIT ?
+    `).all(limit);
+  }
+
+  /**
+   * Get history statistics
+   */
+  getHistoryStats() {
+    const stats = this.db.prepare(`
+      SELECT
+        COUNT(DISTINCT master_id) as vouchers_with_history,
+        COUNT(*) as total_versions,
+        MAX(captured_at) as last_change
+      FROM voucher_history
+    `).get();
+
+    const changeStats = this.db.prepare(`
+      SELECT
+        field_name,
+        COUNT(*) as change_count
+      FROM voucher_change_log
+      GROUP BY field_name
+      ORDER BY change_count DESC
+    `).all();
+
+    return { ...stats, fieldChanges: changeStats };
   }
 
   /**
@@ -1201,6 +1569,290 @@ class DatabaseService {
       SELECT last_number FROM daily_invoice_counter WHERE counter_date = ?
     `).get(today);
     return result?.last_number || 0;
+  }
+
+  // ==================== FONEPAY ====================
+
+  /**
+   * Save Fonepay balance snapshot
+   */
+  saveFonepayBalance(data) {
+    const stmt = this.db.prepare(`
+      INSERT INTO fonepay_balance (balance, today_transactions, today_amount, pending_settlement)
+      VALUES (?, ?, ?, ?)
+    `);
+    return stmt.run(
+      data.balance || 0,
+      data.todayTransactions || 0,
+      data.todayAmount || 0,
+      data.pendingSettlement || 0
+    );
+  }
+
+  /**
+   * Get latest Fonepay balance
+   */
+  getLatestFonepayBalance() {
+    return this.db.prepare(`
+      SELECT * FROM fonepay_balance ORDER BY id DESC LIMIT 1
+    `).get();
+  }
+
+  /**
+   * Get Fonepay balance history
+   */
+  getFonepayBalanceHistory(limit = 100) {
+    return this.db.prepare(`
+      SELECT * FROM fonepay_balance ORDER BY id DESC LIMIT ?
+    `).all(limit);
+  }
+
+  /**
+   * Save Fonepay transaction with full column mapping
+   * Columns: Transmission Date, PRN (Third Party), Terminal ID, Terminal Name, PRN (Hub), Initiator, Amount, Status, Issuer Name
+   */
+  saveFonepayTransaction(txn) {
+    const stmt = this.db.prepare(`
+      INSERT INTO fonepay_transactions (
+        transaction_id, transaction_date, description, amount, status, type,
+        prn_third_party, terminal_id, terminal_name, prn_hub, initiator, issuer_name, raw_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(transaction_id) DO UPDATE SET
+        transaction_date = excluded.transaction_date,
+        description = excluded.description,
+        amount = excluded.amount,
+        status = excluded.status,
+        type = excluded.type,
+        prn_third_party = excluded.prn_third_party,
+        terminal_id = excluded.terminal_id,
+        terminal_name = excluded.terminal_name,
+        prn_hub = excluded.prn_hub,
+        initiator = excluded.initiator,
+        issuer_name = excluded.issuer_name,
+        raw_data = excluded.raw_data
+    `);
+
+    // Generate unique transaction ID based on date + initiator + amount to avoid duplicates
+    const txnDate = txn.transmissionDate || txn.date || '';
+    const txnId = txn.id || `TXN-${txnDate.replace(/[^0-9]/g, '')}-${txn.initiator || ''}-${txn.amount || 0}`;
+
+    return stmt.run(
+      txnId,
+      txnDate,
+      txn.prnThirdParty || txn.description || '',
+      txn.amount || 0,
+      txn.status || 'unknown',
+      txn.type || 'payment',
+      txn.prnThirdParty || 'N/A',
+      txn.terminalId || '',
+      txn.terminalName || '',
+      txn.prnHub || 'N/A',
+      txn.initiator || '',
+      txn.issuerName || '',
+      JSON.stringify(txn)
+    );
+  }
+
+  /**
+   * Get Fonepay transactions (latest first)
+   */
+  getFonepayTransactions(limit = 100, offset = 0) {
+    return this.db.prepare(`
+      SELECT * FROM fonepay_transactions ORDER BY transaction_date DESC LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
+
+  /**
+   * Get Fonepay transactions by date
+   */
+  getFonepayTransactionsByDate(date) {
+    return this.db.prepare(`
+      SELECT * FROM fonepay_transactions WHERE transaction_date = ? ORDER BY created_at DESC
+    `).all(date);
+  }
+
+  /**
+   * Get Fonepay transactions count
+   */
+  getFonepayTransactionsCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM fonepay_transactions').get();
+    return result.count;
+  }
+
+  /**
+   * Get today's Fonepay transactions
+   */
+  getTodayFonepayTransactions() {
+    const today = new Date().toISOString().split('T')[0];
+    return this.getFonepayTransactionsByDate(today);
+  }
+
+  /**
+   * Get the latest transaction date in the database
+   * Returns date in YYYY-MM-DD format or null if no transactions
+   */
+  getLatestFonepayTransactionDate() {
+    const result = this.db.prepare(`
+      SELECT MAX(DATE(transaction_date)) as latest_date
+      FROM fonepay_transactions
+    `).get();
+    return result?.latest_date || null;
+  }
+
+  /**
+   * Save Fonepay settlement
+   */
+  saveFonepaySettlement(settlement) {
+    const stmt = this.db.prepare(`
+      INSERT INTO fonepay_settlements (
+        settlement_id, settlement_date, amount, status, bank_ref
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(settlement_id) DO UPDATE SET
+        settlement_date = excluded.settlement_date,
+        amount = excluded.amount,
+        status = excluded.status,
+        bank_ref = excluded.bank_ref
+    `);
+    return stmt.run(
+      settlement.id || `STL-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      settlement.date || new Date().toISOString().split('T')[0],
+      settlement.amount || 0,
+      settlement.status || 'unknown',
+      settlement.bankRef || ''
+    );
+  }
+
+  /**
+   * Get Fonepay settlements
+   */
+  getFonepaySettlements(limit = 50) {
+    return this.db.prepare(`
+      SELECT * FROM fonepay_settlements ORDER BY created_at DESC LIMIT ?
+    `).all(limit);
+  }
+
+  /**
+   * Get Fonepay sync state
+   */
+  getFonepaySyncState() {
+    return this.db.prepare('SELECT * FROM fonepay_sync_state WHERE id = 1').get();
+  }
+
+  /**
+   * Update Fonepay sync state
+   */
+  updateFonepaySyncState(state) {
+    return this.db.prepare(`
+      UPDATE fonepay_sync_state SET
+        last_sync_time = CURRENT_TIMESTAMP,
+        sync_status = ?,
+        error_message = ?,
+        total_syncs = total_syncs + 1
+      WHERE id = 1
+    `).run(state.status || 'idle', state.error || null);
+  }
+
+  /**
+   * Get Fonepay dashboard summary
+   */
+  getFonepayDashboard() {
+    const latestBalance = this.getLatestFonepayBalance();
+    const todayTxns = this.getTodayFonepayTransactions();
+    const syncState = this.getFonepaySyncState();
+
+    const todayTotal = todayTxns.reduce((sum, txn) => sum + (txn.amount || 0), 0);
+
+    return {
+      balance: latestBalance?.balance || 0,
+      todayTransactions: todayTxns.length,
+      todayAmount: todayTotal,
+      pendingSettlement: latestBalance?.pending_settlement || 0,
+      lastSync: syncState?.last_sync_time || null,
+      syncStatus: syncState?.sync_status || 'idle',
+      totalSyncs: syncState?.total_syncs || 0
+    };
+  }
+
+  // ==================== FULL HISTORICAL SYNC ====================
+
+  /**
+   * Get full sync state
+   */
+  getFullSyncState() {
+    return this.db.prepare('SELECT * FROM full_sync_state WHERE id = 1').get();
+  }
+
+  /**
+   * Update full sync state
+   */
+  updateFullSyncState(state) {
+    const current = this.getFullSyncState();
+
+    const stmt = this.db.prepare(`
+      UPDATE full_sync_state SET
+        status = ?,
+        start_date = ?,
+        current_date = ?,
+        end_date = ?,
+        total_vouchers_synced = ?,
+        max_alter_id = ?,
+        batches_completed = ?,
+        started_at = ?,
+        completed_at = ?,
+        last_error = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `);
+
+    return stmt.run(
+      state.status || current?.status || 'not_started',
+      state.startDate || current?.start_date || null,
+      state.currentDate || current?.current_date || null,
+      state.endDate || current?.end_date || null,
+      state.totalVouchersSynced ?? current?.total_vouchers_synced ?? 0,
+      state.maxAlterId ?? current?.max_alter_id ?? 0,
+      state.batchesCompleted ?? current?.batches_completed ?? 0,
+      state.startedAt || current?.started_at || null,
+      state.completedAt || current?.completed_at || null,
+      state.lastError || current?.last_error || null
+    );
+  }
+
+  /**
+   * Reset full sync state for a new full sync
+   */
+  resetFullSyncState() {
+    return this.db.prepare(`
+      UPDATE full_sync_state SET
+        status = 'not_started',
+        start_date = NULL,
+        current_date = NULL,
+        end_date = NULL,
+        total_vouchers_synced = 0,
+        max_alter_id = 0,
+        batches_completed = 0,
+        started_at = NULL,
+        completed_at = NULL,
+        last_error = NULL,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run();
+  }
+
+  /**
+   * Get total bill count
+   */
+  getBillsCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM bills').get();
+    return result.count;
+  }
+
+  /**
+   * Get max alter_id from bills
+   */
+  getMaxBillAlterId() {
+    const result = this.db.prepare('SELECT MAX(alter_id) as max_id FROM bills').get();
+    return result?.max_id || 0;
   }
 
   /**

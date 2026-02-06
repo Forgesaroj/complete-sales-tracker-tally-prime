@@ -162,11 +162,15 @@ class SyncService {
 
       console.log(`Incremental sync complete: ${vouchers.length} vouchers, ${newVouchers.length} new, maxAlterId=${maxAlterId}`);
 
+      // Also sync pending sales bills to detect Tally alterations
+      const psbResult = await this.syncPendingSalesBills();
+
       return {
         success: true,
         total: vouchers.length,
         new: newVouchers.length,
-        lastAlterId: maxAlterId
+        lastAlterId: maxAlterId,
+        pendingSalesBills: psbResult
       };
     } catch (error) {
       console.error('Incremental sync error:', error.message);
@@ -537,10 +541,23 @@ class SyncService {
   /**
    * Sync pending sales bills from Tally to local database
    * Fetches all pending sales bills and stores locally for fast access
+   * Also detects and logs alterations made in Tally Prime
    */
   async syncPendingSalesBills() {
     try {
       console.log('Syncing pending sales bills from Tally...');
+
+      // Get existing bills from DB to detect alterations
+      const existingBills = db.getAllPendingSalesBills();
+      const existingBillMap = new Map();
+      for (const bill of existingBills) {
+        existingBillMap.set(bill.master_id, {
+          alterId: bill.alter_id,
+          partyName: bill.party_name,
+          voucherNumber: bill.voucher_number,
+          amount: bill.amount
+        });
+      }
 
       // Fetch pending sales bills from Tally
       const bills = await tallyConnector.getPendingSalesBills();
@@ -551,12 +568,52 @@ class SyncService {
         return { success: true, count: 0 };
       }
 
-      // Find max alterId
+      // Find max alterId and detect alterations
       let maxAlterId = 0;
+      const alterations = [];
+
       for (const bill of bills) {
         if (bill.alterId && bill.alterId > maxAlterId) {
           maxAlterId = bill.alterId;
         }
+
+        // Check if this bill was altered in Tally
+        const existing = existingBillMap.get(bill.masterId);
+        if (existing && bill.alterId > existing.alterId) {
+          alterations.push({
+            masterId: bill.masterId,
+            voucherNumber: bill.voucherNumber,
+            partyName: bill.partyName,
+            amount: bill.amount,
+            oldAlterId: existing.alterId,
+            newAlterId: bill.alterId
+          });
+        }
+      }
+
+      // Log alterations to activity log
+      for (const alt of alterations) {
+        try {
+          db.logActivity({
+            actionType: 'TALLY_ALTERATION',
+            voucherNumber: alt.voucherNumber,
+            partyName: alt.partyName,
+            amount: alt.amount,
+            details: {
+              masterId: alt.masterId,
+              oldAlterId: alt.oldAlterId,
+              newAlterId: alt.newAlterId,
+              source: 'Tally Prime'
+            },
+            status: 'success'
+          });
+        } catch (logErr) {
+          console.error('Error logging Tally alteration:', logErr.message);
+        }
+      }
+
+      if (alterations.length > 0) {
+        console.log(`Detected ${alterations.length} vouchers altered in Tally Prime`);
       }
 
       // Batch upsert all bills
@@ -570,13 +627,44 @@ class SyncService {
       // Broadcast update
       if (this.io) {
         this.io.emit('pendingSalesBills:updated', { count });
+        if (alterations.length > 0) {
+          this.io.emit('tallyAlterations:detected', { count: alterations.length, alterations });
+        }
       }
 
-      return { success: true, count, lastAlterId: maxAlterId };
+      // Background sync inventory for bills that don't have it (non-blocking)
+      this.syncInventoryInBackground(bills.slice(0, 10)); // Only first 10 to be fast
+
+      return { success: true, count, lastAlterId: maxAlterId, alterations: alterations.length };
     } catch (error) {
       console.error('Pending sales bills sync error:', error.message);
       return { success: false, error: error.message };
     }
+  }
+
+  /**
+   * Sync inventory data in background for faster print access
+   * Non-blocking - runs after bill sync completes
+   */
+  async syncInventoryInBackground(bills) {
+    if (!bills || bills.length === 0) return;
+
+    // Run in background without blocking
+    setTimeout(async () => {
+      for (const bill of bills) {
+        try {
+          // Skip if already has inventory
+          if (db.hasBillInventoryItems(bill.masterId)) continue;
+
+          const details = await tallyConnector.getVoucherInventoryDetails(bill.masterId);
+          if (details && details.items && details.items.length > 0) {
+            db.upsertBillInventoryItems(bill.masterId, details.items);
+          }
+        } catch (err) {
+          // Ignore errors in background sync
+        }
+      }
+    }, 100);
   }
 
   /**

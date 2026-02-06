@@ -28,13 +28,19 @@ import {
   ChevronRight,
   ChevronDown,
   Printer,
-  History
+  History,
+  Plus,
+  MessageSquare,
+  Eye,
+  EyeOff
 } from 'lucide-react';
+import { adStringToBS, getTodayBSFormatted } from '../utils/nepaliDate';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const CACHE_KEY = 'pendingBills_cache';
 const CACHE_DURATION = 60000; // 1 minute cache
 const PAGE_SIZE = 50; // Show 50 items at a time
+const MAX_ALTER_KEY = 'maxAlterId_cache'; // Track last alterId for incremental sync
 
 export default function NewDashboard() {
   const [loading, setLoading] = useState(false);
@@ -47,6 +53,10 @@ export default function NewDashboard() {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedBill, setSelectedBill] = useState(null);
   const [displayCount, setDisplayCount] = useState(PAGE_SIZE);
+  const [maxAlterId, setMaxAlterId] = useState(0); // Track max alterId for incremental sync
+  const [syncing, setSyncing] = useState(false); // Show subtle sync indicator
+  const [showBills, setShowBills] = useState(true); // Toggle bills list visibility
+  const [activeTab, setActiveTab] = useState('bills'); // 'bills' or 'activity'
 
   // Tally connection status
   const [tallyStatus, setTallyStatus] = useState({ connected: false, checking: true });
@@ -72,11 +82,23 @@ export default function NewDashboard() {
   const [activities, setActivities] = useState([]);
   const [activityLoading, setActivityLoading] = useState(false);
 
+  // Offline invoice creation modal
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [newInvoice, setNewInvoice] = useState({
+    partyName: '',
+    amount: '',
+    narration: ''
+  });
+  const [creatingInvoice, setCreatingInvoice] = useState(false);
+
+  // Web narration for payment
+  const [webNarration, setWebNarration] = useState('');
+
   // Refs for performance
   const searchTimeoutRef = useRef(null);
   const abortControllerRef = useRef(null);
 
-  // Load cached data immediately on mount
+  // Load cached data immediately on mount + setup fast sync
   useEffect(() => {
     loadCachedBills();
     checkTallyStatus();
@@ -84,16 +106,24 @@ export default function NewDashboard() {
     // Load fresh data in background
     loadPendingBills(false);
 
-    const interval = setInterval(checkTallyStatus, 30000);
+    // Check tally status every 15 seconds (faster than before)
+    const statusInterval = setInterval(checkTallyStatus, 15000);
+
+    // Auto-refresh bills every 8 seconds for faster sync
+    const syncInterval = setInterval(() => {
+      loadPendingBills(false);
+    }, 8000);
+
     return () => {
-      clearInterval(interval);
+      clearInterval(statusInterval);
+      clearInterval(syncInterval);
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
     };
   }, []);
 
-  // Debounced search - wait 300ms after user stops typing
+  // Debounced search - wait 150ms after user stops typing (faster)
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
@@ -101,7 +131,7 @@ export default function NewDashboard() {
     searchTimeoutRef.current = setTimeout(() => {
       setDebouncedSearch(searchQuery);
       setDisplayCount(PAGE_SIZE); // Reset pagination on new search
-    }, 300);
+    }, 150);
 
     return () => {
       if (searchTimeoutRef.current) {
@@ -110,15 +140,22 @@ export default function NewDashboard() {
     };
   }, [searchQuery]);
 
-  // Load from localStorage cache
+  // Load from localStorage cache - INSTANTLY shows cached bills
   const loadCachedBills = useCallback(() => {
     try {
       const cached = localStorage.getItem(CACHE_KEY);
       if (cached) {
-        const { data, timestamp } = JSON.parse(cached);
-        if (Date.now() - timestamp < CACHE_DURATION * 5) { // Use cache up to 5 min old
+        const { data, timestamp, alterId } = JSON.parse(cached);
+        // Always show cached data immediately - even if old
+        if (data && data.length > 0) {
           setPendingBills(data);
+          if (alterId) setMaxAlterId(alterId);
         }
+      }
+      // Also load cached maxAlterId
+      const cachedAlterId = localStorage.getItem(MAX_ALTER_KEY);
+      if (cachedAlterId) {
+        setMaxAlterId(parseInt(cachedAlterId, 10));
       }
     } catch (e) {
       console.warn('Cache read error:', e);
@@ -126,12 +163,16 @@ export default function NewDashboard() {
   }, []);
 
   // Save to localStorage cache
-  const saveCachedBills = useCallback((bills) => {
+  const saveCachedBills = useCallback((bills, alterId) => {
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify({
         data: bills,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        alterId: alterId
       }));
+      if (alterId) {
+        localStorage.setItem(MAX_ALTER_KEY, alterId.toString());
+      }
     } catch (e) {
       console.warn('Cache write error:', e);
     }
@@ -149,7 +190,7 @@ export default function NewDashboard() {
     }
   }, []);
 
-  const loadPendingBills = useCallback(async (showLoading = true) => {
+  const loadPendingBills = useCallback(async (fullRefresh = false) => {
     // Abort previous request if still pending
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -157,17 +198,58 @@ export default function NewDashboard() {
     abortControllerRef.current = new AbortController();
 
     try {
-      if (showLoading) setLoading(true);
+      // Only show loading on manual full refresh, use subtle syncing for auto-refresh
+      if (fullRefresh) {
+        setLoading(true);
+      } else {
+        setSyncing(true);
+      }
 
-      const res = await fetch(`${API_BASE}/api/pending-sales-bills`, {
+      // Use incremental fetch if we have existing bills and not forcing full refresh
+      const useIncremental = !fullRefresh && maxAlterId > 0 && pendingBills.length > 0;
+      const url = useIncremental
+        ? `${API_BASE}/api/pending-sales-bills?since_alter_id=${maxAlterId}`
+        : `${API_BASE}/api/pending-sales-bills`;
+
+      const res = await fetch(url, {
         signal: abortControllerRef.current.signal
       });
       const data = await res.json();
 
       if (data.success) {
-        const bills = data.bills || [];
-        setPendingBills(bills);
-        saveCachedBills(bills);
+        const newBills = data.bills || [];
+
+        if (useIncremental && newBills.length > 0) {
+          // Merge new/updated bills into existing list
+          setPendingBills(prev => {
+            const billMap = new Map(prev.map(b => [b.masterId, b]));
+            // Update existing or add new bills
+            newBills.forEach(bill => {
+              billMap.set(bill.masterId, bill);
+            });
+            // Convert back to array and sort by date desc
+            const merged = Array.from(billMap.values());
+            merged.sort((a, b) => {
+              const dateCompare = (b.date || '').localeCompare(a.date || '');
+              if (dateCompare !== 0) return dateCompare;
+              return (b.alterId || 0) - (a.alterId || 0);
+            });
+            return merged;
+          });
+        } else if (!useIncremental) {
+          // Full refresh - replace all bills
+          setPendingBills(newBills);
+        }
+
+        // Update maxAlterId
+        if (data.maxAlterId && data.maxAlterId > maxAlterId) {
+          setMaxAlterId(data.maxAlterId);
+        }
+
+        // Save to cache (use current state for incremental)
+        if (!useIncremental) {
+          saveCachedBills(newBills, data.maxAlterId);
+        }
       }
     } catch (error) {
       if (error.name !== 'AbortError') {
@@ -175,8 +257,9 @@ export default function NewDashboard() {
       }
     } finally {
       setLoading(false);
+      setSyncing(false);
     }
-  }, [saveCachedBills]);
+  }, [saveCachedBills, maxAlterId, pendingBills.length]);
 
   // Memoized filtered bills - only recalculates when search or bills change
   const filteredBills = useMemo(() => {
@@ -264,6 +347,7 @@ export default function NewDashboard() {
       bankDeposit: '',
       esewa: ''
     });
+    setWebNarration('');
     setMessage(null);
   }, []);
 
@@ -316,6 +400,7 @@ export default function NewDashboard() {
           date: selectedBill.date,
           voucherNumber: selectedBill.voucherNumber,
           guid: selectedBill.guid,
+          webNarration: webNarration || '',
           paymentModes: {
             cashTeller1: parseFloat(paymentModes.cashTeller1) || 0,
             cashTeller2: parseFloat(paymentModes.cashTeller2) || 0,
@@ -352,28 +437,29 @@ export default function NewDashboard() {
     return filteredBills.reduce((sum, b) => sum + (b.amount || 0), 0);
   }, [filteredBills]);
 
-  // Load bill with inventory for printing
+  // Load bill with inventory for printing - show bill immediately, load inventory in background
   const loadBillForPrint = useCallback(async (bill) => {
-    setPrintLoading(true);
     setPrintModalOpen(true);
-    setPrintBill(null);
+    // Show basic bill info immediately
+    setPrintBill(bill);
+    setPrintLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/pending-sales-bills/${bill.masterId}/inventory`);
+      const res = await fetch(`${API_BASE}/api/pending-sales-bills/${bill.masterId}/inventory`, {
+        signal: AbortSignal.timeout(8000) // 8 second timeout for inventory
+      });
       const data = await res.json();
 
-      if (data.success) {
-        setPrintBill({
-          ...bill,
+      if (data.success && data.bill) {
+        // Update with inventory data
+        setPrintBill(prev => ({
+          ...prev,
           ...data.bill
-        });
-      } else {
-        // If no inventory, just use basic bill info
-        setPrintBill(bill);
+        }));
       }
     } catch (error) {
-      console.error('Error loading bill for print:', error);
-      setPrintBill(bill); // Show basic info on error
+      // Keep showing basic bill info on error
+      console.log('Inventory load skipped:', error.message);
     } finally {
       setPrintLoading(false);
     }
@@ -435,47 +521,113 @@ export default function NewDashboard() {
     setActivityOpen(prev => !prev);
   }, [activityOpen, loadActivities]);
 
-  // Bill row component - for performance
+  // CREATE OFFLINE INVOICE - Creates a pending sales bill locally when Tally is offline
+  const createOfflineInvoice = useCallback(async () => {
+    if (!newInvoice.partyName || !newInvoice.amount) {
+      setMessage({ type: 'error', text: 'Party name and amount are required' });
+      return;
+    }
+
+    setCreatingInvoice(true);
+    setMessage(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/pending-sales-bills/offline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          partyName: newInvoice.partyName,
+          amount: parseFloat(newInvoice.amount),
+          narration: newInvoice.narration || `Web Invoice - ${getTodayBSFormatted('nepali')}`
+        })
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setMessage({
+          type: 'success',
+          text: `Offline invoice created: ${data.voucherNumber}`
+        });
+        setCreateModalOpen(false);
+        setNewInvoice({ partyName: '', amount: '', narration: '' });
+        loadPendingBills(false);
+      } else {
+        setMessage({ type: 'error', text: data.error || 'Failed to create invoice' });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setCreatingInvoice(false);
+    }
+  }, [newInvoice, loadPendingBills]);
+
+  // Bill row component - for performance with narration and BS date
   const BillRow = useCallback(({ bill }) => {
     const isSelected = selectedBill?.masterId === bill.masterId;
+    const bsDate = adStringToBS(bill.date, 'nepali-short');
     return (
       <div
-        className={`p-3 transition-colors flex items-center gap-3 ${
+        className={`p-3 transition-colors ${
           isSelected
             ? 'bg-blue-50 border-l-4 border-blue-500'
             : 'hover:bg-gray-50'
         }`}
       >
-        <div className="flex-1 min-w-0 cursor-pointer" onClick={() => selectBill(bill)}>
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-gray-800 truncate">
-              {bill.partyName}
-            </span>
-            {bill.sflTot > 0 && (
-              <span className="px-1.5 py-0.5 bg-green-100 text-green-700 text-xs rounded">
-                Paid
+        <div className="flex items-center gap-2">
+          {/* Main Content - clickable */}
+          <div className="flex-1 min-w-0 cursor-pointer" onClick={() => selectBill(bill)}>
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-gray-800 truncate">
+                {bill.partyName}
               </span>
+              {bill.sflTot > 0 && (
+                <span className="px-1.5 py-0.5 bg-green-100 text-green-700 text-xs rounded">
+                  Paid
+                </span>
+              )}
+              {bill.isOffline && (
+                <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 text-xs rounded">
+                  Offline
+                </span>
+              )}
+            </div>
+            <div className="text-sm text-gray-500 flex items-center gap-2 flex-wrap">
+              <span className="font-mono">{bill.voucherNumber}</span>
+              <span>•</span>
+              <span>{bill.date}</span>
+              <span className="text-xs text-purple-600">({bsDate})</span>
+            </div>
+            {/* Show narration if exists */}
+            {bill.narration && (
+              <div className="text-xs text-gray-400 mt-0.5 truncate flex items-center gap-1">
+                <MessageSquare size={10} />
+                {bill.narration}
+              </div>
             )}
           </div>
-          <div className="text-sm text-gray-500 flex items-center gap-2">
-            <span>{bill.voucherNumber}</span>
-            <span>•</span>
-            <span>{bill.date}</span>
+
+          {/* Amount */}
+          <div className="text-right">
+            <div className="font-bold text-red-600">
+              Rs {bill.amount?.toLocaleString()}
+            </div>
+          </div>
+
+          {/* Quick Actions */}
+          <div className="flex items-center gap-1">
+            {/* Print */}
+            <button
+              onClick={(e) => { e.stopPropagation(); loadBillForPrint(bill); }}
+              className="p-1.5 hover:bg-gray-200 rounded text-gray-500 hover:text-blue-600"
+              title="Print Bill"
+            >
+              <Printer size={16} />
+            </button>
+            {/* Select */}
+            <ChevronRight size={18} className="text-gray-400 cursor-pointer" onClick={() => selectBill(bill)} />
           </div>
         </div>
-        <div className="text-right cursor-pointer" onClick={() => selectBill(bill)}>
-          <div className="font-bold text-red-600">
-            Rs {bill.amount?.toLocaleString()}
-          </div>
-        </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); loadBillForPrint(bill); }}
-          className="p-1.5 hover:bg-gray-200 rounded text-gray-500 hover:text-blue-600"
-          title="Print Bill"
-        >
-          <Printer size={16} />
-        </button>
-        <ChevronRight size={18} className="text-gray-400 cursor-pointer" onClick={() => selectBill(bill)} />
       </div>
     );
   }, [selectedBill, selectBill, loadBillForPrint]);
@@ -488,6 +640,14 @@ export default function NewDashboard() {
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-bold text-gray-800">Pending Bills</h1>
             <div className="flex items-center gap-3">
+              {/* Sync Status - subtle indicator */}
+              {syncing && (
+                <div className="flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-blue-50 text-blue-600">
+                  <RefreshCw size={10} className="animate-spin" />
+                  <span>Syncing</span>
+                </div>
+              )}
+
               {/* Tally Status */}
               <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${
                 tallyStatus.checking
@@ -505,6 +665,24 @@ export default function NewDashboard() {
                 )}
                 <span>{tallyStatus.connected ? 'Online' : 'Offline'}</span>
               </div>
+
+              {/* Toggle Bills View */}
+              <button
+                onClick={() => setShowBills(prev => !prev)}
+                className={`p-2 rounded-lg ${showBills ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-100 text-gray-600'}`}
+                title={showBills ? 'Hide Bills' : 'Show Bills'}
+              >
+                {showBills ? <Eye size={18} /> : <EyeOff size={18} />}
+              </button>
+
+              {/* Create Offline Invoice */}
+              <button
+                onClick={() => setCreateModalOpen(true)}
+                className="p-2 hover:bg-gray-100 rounded-lg text-green-600"
+                title="Create Offline Invoice"
+              >
+                <Plus size={18} />
+              </button>
 
               {/* Activity Log */}
               <button
@@ -554,58 +732,94 @@ export default function NewDashboard() {
       )}
 
       <div className="max-w-7xl mx-auto p-4">
+        {/* Tabs */}
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => setActiveTab('bills')}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              activeTab === 'bills'
+                ? 'bg-blue-600 text-white'
+                : 'bg-white text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            Pending Bills ({filteredBills.length})
+          </button>
+          <button
+            onClick={() => { setActiveTab('activity'); loadActivities(); }}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 ${
+              activeTab === 'activity'
+                ? 'bg-purple-600 text-white'
+                : 'bg-white text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <History size={16} />
+            Tally Alterations
+          </button>
+        </div>
+
+        {activeTab === 'bills' ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           {/* Bills List */}
-          <div className="lg:col-span-2 bg-white rounded-lg shadow-sm overflow-hidden">
-            <div className="p-3 border-b bg-gray-50 flex items-center justify-between">
-              <span className="font-medium text-gray-700">
-                Pending Bills ({filteredBills.length})
-                {displayedBills.length < filteredBills.length && (
-                  <span className="text-gray-500 text-sm ml-1">
-                    showing {displayedBills.length}
-                  </span>
-                )}
-              </span>
-              <span className="text-sm text-gray-500">
-                Total: Rs {totalAmount.toLocaleString()}
+          <div className={`${showBills ? 'lg:col-span-2' : 'lg:col-span-1'} bg-white rounded-lg shadow-sm overflow-hidden`}>
+            {/* Header with toggle */}
+            <div
+              className="p-3 border-b bg-gray-50 flex items-center justify-between cursor-pointer hover:bg-gray-100 transition-colors"
+              onClick={() => setShowBills(prev => !prev)}
+            >
+              <div className="flex items-center gap-2">
+                {showBills ? <Eye size={16} className="text-blue-600" /> : <EyeOff size={16} className="text-gray-400" />}
+                <span className="font-medium text-gray-700">
+                  Bills List
+                  {!showBills && (
+                    <span className="text-xs text-blue-600 ml-2">Click to expand</span>
+                  )}
+                </span>
+              </div>
+              <span className="text-sm font-medium text-red-600">
+                Rs {totalAmount.toLocaleString()}
               </span>
             </div>
 
-            {loading && pendingBills.length === 0 ? (
-              <div className="p-8 text-center text-gray-500">
-                <RefreshCw size={24} className="animate-spin mx-auto mb-2" />
-                Loading...
-              </div>
-            ) : filteredBills.length === 0 ? (
-              <div className="p-8 text-center text-gray-500">
-                No pending bills found
-              </div>
-            ) : (
+            {/* Bills content - only show when expanded */}
+            {showBills && (
               <>
-                <div className="divide-y max-h-[60vh] overflow-y-auto">
-                  {displayedBills.map((bill) => (
-                    <BillRow key={bill.masterId} bill={bill} />
-                  ))}
-                </div>
-
-                {/* Load More Button */}
-                {hasMore && (
-                  <div className="p-3 border-t bg-gray-50">
-                    <button
-                      onClick={loadMore}
-                      className="w-full py-2 text-sm text-blue-600 hover:bg-blue-50 rounded flex items-center justify-center gap-1"
-                    >
-                      <ChevronDown size={16} />
-                      Load More ({filteredBills.length - displayedBills.length} remaining)
-                    </button>
+                {loading && pendingBills.length === 0 ? (
+                  <div className="p-8 text-center text-gray-500">
+                    <RefreshCw size={24} className="animate-spin mx-auto mb-2" />
+                    Loading...
                   </div>
+                ) : filteredBills.length === 0 ? (
+                  <div className="p-8 text-center text-gray-500">
+                    No pending bills found
+                  </div>
+                ) : (
+                  <>
+                    <div className="divide-y max-h-[60vh] overflow-y-auto">
+                      {displayedBills.map((bill) => (
+                        <BillRow key={bill.masterId} bill={bill} />
+                      ))}
+                    </div>
+
+                    {/* Load More Button */}
+                    {hasMore && (
+                      <div className="p-3 border-t bg-gray-50">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); loadMore(); }}
+                          className="w-full py-2 text-sm text-blue-600 hover:bg-blue-50 rounded flex items-center justify-center gap-1"
+                        >
+                          <ChevronDown size={16} />
+                          Load More ({filteredBills.length - displayedBills.length} remaining)
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )}
               </>
             )}
           </div>
 
           {/* Payment Panel */}
-          <div className="bg-white rounded-lg shadow-sm">
+          <div className={`${showBills ? '' : 'lg:col-span-2'} bg-white rounded-lg shadow-sm`}>
             {selectedBill ? (
               <>
                 {/* Selected Bill Info */}
@@ -718,6 +932,21 @@ export default function NewDashboard() {
                     </div>
                   </div>
 
+                  {/* Web Narration */}
+                  <div className="mt-3">
+                    <div className="text-xs text-gray-500 mb-1 flex items-center gap-1">
+                      <MessageSquare size={12} />
+                      Web Narration (optional)
+                    </div>
+                    <input
+                      type="text"
+                      value={webNarration}
+                      onChange={(e) => setWebNarration(e.target.value)}
+                      placeholder="Add note for this payment..."
+                      className="w-full p-1.5 border rounded text-sm"
+                    />
+                  </div>
+
                   {/* Summary */}
                   <div className="mt-3 p-2 bg-gray-100 rounded text-sm space-y-1">
                     <div className="flex justify-between">
@@ -769,6 +998,123 @@ export default function NewDashboard() {
             )}
           </div>
         </div>
+        ) : (
+          /* Activity Log Tab Content */
+          <div className="bg-white rounded-lg shadow-sm">
+            <div className="p-4 border-b bg-purple-50 flex items-center justify-between">
+              <h2 className="font-bold text-purple-800 flex items-center gap-2">
+                <History size={18} />
+                Recently Altered on Tally Prime
+              </h2>
+              <button
+                onClick={loadActivities}
+                className="p-2 hover:bg-purple-100 rounded"
+                disabled={activityLoading}
+              >
+                <RefreshCw size={16} className={activityLoading ? 'animate-spin' : ''} />
+              </button>
+            </div>
+
+            <div className="p-4">
+              {activityLoading ? (
+                <div className="p-8 text-center text-gray-500">
+                  <RefreshCw size={24} className="animate-spin mx-auto mb-2" />
+                  Loading activities...
+                </div>
+              ) : activities.length === 0 ? (
+                <div className="p-8 text-center text-gray-500">
+                  <History size={48} className="mx-auto mb-3 opacity-50" />
+                  <p className="text-sm">No altered vouchers found today</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {/* Summary Stats */}
+                  <div className="grid grid-cols-4 gap-3 mb-4">
+                    <div className="p-3 bg-purple-50 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-purple-700">
+                        {activities.filter(a => a.action_type === 'TALLY_ALTERATION').length}
+                      </div>
+                      <div className="text-xs text-purple-600">Tally Changes</div>
+                    </div>
+                    <div className="p-3 bg-green-50 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-green-700">
+                        {activities.filter(a => a.action_type === 'FULL_PAYMENT').length}
+                      </div>
+                      <div className="text-xs text-green-600">Full Payments</div>
+                    </div>
+                    <div className="p-3 bg-orange-50 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-orange-700">
+                        {activities.filter(a => a.action_type === 'PARTIAL_PAYMENT').length}
+                      </div>
+                      <div className="text-xs text-orange-600">Partial Payments</div>
+                    </div>
+                    <div className="p-3 bg-blue-50 rounded-lg text-center">
+                      <div className="text-2xl font-bold text-blue-700">
+                        Rs {activities.reduce((sum, a) => sum + (a.amount || 0), 0).toLocaleString()}
+                      </div>
+                      <div className="text-xs text-blue-600">Total Collected</div>
+                    </div>
+                  </div>
+
+                  {/* Activity List */}
+                  <div className="divide-y max-h-[60vh] overflow-y-auto">
+                    {activities.map((act) => (
+                      <div key={act.id} className={`p-3 hover:bg-gray-50 ${
+                        act.status === 'success' ? '' : 'bg-red-50'
+                      }`}>
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                act.action_type === 'TALLY_ALTERATION' ? 'bg-purple-200 text-purple-800' :
+                                act.action_type === 'FULL_PAYMENT' ? 'bg-green-200 text-green-800' :
+                                act.action_type === 'PARTIAL_PAYMENT' ? 'bg-orange-200 text-orange-800' :
+                                act.action_type === 'FULL_CREDIT' ? 'bg-blue-200 text-blue-800' :
+                                'bg-gray-200 text-gray-800'
+                              }`}>
+                                {act.action_type === 'TALLY_ALTERATION' ? 'Tally Change' : act.action_type?.replace('_', ' ')}
+                              </span>
+                              {act.status !== 'success' && (
+                                <span className="px-2 py-0.5 bg-red-200 text-red-800 rounded text-xs">
+                                  {act.status}
+                                </span>
+                              )}
+                            </div>
+                            <div className="font-medium text-gray-800">{act.party_name}</div>
+                            <div className="text-sm text-gray-500 flex items-center gap-2">
+                              <span className="font-mono">{act.voucher_number}</span>
+                              {act.master_id && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-xs">ID: {act.master_id}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            {act.amount > 0 && (
+                              <div className="font-bold text-green-600">
+                                Rs {act.amount?.toLocaleString()}
+                              </div>
+                            )}
+                            <div className="text-xs text-gray-400">
+                              {new Date(act.created_at).toLocaleTimeString()}
+                            </div>
+                          </div>
+                        </div>
+                        {act.error_message && (
+                          <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded">
+                            {act.error_message}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Activity Log Panel */}
@@ -924,6 +1270,105 @@ export default function NewDashboard() {
                 No bill data available
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Create Offline Invoice Modal */}
+      {createModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 z-30 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="p-4 border-b flex items-center justify-between bg-green-50">
+              <h2 className="font-bold text-green-800 flex items-center gap-2">
+                <Plus size={18} />
+                Create Offline Invoice
+              </h2>
+              <button onClick={() => setCreateModalOpen(false)} className="p-1 hover:bg-green-100 rounded">
+                <X size={18} className="text-green-600" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {/* Today's Date */}
+              <div className="text-center text-sm text-gray-600">
+                आज: {getTodayBSFormatted('nepali')}
+              </div>
+
+              {/* Party Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Party Name *
+                </label>
+                <input
+                  type="text"
+                  value={newInvoice.partyName}
+                  onChange={(e) => setNewInvoice(prev => ({ ...prev, partyName: e.target.value }))}
+                  placeholder="Enter party/customer name"
+                  className="w-full p-2 border rounded focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                  autoFocus
+                />
+              </div>
+
+              {/* Amount */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Amount (Rs) *
+                </label>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  value={newInvoice.amount}
+                  onChange={(e) => setNewInvoice(prev => ({ ...prev, amount: e.target.value }))}
+                  placeholder="0"
+                  className="w-full p-2 border rounded text-right font-mono focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                />
+              </div>
+
+              {/* Narration */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Narration
+                </label>
+                <textarea
+                  value={newInvoice.narration}
+                  onChange={(e) => setNewInvoice(prev => ({ ...prev, narration: e.target.value }))}
+                  placeholder="Web Invoice - बैशाख २०८१..."
+                  rows={2}
+                  className="w-full p-2 border rounded focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                />
+              </div>
+
+              {/* Info */}
+              <div className="text-xs text-yellow-700 bg-yellow-50 p-2 rounded">
+                ⚠️ This creates a local pending sales bill. When Tally comes online, sync manually to create in Tally.
+              </div>
+            </div>
+
+            <div className="p-4 border-t bg-gray-50 flex gap-2">
+              <button
+                onClick={() => setCreateModalOpen(false)}
+                className="flex-1 py-2 px-4 border border-gray-300 rounded text-gray-700 hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={createOfflineInvoice}
+                disabled={creatingInvoice || !newInvoice.partyName || !newInvoice.amount}
+                className="flex-1 py-2 px-4 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {creatingInvoice ? (
+                  <>
+                    <RefreshCw size={16} className="animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Plus size={16} />
+                    Create Invoice
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

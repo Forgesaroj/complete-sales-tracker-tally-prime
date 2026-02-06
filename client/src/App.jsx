@@ -14,7 +14,8 @@ import {
   X,
   FilePlus,
   Receipt,
-  CreditCard
+  CreditCard,
+  Wallet
 } from 'lucide-react';
 
 import socket from './utils/socket';
@@ -29,6 +30,7 @@ import SettingsPage from './pages/Settings';
 import Invoice from './pages/Invoice';
 import ReceiptPage from './pages/Receipt';
 import NewDashboard from './pages/NewDashboard';
+import Fonepay from './pages/Fonepay';
 
 function App() {
   const { t, i18n } = useTranslation();
@@ -104,6 +106,7 @@ function App() {
   const navItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: t('nav.dashboard') },
     { id: 'newdashboard', icon: CreditCard, label: t('nav.newdashboard', 'Payment Board') },
+    { id: 'fonepay', icon: Wallet, label: 'Fonepay' },
     { id: 'invoice', icon: FilePlus, label: t('nav.invoice', 'Create Invoice') },
     { id: 'receipt', icon: Receipt, label: t('nav.receipt', 'Receipt') },
     { id: 'bills', icon: FileText, label: t('nav.bills') },
@@ -118,6 +121,8 @@ function App() {
         return <Dashboard isSimpleMode={isSimpleMode} />;
       case 'newdashboard':
         return <NewDashboard />;
+      case 'fonepay':
+        return <Fonepay />;
       case 'invoice':
         return <Invoice />;
       case 'receipt':

@@ -13,7 +13,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname } from 'path';
 import os from 'os';
 
 import config from './config/default.js';
@@ -42,9 +42,6 @@ app.set('io', io);
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-// Serve static files (React build in public folder)
-app.use(express.static(join(__dirname, '../public')));
 
 // API Routes
 app.use('/api', apiRoutes);
@@ -77,13 +74,6 @@ io.on('connection', (socket) => {
     const result = await syncService.syncNow();
     socket.emit('sync:complete', result);
   });
-});
-
-// Catch-all for SPA routing (serve index.html for non-API routes)
-app.get('*', (req, res) => {
-  if (!req.path.startsWith('/api')) {
-    res.sendFile(join(__dirname, '../public/index.html'));
-  }
 });
 
 // Error handling middleware

@@ -19,6 +19,7 @@ import os from 'os';
 import config from './config/default.js';
 import { db } from './services/database.js';
 import { syncService } from './services/syncService.js';
+import { fonepayService } from './services/fonepayService.js';
 import apiRoutes from './routes/api.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -149,22 +150,40 @@ async function start() {
     }, 10000);
   }
 
+  // Start Fonepay sync service (if configured)
+  console.log('\n[4/4] Starting Fonepay sync service...');
+  fonepayService.setSocketIO(io);
+
+  if (process.env.FONEPAY_USERNAME && process.env.FONEPAY_PASSWORD) {
+    const fonepayStarted = await fonepayService.start();
+    if (fonepayStarted) {
+      console.log('✓ Fonepay sync service started (interval: 1 hour)');
+    } else {
+      console.log('⚠ Fonepay sync failed to start');
+    }
+  } else {
+    console.log('⚠ Fonepay credentials not configured');
+    console.log('  Set FONEPAY_USERNAME and FONEPAY_PASSWORD in .env to enable');
+  }
+
   console.log('\n' + '═'.repeat(50));
   console.log('  Server ready!');
   console.log('═'.repeat(50) + '\n');
 }
 
 // Handle graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('\nShutting down...');
   syncService.stop();
+  await fonepayService.stop();
   db.close();
   process.exit(0);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('\nShutting down...');
   syncService.stop();
+  await fonepayService.stop();
   db.close();
   process.exit(0);
 });

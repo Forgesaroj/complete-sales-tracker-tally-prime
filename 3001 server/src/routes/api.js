@@ -71,6 +71,57 @@ router.get('/bills/pending', (req, res) => {
 });
 
 /**
+ * GET /api/vouchers
+ * Get vouchers by type (Sales, Credit Sales, etc.)
+ * Query params:
+ *   - types: comma-separated voucher types (e.g., "Sales,Credit Sales")
+ *   - limit: max number of results (default 200)
+ */
+router.get('/vouchers', (req, res) => {
+  try {
+    const { types, limit } = req.query;
+    let vouchers;
+
+    if (types) {
+      const typeList = types.split(',').map(t => t.trim());
+      vouchers = db.getRecentBillsByTypes(typeList, parseInt(limit) || 200);
+    } else {
+      vouchers = db.getRecentBills(parseInt(limit) || 200);
+    }
+
+    // Transform to frontend format
+    const formattedVouchers = vouchers.map(v => ({
+      id: v.id,
+      masterId: v.master_id || v.id,
+      guid: v.tally_guid,
+      voucherNumber: v.voucher_number,
+      date: v.voucher_date,
+      partyName: v.party_name,
+      amount: v.amount,
+      voucherType: v.voucher_type,
+      paymentStatus: v.payment_status,
+      alterId: v.alter_id || 0,
+      sfl1: v.sfl1 || 0,
+      sfl2: v.sfl2 || 0,
+      sfl3: v.sfl3 || 0,
+      sfl4: v.sfl4 || 0,
+      sfl5: v.sfl5 || 0,
+      sfl6: v.sfl6 || 0,
+      sfl7: v.sfl7 || 0,
+      sflTot: v.sfl_tot || 0
+    }));
+
+    res.json({
+      success: true,
+      count: formattedVouchers.length,
+      vouchers: formattedVouchers
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /api/bills/:id
  * Get single bill with receipts
  */
@@ -442,6 +493,32 @@ router.get('/sync/status', (req, res) => {
 });
 
 /**
+ * POST /api/sync/stop
+ * Stop the automatic sync service
+ */
+router.post('/sync/stop', (req, res) => {
+  try {
+    syncService.stop();
+    res.json({ success: true, message: 'Sync service stopped', isRunning: syncService.isRunning });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/sync/start
+ * Start the automatic sync service
+ */
+router.post('/sync/start', async (req, res) => {
+  try {
+    const result = await syncService.start();
+    res.json({ success: result, message: result ? 'Sync service started' : 'Failed to start sync service', isRunning: syncService.isRunning });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /api/sync/trigger
  * Manually trigger sync (today only)
  */
@@ -590,6 +667,988 @@ router.get('/tally/status', async (req, res) => {
     const status = await tallyConnector.checkConnection();
     res.json(status);
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/tally/debug-ledger-vouchers
+ * Debug endpoint to test ledger voucher fetching directly
+ */
+router.get('/tally/debug-ledger-vouchers', async (req, res) => {
+  try {
+    const { ledger } = req.query;
+    if (!ledger) {
+      return res.status(400).json({ error: 'ledger query param required' });
+    }
+    console.log('DEBUG: Fetching ledger vouchers for:', ledger);
+    const vouchers = await tallyConnector.getLedgerVouchers(ledger);
+    console.log('DEBUG: Got vouchers:', vouchers.length);
+    res.json({
+      ledger,
+      count: vouchers.length,
+      vouchers: vouchers.slice(0, 10) // Return first 10 for debugging
+    });
+  } catch (error) {
+    console.error('DEBUG ERROR:', error);
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
+/**
+ * GET /api/all-vouchers
+ * Get all vouchers from LOCAL DATABASE (fast loading)
+ * First loads from cache, then optionally refreshes from Tally
+ * Query params:
+ *   - refresh: 'true' to force sync from Tally
+ *   - search: search query for party name or voucher number
+ *   - type: filter by voucher type
+ *   - limit: max results (default 500)
+ */
+router.get('/all-vouchers', async (req, res) => {
+  try {
+    const { refresh, search, type, limit } = req.query;
+    const maxLimit = parseInt(limit) || 500;
+
+    // Check if we need to refresh from Tally
+    const currentCount = db.getAllVouchersCount();
+    const syncState = db.getAllVouchersSyncState();
+
+    if (refresh === 'true' || currentCount === 0) {
+      // Sync from Tally
+      const connectionStatus = await tallyConnector.checkConnection();
+      if (connectionStatus.connected) {
+        console.log('Syncing all vouchers from Tally to database...');
+
+        const toDate = tallyConnector.formatDate(new Date());
+        const fromDate = tallyConnector.formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+
+        const vouchers = await tallyConnector.getVouchers(fromDate, toDate, null);
+        if (vouchers && vouchers.length > 0) {
+          db.upsertAllVouchers(vouchers);
+          db.updateAllVouchersSyncState(vouchers.length, fromDate, toDate);
+          console.log(`Synced ${vouchers.length} vouchers to database`);
+        }
+      } else if (currentCount === 0) {
+        return res.status(503).json({
+          success: false,
+          error: 'Tally not connected and no cached data available'
+        });
+      }
+    }
+
+    // Get vouchers from database (fast)
+    let vouchers;
+    if (search) {
+      vouchers = db.searchAllVouchers(search, maxLimit);
+    } else if (type) {
+      vouchers = db.getVouchersByType(type, maxLimit);
+    } else {
+      vouchers = db.getAllVouchers(maxLimit);
+    }
+
+    // Transform to frontend format
+    const formattedVouchers = vouchers.map(v => ({
+      masterId: v.master_id,
+      guid: v.guid,
+      voucherNumber: v.voucher_number,
+      date: v.voucher_date,
+      partyName: v.party_name,
+      amount: v.amount,
+      voucherType: v.voucher_type,
+      alterId: v.alter_id || 0,
+      narration: v.narration
+    }));
+
+    res.json({
+      success: true,
+      count: formattedVouchers.length,
+      totalCached: db.getAllVouchersCount(),
+      lastSync: syncState?.last_sync_time,
+      fromDate: syncState?.from_date,
+      toDate: syncState?.to_date,
+      vouchers: formattedVouchers
+    });
+  } catch (error) {
+    console.error('Error fetching all vouchers:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/all-vouchers/sync
+ * Force sync all vouchers from Tally to local database
+ * BATCHED: Fetches 7 days at a time to prevent Tally memory crashes
+ */
+router.post('/all-vouchers/sync', async (req, res) => {
+  try {
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected'
+      });
+    }
+
+    const { days = 30 } = req.body;
+    const BATCH_DAYS = 7; // Fetch 7 days at a time to prevent memory issues
+    const DELAY_MS = 500; // 500ms delay between batches
+
+    const endDate = new Date();
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    let totalVouchers = 0;
+    let currentEnd = new Date(endDate);
+
+    console.log(`Syncing vouchers in ${BATCH_DAYS}-day batches from ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]}...`);
+
+    // Process in batches from newest to oldest
+    while (currentEnd > startDate) {
+      const batchStart = new Date(Math.max(currentEnd.getTime() - BATCH_DAYS * 24 * 60 * 60 * 1000, startDate.getTime()));
+
+      const fromDate = tallyConnector.formatDate(batchStart);
+      const toDate = tallyConnector.formatDate(currentEnd);
+
+      console.log(`  Batch: ${fromDate} to ${toDate}...`);
+
+      try {
+        const vouchers = await tallyConnector.getVouchers(fromDate, toDate, null);
+
+        if (vouchers && vouchers.length > 0) {
+          db.upsertAllVouchers(vouchers);
+          totalVouchers += vouchers.length;
+          console.log(`    Fetched ${vouchers.length} vouchers`);
+        }
+      } catch (batchError) {
+        console.error(`    Batch error: ${batchError.message}`);
+        // Continue with next batch even if one fails
+      }
+
+      // Move to next batch
+      currentEnd = new Date(batchStart.getTime() - 1);
+
+      // Small delay to let Tally recover
+      if (currentEnd > startDate) {
+        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+      }
+    }
+
+    // Update sync state
+    const finalFromDate = tallyConnector.formatDate(startDate);
+    const finalToDate = tallyConnector.formatDate(endDate);
+    db.updateAllVouchersSyncState(totalVouchers, finalFromDate, finalToDate);
+
+    res.json({
+      success: true,
+      count: totalVouchers,
+      fromDate: finalFromDate,
+      toDate: finalToDate,
+      message: `Synced ${totalVouchers} vouchers to database (batched)`
+    });
+  } catch (error) {
+    console.error('Error syncing all vouchers:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/all-vouchers/sync-incremental
+ * Incremental sync - only fetch vouchers with AlterID greater than last sync
+ * This is lightweight and won't crash Tally
+ */
+router.post('/all-vouchers/sync-incremental', async (req, res) => {
+  try {
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected'
+      });
+    }
+
+    // Get last alter_id from sync state
+    const lastAlterId = db.getLastVoucherAlterId();
+    console.log(`Incremental voucher sync: fetching vouchers with AlterID > ${lastAlterId}`);
+
+    // Fetch only new/modified vouchers
+    const vouchers = await tallyConnector.getVouchersIncremental(lastAlterId);
+
+    if (vouchers && vouchers.length > 0) {
+      // Find max alter_id from fetched vouchers
+      let maxAlterId = lastAlterId;
+      for (const v of vouchers) {
+        const alterId = parseInt(v.alterId) || 0;
+        if (alterId > maxAlterId) maxAlterId = alterId;
+      }
+
+      // Save to database
+      db.upsertAllVouchers(vouchers);
+
+      // Update sync state with new max alter_id
+      const count = db.getAllVouchersCount();
+      db.updateVoucherAlterId(maxAlterId);
+
+      console.log(`Incremental sync complete: ${vouchers.length} new/modified vouchers, maxAlterId=${maxAlterId}`);
+
+      res.json({
+        success: true,
+        count: vouchers.length,
+        totalCount: count,
+        lastAlterId: maxAlterId,
+        message: `Synced ${vouchers.length} new/modified vouchers`
+      });
+    } else {
+      res.json({
+        success: true,
+        count: 0,
+        totalCount: db.getAllVouchersCount(),
+        lastAlterId,
+        message: 'No new vouchers to sync'
+      });
+    }
+  } catch (error) {
+    console.error('Error in incremental voucher sync:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/all-vouchers/recent
+ * Get recently altered vouchers (ordered by alter_id DESC)
+ */
+router.get('/all-vouchers/recent', (req, res) => {
+  try {
+    const { limit = 100 } = req.query;
+    const vouchers = db.getRecentlyAlteredVouchers(parseInt(limit));
+    const syncState = db.getAllVouchersSyncState();
+
+    res.json({
+      success: true,
+      count: vouchers.length,
+      totalCount: db.getAllVouchersCount(),
+      lastAlterId: syncState?.last_alter_id || 0,
+      lastSyncTime: syncState?.last_sync_time,
+      vouchers
+    });
+  } catch (error) {
+    console.error('Error fetching recent vouchers:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/all-vouchers/state
+ * Get voucher sync state
+ */
+router.get('/all-vouchers/state', (req, res) => {
+  try {
+    const syncState = db.getAllVouchersSyncState();
+    const count = db.getAllVouchersCount();
+    const maxAlterId = db.getMaxVoucherAlterId();
+
+    res.json({
+      success: true,
+      count,
+      maxAlterId,
+      lastSyncedAlterId: syncState?.last_alter_id || 0,
+      lastSyncTime: syncState?.last_sync_time,
+      fromDate: syncState?.from_date,
+      toDate: syncState?.to_date
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/all-vouchers/sync-with-entries
+ * Sync vouchers with their ledger entries for local balance calculation
+ * Uses AlterID for incremental sync - only fetches new/modified vouchers
+ */
+router.post('/all-vouchers/sync-with-entries', async (req, res) => {
+  try {
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected'
+      });
+    }
+
+    // Get last synced AlterID
+    const lastAlterId = db.getLastVoucherAlterId();
+    console.log(`Syncing vouchers with ledger entries (AlterID > ${lastAlterId})...`);
+
+    // Fetch vouchers with ledger entries
+    const vouchers = await tallyConnector.getVouchersWithLedgerEntries(lastAlterId);
+
+    if (!vouchers || vouchers.length === 0) {
+      return res.json({
+        success: true,
+        count: 0,
+        newVouchers: 0,
+        alteredVouchers: 0,
+        ledgerEntriesCount: 0,
+        message: 'No new or altered vouchers to sync'
+      });
+    }
+
+    let newCount = 0;
+    let alteredCount = 0;
+    let maxAlterId = lastAlterId;
+    let totalLedgerEntries = 0;
+
+    // Process each voucher
+    for (const voucher of vouchers) {
+      // Check if voucher exists (altered) or new
+      const existingVoucher = db.db.prepare('SELECT master_id, alter_id FROM all_vouchers WHERE master_id = ?').get(voucher.masterId);
+
+      if (existingVoucher) {
+        alteredCount++;
+      } else {
+        newCount++;
+      }
+
+      // Upsert voucher
+      db.upsertAllVoucher(voucher);
+
+      // Upsert ledger entries
+      if (voucher.ledgerEntries && voucher.ledgerEntries.length > 0) {
+        db.upsertVoucherLedgerEntries(voucher.masterId, voucher.ledgerEntries, {
+          date: voucher.date,
+          voucherType: voucher.voucherType,
+          voucherNumber: voucher.voucherNumber,
+          alterId: voucher.alterId
+        });
+        totalLedgerEntries += voucher.ledgerEntries.length;
+      }
+
+      // Track max AlterID
+      if (voucher.alterId > maxAlterId) {
+        maxAlterId = voucher.alterId;
+      }
+    }
+
+    // Update sync state
+    db.updateVoucherAlterId(maxAlterId);
+
+    // Get updated counts
+    const voucherCount = db.getAllVouchersCount();
+    const ledgerEntriesCount = db.getVoucherLedgerEntriesCount();
+
+    res.json({
+      success: true,
+      count: vouchers.length,
+      newVouchers: newCount,
+      alteredVouchers: alteredCount,
+      ledgerEntriesCount: totalLedgerEntries,
+      totalVouchers: voucherCount,
+      totalLedgerEntries: ledgerEntriesCount,
+      lastAlterId: maxAlterId,
+      message: `Synced ${vouchers.length} vouchers (${newCount} new, ${alteredCount} altered) with ${totalLedgerEntries} ledger entries`
+    });
+  } catch (error) {
+    console.error('Error syncing vouchers with entries:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/all-vouchers/rebuild-entries
+ * Rebuild all ledger entries from Tally using date-based batches
+ * Fetches vouchers 7 days at a time to prevent Tally memory crash
+ */
+router.post('/all-vouchers/rebuild-entries', async (req, res) => {
+  try {
+    console.log('Rebuilding all voucher ledger entries from Tally (date-based batches)...');
+
+    // Clear existing entries
+    db.db.prepare('DELETE FROM voucher_ledger_entries').run();
+    console.log('Cleared existing ledger entries');
+
+    // Get the date range from synced vouchers
+    const syncState = db.getAllVouchersSyncState();
+    const fromDateStr = syncState?.from_date;
+    const toDateStr = syncState?.to_date;
+
+    if (!fromDateStr || !toDateStr) {
+      return res.json({
+        success: false,
+        message: 'No voucher date range found. Please sync vouchers first.'
+      });
+    }
+
+    // Parse dates (format: YYYYMMDD)
+    const parseYYYYMMDD = (str) => {
+      const y = parseInt(str.substring(0, 4));
+      const m = parseInt(str.substring(4, 6)) - 1;
+      const d = parseInt(str.substring(6, 8));
+      return new Date(y, m, d);
+    };
+
+    const formatYYYYMMDD = (date) => {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}${m}${d}`;
+    };
+
+    const BATCH_DAYS = 7;
+    const DELAY_MS = 500;
+
+    let startDate = parseYYYYMMDD(fromDateStr);
+    const endDate = parseYYYYMMDD(toDateStr);
+
+    let totalVouchers = 0;
+    let totalLedgerEntries = 0;
+    let batchCount = 0;
+    let maxAlterId = 0;
+
+    console.log(`Processing vouchers from ${fromDateStr} to ${toDateStr}`);
+
+    // Process in date batches
+    while (startDate <= endDate) {
+      const batchEnd = new Date(startDate);
+      batchEnd.setDate(batchEnd.getDate() + BATCH_DAYS - 1);
+      if (batchEnd > endDate) {
+        batchEnd.setTime(endDate.getTime());
+      }
+
+      const fromStr = formatYYYYMMDD(startDate);
+      const toStr = formatYYYYMMDD(batchEnd);
+
+      console.log(`Batch ${batchCount + 1}: Fetching ${fromStr} to ${toStr}...`);
+
+      const vouchers = await tallyConnector.getVouchersWithLedgerEntriesByDate(fromStr, toStr);
+      console.log(`  Got ${vouchers.length} vouchers with entries`);
+
+      // Process each voucher's ledger entries
+      for (const voucher of vouchers) {
+        if (voucher.ledgerEntries && voucher.ledgerEntries.length > 0) {
+          db.upsertVoucherLedgerEntries(voucher.masterId, voucher.ledgerEntries, {
+            date: voucher.date,
+            voucherType: voucher.voucherType,
+            voucherNumber: voucher.voucherNumber,
+            alterId: voucher.alterId,
+            guid: voucher.guid
+          });
+          totalLedgerEntries += voucher.ledgerEntries.length;
+        }
+
+        if (voucher.alterId > maxAlterId) {
+          maxAlterId = voucher.alterId;
+        }
+      }
+
+      totalVouchers += vouchers.length;
+      batchCount++;
+
+      // Move to next batch
+      startDate = new Date(batchEnd);
+      startDate.setDate(startDate.getDate() + 1);
+
+      // Delay between batches to let Tally breathe
+      if (startDate <= endDate) {
+        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+      }
+    }
+
+    const ledgerEntriesCount = db.getVoucherLedgerEntriesCount();
+
+    res.json({
+      success: true,
+      vouchersProcessed: totalVouchers,
+      ledgerEntriesCreated: totalLedgerEntries,
+      totalLedgerEntries: ledgerEntriesCount,
+      maxAlterId,
+      batchesProcessed: batchCount,
+      dateRange: { from: fromDateStr, to: toDateStr },
+      message: `Rebuilt ${ledgerEntriesCount} ledger entries from ${totalVouchers} vouchers in ${batchCount} batches`
+    });
+  } catch (error) {
+    console.error('Error rebuilding ledger entries:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/all-vouchers/test-fetch
+ * Test fetching vouchers with ledger entries from Tally (debug)
+ */
+router.get('/all-vouchers/test-fetch', async (req, res) => {
+  try {
+    const fromId = parseInt(req.query.from) || 150000;
+    const toId = parseInt(req.query.to) || 155000;
+
+    console.log(`Testing fetch: AlterID ${fromId} to ${toId}`);
+    const vouchers = await tallyConnector.getVouchersWithLedgerEntriesByRange(fromId, toId);
+
+    res.json({
+      success: true,
+      fromAlterId: fromId,
+      toAlterId: toId,
+      vouchersFound: vouchers.length,
+      sample: vouchers.slice(0, 3).map(v => ({
+        masterId: v.masterId,
+        alterId: v.alterId,
+        guid: v.guid,
+        voucherType: v.voucherType,
+        ledgerEntriesCount: v.ledgerEntries?.length || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Error testing fetch:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ledger/:name/balance
+ * Get ledger balance calculated from local voucher data
+ */
+router.get('/ledger/:name/balance', (req, res) => {
+  try {
+    const ledgerName = decodeURIComponent(req.params.name);
+    const { upToDate } = req.query;
+
+    const balance = db.calculateLedgerBalance(ledgerName, upToDate);
+    const entries = db.getLedgerEntries(ledgerName, 100);
+
+    res.json({
+      success: true,
+      ledgerName,
+      balance,
+      recentEntries: entries.length,
+      entries: entries.slice(0, 20) // Return first 20 for preview
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ledger/:name/entries
+ * Get all ledger entries from local voucher data
+ */
+router.get('/ledger/:name/entries', (req, res) => {
+  try {
+    const ledgerName = decodeURIComponent(req.params.name);
+    const { from, to, limit = 500 } = req.query;
+
+    let entries;
+    if (from && to) {
+      entries = db.getLedgerEntriesByDateRange(ledgerName, from, to);
+    } else {
+      entries = db.getLedgerEntries(ledgerName, parseInt(limit));
+    }
+
+    const balance = db.calculateLedgerBalance(ledgerName);
+
+    res.json({
+      success: true,
+      ledgerName,
+      count: entries.length,
+      balance,
+      entries
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ledgers/balances
+ * Get all ledger balances from local voucher data
+ */
+router.get('/ledgers/balances', (req, res) => {
+  try {
+    const balances = db.getAllLedgerBalances();
+    res.json({
+      success: true,
+      count: balances.length,
+      balances
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== CHART OF ACCOUNTS ====================
+
+/**
+ * GET /api/chart-of-accounts
+ * Get Chart of Accounts from LOCAL DATABASE (fast loading)
+ * Query params:
+ *   - refresh: 'true' to force sync from Tally
+ *   - search: search query for ledger name
+ */
+router.get('/chart-of-accounts', async (req, res) => {
+  try {
+    const { refresh, search } = req.query;
+
+    // Check if we need to refresh from Tally
+    const groupsCount = db.getAccountGroupsCount();
+    const ledgersCount = db.getAccountLedgersCount();
+    const syncState = db.getCOASyncState();
+
+    if (refresh === 'true' || (groupsCount === 0 && ledgersCount === 0)) {
+      // Sync from Tally
+      const connectionStatus = await tallyConnector.checkConnection();
+      if (connectionStatus.connected) {
+        console.log('Syncing Chart of Accounts from Tally...');
+
+        // Fetch groups and ledgers
+        const groups = await tallyConnector.getAllGroups();
+        const ledgers = await tallyConnector.getAllLedgers();
+
+        if (groups.length > 0) {
+          db.upsertAccountGroups(groups);
+        }
+        if (ledgers.length > 0) {
+          db.upsertAccountLedgers(ledgers);
+        }
+        db.updateCOASyncState(groups.length, ledgers.length);
+        console.log(`Synced ${groups.length} groups and ${ledgers.length} ledgers`);
+      } else if (groupsCount === 0 && ledgersCount === 0) {
+        return res.status(503).json({
+          success: false,
+          error: 'Tally not connected and no cached data available'
+        });
+      }
+    }
+
+    // Get data from database
+    let groups = db.getAllAccountGroups();
+    let ledgers;
+
+    if (search) {
+      ledgers = db.searchAccountLedgers(search);
+    } else {
+      ledgers = db.getAllAccountLedgers();
+    }
+
+    // Build hierarchy
+    const groupsMap = {};
+    groups.forEach(g => {
+      groupsMap[g.name] = {
+        ...g,
+        children: [],
+        ledgers: []
+      };
+    });
+
+    // Assign ledgers to groups
+    ledgers.forEach(l => {
+      if (groupsMap[l.parent]) {
+        groupsMap[l.parent].ledgers.push(l);
+      }
+    });
+
+    // Build group hierarchy
+    groups.forEach(g => {
+      if (g.parent && groupsMap[g.parent]) {
+        groupsMap[g.parent].children.push(groupsMap[g.name]);
+      }
+    });
+
+    // Get root groups (no parent or parent not in list)
+    const rootGroups = groups
+      .filter(g => !g.parent || !groupsMap[g.parent])
+      .map(g => groupsMap[g.name]);
+
+    res.json({
+      success: true,
+      groupsCount: db.getAccountGroupsCount(),
+      ledgersCount: db.getAccountLedgersCount(),
+      lastSync: syncState?.last_sync_time,
+      groups: rootGroups,
+      allGroups: groups,
+      allLedgers: ledgers
+    });
+  } catch (error) {
+    console.error('Error fetching chart of accounts:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/chart-of-accounts/sync
+ * Force sync Chart of Accounts from Tally
+ * Fetches groups first, then ledgers with a delay to prevent memory issues
+ */
+router.post('/chart-of-accounts/sync', async (req, res) => {
+  try {
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected'
+      });
+    }
+
+    console.log('Syncing Chart of Accounts from Tally...');
+
+    // Fetch groups first (smaller dataset)
+    console.log('  Fetching groups...');
+    const groups = await tallyConnector.getAllGroups();
+    if (groups.length > 0) {
+      db.upsertAccountGroups(groups);
+      console.log(`  Saved ${groups.length} groups`);
+    }
+
+    // Small delay before fetching ledgers
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Fetch ledgers (larger dataset)
+    console.log('  Fetching ledgers...');
+    const ledgers = await tallyConnector.getAllLedgers();
+    if (ledgers.length > 0) {
+      db.upsertAccountLedgers(ledgers);
+      console.log(`  Saved ${ledgers.length} ledgers`);
+    }
+
+    db.updateCOASyncState(groups.length, ledgers.length);
+
+    res.json({
+      success: true,
+      groupsCount: groups.length,
+      ledgersCount: ledgers.length,
+      message: `Synced ${groups.length} groups and ${ledgers.length} ledgers`
+    });
+  } catch (error) {
+    console.error('Error syncing chart of accounts:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/chart-of-accounts/ledgers
+ * Get all ledgers (flat list)
+ */
+router.get('/chart-of-accounts/ledgers', (req, res) => {
+  try {
+    const { group, search, withBalance } = req.query;
+
+    let ledgers;
+    if (search) {
+      ledgers = db.searchAccountLedgers(search);
+    } else if (group) {
+      ledgers = db.getLedgersByGroup(group);
+    } else if (withBalance === 'true') {
+      ledgers = db.getLedgersWithBalance();
+    } else {
+      ledgers = db.getAllAccountLedgers();
+    }
+
+    res.json({
+      success: true,
+      count: ledgers.length,
+      ledgers
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/chart-of-accounts/groups
+ * Get all groups
+ */
+router.get('/chart-of-accounts/groups', (req, res) => {
+  try {
+    const groups = db.getAllAccountGroups();
+    res.json({
+      success: true,
+      count: groups.length,
+      groups
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/chart-of-accounts/ledgers/:name/transactions
+ * Get ledger account book (transaction history) for a specific ledger
+ * First loads from cached vouchers in database (fast), then optionally fetches from Tally
+ * Query params:
+ *   - from: start date (YYYYMMDD)
+ *   - to: end date (YYYYMMDD)
+ *   - source: 'cache' (default) or 'tally' to force Tally fetch
+ */
+router.get('/chart-of-accounts/ledgers/:name/transactions', async (req, res) => {
+  try {
+    const ledgerName = decodeURIComponent(req.params.name);
+    const { from, to, source } = req.query;
+
+    let vouchers = [];
+
+    // If source=tally, fetch directly from Tally (with other ledger details)
+    if (source === 'tally') {
+      const connectionStatus = await tallyConnector.checkConnection();
+      if (connectionStatus.connected) {
+        vouchers = await tallyConnector.getLedgerVouchers(ledgerName, from, to);
+      }
+    }
+
+    // Otherwise use cached vouchers (fast but no other ledger details)
+    if (vouchers.length === 0 && source !== 'tally') {
+      const cachedVouchers = db.getVouchersByParty(ledgerName, 1000);
+      if (cachedVouchers && cachedVouchers.length > 0) {
+        // Voucher types that increase what party owes (Debit for party)
+        const debitVoucherTypes = ['Sales', 'Credit Sales', 'Pending Sales Bill', 'A PTO BILL', 'A Pto Bill', 'Journal'];
+        // Voucher types that decrease what party owes (Credit for party)
+        const creditVoucherTypes = ['Receipt', 'Bank Receipt', 'Counter Receipt', 'Dashboard Receipt', 'Payment'];
+
+        vouchers = cachedVouchers.map(v => {
+          const vType = v.voucher_type || '';
+          const amount = Math.abs(v.amount || 0);
+
+          // Determine debit/credit based on voucher type
+          const isDebitVoucher = debitVoucherTypes.some(t => vType.toLowerCase().includes(t.toLowerCase()));
+          const isCreditVoucher = creditVoucherTypes.some(t => vType.toLowerCase().includes(t.toLowerCase()));
+
+          return {
+            guid: v.guid,
+            masterId: v.master_id,
+            alterId: v.alter_id || 0,
+            date: v.voucher_date,
+            voucherType: v.voucher_type,
+            voucherNumber: v.voucher_number,
+            partyName: v.party_name,
+            // For cached vouchers, use narration as display (no other ledger info available)
+            otherLedgersDisplay: v.narration || '(Sync from Tally for details)',
+            amount: amount,
+            // Debit = party owes us more (Sales, Credit Sales, etc.)
+            // Credit = party owes us less (Receipt, Payment, etc.)
+            debit: isDebitVoucher ? amount : 0,
+            credit: isCreditVoucher ? amount : 0,
+            narration: v.narration || ''
+          };
+        });
+      }
+    }
+
+    // If no data found at all
+    if (vouchers.length === 0) {
+      const connectionStatus = await tallyConnector.checkConnection();
+      if (!connectionStatus.connected) {
+        return res.status(503).json({
+          success: false,
+          error: 'Tally is not connected and no cached data available'
+        });
+      }
+      vouchers = await tallyConnector.getLedgerVouchers(ledgerName, from, to);
+    }
+
+    // Sort by date descending
+    vouchers.sort((a, b) => {
+      const dateA = a.date || '';
+      const dateB = b.date || '';
+      return dateB.localeCompare(dateA);
+    });
+
+    // Calculate running balance (process from oldest to newest)
+    let runningBalance = 0;
+    const vouchersWithBalance = [...vouchers].reverse().map(v => {
+      runningBalance += (v.debit || 0) - (v.credit || 0);
+      return {
+        ...v,
+        runningBalance
+      };
+    }).reverse();
+
+    // Calculate totals
+    const totals = vouchers.reduce((acc, v) => ({
+      debit: acc.debit + (v.debit || 0),
+      credit: acc.credit + (v.credit || 0)
+    }), { debit: 0, credit: 0 });
+
+    res.json({
+      success: true,
+      ledgerName,
+      count: vouchers.length,
+      source: source === 'tally' ? 'tally' : (vouchers.length > 0 ? 'cache' : 'none'),
+      totals: {
+        ...totals,
+        netBalance: totals.debit - totals.credit
+      },
+      vouchers: vouchersWithBalance
+    });
+  } catch (error) {
+    console.error('Error fetching ledger transactions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/tally/vouchers
+ * Get all vouchers directly from Tally (with alterId)
+ * Also saves to local database for caching
+ * Query params:
+ *   - types: comma-separated voucher types (e.g., "Sales,Credit Sales,Contra,Journal,Payment,Receipt")
+ *            If not specified, returns ALL voucher types
+ *   - from: start date (YYYYMMDD)
+ *   - to: end date (YYYYMMDD)
+ */
+router.get('/tally/vouchers', async (req, res) => {
+  try {
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected'
+      });
+    }
+
+    const { types, from, to } = req.query;
+
+    // Default to last 30 days if no dates specified
+    const toDate = to || tallyConnector.formatDate(new Date());
+    const fromDate = from || tallyConnector.formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+
+    // Parse voucher types (null = fetch ALL voucher types)
+    const voucherTypes = types ? types.split(',').map(t => t.trim()) : null;
+
+    const vouchers = await tallyConnector.getVouchers(fromDate, toDate, voucherTypes);
+
+    // Transform to frontend format
+    const formattedVouchers = vouchers.map(v => ({
+      masterId: v.masterId,
+      guid: v.guid,
+      voucherNumber: v.voucherNumber,
+      date: v.date,
+      partyName: v.partyName,
+      amount: v.amount,
+      voucherType: v.voucherType,
+      alterId: v.alterId || 0,
+      narration: v.narration
+    }));
+
+    // Sort by alterId descending
+    formattedVouchers.sort((a, b) => (b.alterId || 0) - (a.alterId || 0));
+
+    // Save to database for caching (only if fetching all types)
+    if (!voucherTypes && vouchers.length > 0) {
+      try {
+        db.upsertAllVouchers(vouchers);
+        db.updateAllVouchersSyncState(vouchers.length, fromDate, toDate);
+        console.log(`Cached ${vouchers.length} vouchers to database`);
+      } catch (cacheErr) {
+        console.error('Error caching vouchers:', cacheErr.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      count: formattedVouchers.length,
+      fromDate,
+      toDate,
+      types: voucherTypes || 'All',
+      vouchers: formattedVouchers
+    });
+  } catch (error) {
+    console.error('Error fetching Tally vouchers:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1247,10 +2306,11 @@ router.get('/voucher-types', (req, res) => {
  * Query params:
  *   - refresh=true: Force sync from Tally before returning
  *   - search=query: Filter by party name
+ *   - since_alter_id=number: Only get bills with alterId > this value (incremental fetch)
  */
 router.get('/pending-sales-bills', async (req, res) => {
   try {
-    const { refresh, search } = req.query;
+    const { refresh, search, since_alter_id } = req.query;
 
     // If refresh requested or database is empty, sync from Tally
     const currentCount = db.getPendingSalesBillsCount();
@@ -1275,6 +2335,9 @@ router.get('/pending-sales-bills', async (req, res) => {
     let bills;
     if (search) {
       bills = db.searchPendingSalesBills(search);
+    } else if (since_alter_id) {
+      // Incremental fetch - only get new/changed bills
+      bills = db.getPendingSalesBillsSinceAlterId(parseInt(since_alter_id, 10));
     } else {
       bills = db.getAllPendingSalesBills();
     }
@@ -1296,14 +2359,20 @@ router.get('/pending-sales-bills', async (req, res) => {
       sfl5: bill.sfl5,
       sfl6: bill.sfl6,
       sfl7: bill.sfl7,
-      sflTot: bill.sfl_tot
+      sflTot: bill.sfl_tot,
+      isOffline: bill.is_offline === 1
     }));
+
+    // Get max alterId for incremental sync tracking
+    const maxAlterId = bills.length > 0 ? Math.max(...bills.map(b => b.alter_id || 0)) : 0;
 
     const syncState = db.getPSBSyncState();
     res.json({
       success: true,
       count: formattedBills.length,
       lastSync: syncState?.last_sync_time,
+      maxAlterId: maxAlterId,
+      isIncremental: !!since_alter_id,
       bills: formattedBills
     });
   } catch (error) {
@@ -1342,6 +2411,314 @@ router.post('/pending-sales-bills/sync', async (req, res) => {
   } catch (error) {
     console.error('Error syncing pending sales bills:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/pending-sales-bills/sync-udf
+ * Sync UDF fields from Tally for altered vouchers
+ * Checks UDF payment fields and marks bills as paid if sfl_tot >= amount
+ * Also logs activity and can auto-create receipts
+ */
+router.post('/pending-sales-bills/sync-udf', async (req, res) => {
+  try {
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected'
+      });
+    }
+
+    console.log('Syncing UDF fields from Tally...');
+
+    // Fetch all pending sales bills with UDF fields
+    const bills = await tallyConnector.getPendingSalesBills();
+
+    let updated = 0;
+    let paidCount = 0;
+    const paidBills = [];
+
+    for (const bill of bills) {
+      // Check if this bill has UDF payment data
+      const sflTot = bill.sflTot || 0;
+
+      if (sflTot > 0) {
+        // Update the bill with UDF fields
+        db.updatePSBUDFFields(bill.masterId, {
+          sfl1: bill.sfl1 || 0,
+          sfl2: bill.sfl2 || 0,
+          sfl3: bill.sfl3 || 0,
+          sfl4: bill.sfl4 || 0,
+          sfl5: bill.sfl5 || 0,
+          sfl6: bill.sfl6 || 0,
+          sfl7: bill.sfl7 || 0,
+          sflTot: sflTot
+        });
+        updated++;
+
+        // If fully paid (sfl_tot >= amount), log activity
+        if (sflTot >= bill.amount) {
+          paidCount++;
+          paidBills.push({
+            voucherNumber: bill.voucherNumber,
+            partyName: bill.partyName,
+            amount: bill.amount,
+            sflTot: sflTot
+          });
+
+          // Log the payment activity
+          db.logActivity({
+            actionType: 'UDF_PAYMENT_DETECTED',
+            voucherNumber: bill.voucherNumber,
+            partyName: bill.partyName,
+            amount: sflTot,
+            details: {
+              billAmount: bill.amount,
+              sfl1: bill.sfl1,
+              sfl2: bill.sfl2,
+              sfl3: bill.sfl3,
+              sfl4: bill.sfl4,
+              sfl5: bill.sfl5,
+              sfl6: bill.sfl6,
+              sfl7: bill.sfl7,
+              source: 'Tally UDF Sync'
+            },
+            status: 'success'
+          });
+        }
+      }
+    }
+
+    // Also upsert all bills to update any new ones
+    if (bills.length > 0) {
+      db.upsertPendingSalesBills(bills);
+    }
+
+    res.json({
+      success: true,
+      totalBills: bills.length,
+      updatedWithUDF: updated,
+      markedAsPaid: paidCount,
+      paidBills: paidBills,
+      message: `Synced ${bills.length} bills, ${updated} with UDF data, ${paidCount} marked as paid`
+    });
+  } catch (error) {
+    console.error('Error syncing UDF fields:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/pending-sales-bills/paid
+ * Get paid/completed pending sales bills (where sfl_tot >= amount)
+ */
+router.get('/pending-sales-bills/paid', (req, res) => {
+  try {
+    const paidBills = db.getPaidPendingSalesBills();
+    res.json({
+      success: true,
+      count: paidBills.length,
+      bills: paidBills
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/pending-sales-bills/offline
+ * Create an offline pending sales bill (when Tally is offline)
+ * This creates a local record that can be synced to Tally later
+ */
+router.post('/pending-sales-bills/offline', (req, res) => {
+  try {
+    const { partyName, amount, narration } = req.body;
+
+    if (!partyName || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Party name and amount are required'
+      });
+    }
+
+    // Generate offline voucher number with timestamp
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const timeStr = now.toISOString().slice(11, 19).replace(/:/g, '');
+    const voucherNumber = `WEB-${dateStr}-${timeStr}`;
+    const masterId = `offline-${Date.now()}`;
+
+    // Create offline bill record
+    const offlineBill = {
+      masterId: masterId,
+      guid: `OFFLINE-GUID-${masterId}`,
+      voucherNumber: voucherNumber,
+      date: now.toISOString().slice(0, 10),
+      partyName: partyName,
+      amount: parseFloat(amount),
+      voucherType: 'Pending Sales Bill',
+      narration: narration || `Web Invoice - ${now.toLocaleDateString('en-GB')}`,
+      alterId: 0,
+      sfl1: 0, sfl2: 0, sfl3: 0, sfl4: 0, sfl5: 0, sfl6: 0, sfl7: 0, sflTot: 0,
+      isOffline: 1
+    };
+
+    // Insert into database
+    db.upsertPendingSalesBills([offlineBill]);
+
+    // Log activity
+    try {
+      db.logActivity({
+        actionType: 'OFFLINE_INVOICE_CREATED',
+        voucherNumber: voucherNumber,
+        partyName: partyName,
+        amount: parseFloat(amount),
+        details: { narration, isOffline: true },
+        status: 'success'
+      });
+    } catch (logErr) {
+      console.error('Error logging activity:', logErr.message);
+    }
+
+    // Emit socket event
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pendingSalesBills:created', { voucherNumber, partyName, amount });
+    }
+
+    res.json({
+      success: true,
+      voucherNumber,
+      masterId,
+      message: `Offline invoice ${voucherNumber} created successfully`
+    });
+  } catch (error) {
+    console.error('Error creating offline invoice:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/pending-sales-bills/create
+ * Create a Pending Sales Bill - tries Tally first, falls back to offline
+ */
+router.post('/pending-sales-bills/create', async (req, res) => {
+  try {
+    const { partyName, amount, narration, voucherType = 'Pending Sales Bill' } = req.body;
+
+    if (!partyName || !amount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Party name and amount are required'
+      });
+    }
+
+    // Check if Tally is connected
+    const connectionStatus = await tallyConnector.checkConnection();
+
+    if (connectionStatus.connected) {
+      // Create directly in Tally
+      try {
+        const result = await tallyConnector.createPendingSalesBill({
+          partyName,
+          amount: parseFloat(amount),
+          narration: narration || '',
+          voucherType
+        });
+
+        if (result.success) {
+          // Log activity
+          try {
+            db.logActivity({
+              actionType: 'PENDING_BILL_CREATED',
+              voucherNumber: result.voucherNumber || '',
+              partyName: partyName,
+              amount: parseFloat(amount),
+              details: { narration, createdInTally: true },
+              status: 'success'
+            });
+          } catch (logErr) {
+            console.error('Error logging activity:', logErr.message);
+          }
+
+          // Emit socket event
+          const io = req.app.get('io');
+          if (io) {
+            io.emit('pendingSalesBills:created', { voucherNumber: result.voucherNumber, partyName, amount });
+          }
+
+          // Trigger a sync to refresh the list
+          syncService.syncPendingSalesBills();
+
+          return res.json({
+            success: true,
+            voucherNumber: result.voucherNumber,
+            masterId: result.masterId,
+            message: `Bill created in Tally successfully`
+          });
+        } else {
+          throw new Error(result.error || 'Failed to create in Tally');
+        }
+      } catch (tallyErr) {
+        console.error('Error creating in Tally, falling back to offline:', tallyErr.message);
+        // Fall through to offline creation
+      }
+    }
+
+    // Fallback: Create offline bill
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const timeStr = now.toISOString().slice(11, 19).replace(/:/g, '');
+    const voucherNumber = `WEB-${dateStr}-${timeStr}`;
+    const masterId = `offline-${Date.now()}`;
+
+    const offlineBill = {
+      masterId: masterId,
+      guid: `OFFLINE-GUID-${masterId}`,
+      voucherNumber: voucherNumber,
+      date: now.toISOString().slice(0, 10),
+      partyName: partyName,
+      amount: parseFloat(amount),
+      voucherType: voucherType,
+      narration: narration || `Web Invoice - ${now.toLocaleDateString('en-GB')}`,
+      alterId: 0,
+      sfl1: 0, sfl2: 0, sfl3: 0, sfl4: 0, sfl5: 0, sfl6: 0, sfl7: 0, sflTot: 0,
+      isOffline: 1
+    };
+
+    db.upsertPendingSalesBills([offlineBill]);
+
+    // Log activity
+    try {
+      db.logActivity({
+        actionType: 'OFFLINE_BILL_CREATED',
+        voucherNumber: voucherNumber,
+        partyName: partyName,
+        amount: parseFloat(amount),
+        details: { narration, isOffline: true },
+        status: 'success'
+      });
+    } catch (logErr) {
+      console.error('Error logging activity:', logErr.message);
+    }
+
+    // Emit socket event
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('pendingSalesBills:created', { voucherNumber, partyName, amount });
+    }
+
+    res.json({
+      success: true,
+      voucherNumber,
+      masterId,
+      isOffline: true,
+      message: `Offline bill ${voucherNumber} created (will sync when Tally is online)`
+    });
+  } catch (error) {
+    console.error('Error creating pending sales bill:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

@@ -7,6 +7,7 @@ import { Router } from 'express';
 import { db } from '../services/database.js';
 import { tallyConnector } from '../services/tallyConnector.js';
 import { syncService } from '../services/syncService.js';
+import { fonepayService } from '../services/fonepayService.js';
 import config from '../config/default.js';
 
 const router = Router();
@@ -442,6 +443,32 @@ router.get('/sync/status', (req, res) => {
 });
 
 /**
+ * POST /api/sync/stop
+ * Stop the automatic sync service
+ */
+router.post('/sync/stop', (req, res) => {
+  try {
+    syncService.stop();
+    res.json({ success: true, message: 'Sync service stopped', isRunning: syncService.isRunning });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/sync/start
+ * Start the automatic sync service
+ */
+router.post('/sync/start', async (req, res) => {
+  try {
+    const result = await syncService.start();
+    res.json({ success: result, message: result ? 'Sync service started' : 'Failed to start sync service', isRunning: syncService.isRunning });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /api/sync/trigger
  * Manually trigger sync (today only)
  */
@@ -575,6 +602,284 @@ router.post('/sync/reset-parties', async (req, res) => {
     res.json({
       message: 'Parties reset and synced',
       ...result
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== FULL HISTORICAL SYNC ====================
+
+/**
+ * GET /api/sync/full-history/status
+ * Get status of full historical sync
+ */
+router.get('/sync/full-history/status', (req, res) => {
+  try {
+    const status = syncService.getFullSyncStatus();
+    res.json({
+      success: true,
+      ...status
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/sync/full-history
+ * Start full historical sync from Tally
+ * Fetches ALL vouchers from start date to today in batches
+ *
+ * Body (optional): {
+ *   startDate: "YYYYMMDD" (default: 1 year ago),
+ *   batchDays: number (default: 7)
+ * }
+ */
+router.post('/sync/full-history', async (req, res) => {
+  try {
+    const { startDate, batchDays } = req.body;
+
+    // Check if Tally is connected
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected. Cannot start full history sync.'
+      });
+    }
+
+    // Start full sync (runs in background)
+    console.log(`Starting full historical sync: startDate=${startDate || 'auto'}, batchDays=${batchDays || 7}`);
+
+    // Send immediate response, sync runs asynchronously
+    res.json({
+      success: true,
+      message: 'Full historical sync started. Check /api/sync/full-history/status for progress.',
+      startDate: startDate || 'auto (1 year ago)',
+      batchDays: batchDays || 7
+    });
+
+    // Run sync in background
+    syncService.syncFullHistory(startDate, batchDays || 7)
+      .then(result => {
+        console.log('Full sync completed:', result);
+      })
+      .catch(err => {
+        console.error('Full sync failed:', err.message);
+      });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/sync/full-history/resume
+ * Resume an interrupted full historical sync
+ */
+router.post('/sync/full-history/resume', async (req, res) => {
+  try {
+    // Check if Tally is connected
+    const connectionStatus = await tallyConnector.checkConnection();
+    if (!connectionStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Tally is not connected. Cannot resume sync.'
+      });
+    }
+
+    const state = db.getFullSyncState();
+    if (!state || state.status !== 'in_progress') {
+      return res.status(400).json({
+        success: false,
+        error: 'No sync in progress to resume'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Resuming sync from ${state.current_date}`,
+      resumeFrom: state.current_date
+    });
+
+    // Resume in background
+    syncService.resumeFullSync()
+      .then(result => {
+        console.log('Resume sync completed:', result);
+      })
+      .catch(err => {
+        console.error('Resume sync failed:', err.message);
+      });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/sync/full-history/reset
+ * Reset full sync state (to start fresh)
+ */
+router.post('/sync/full-history/reset', (req, res) => {
+  try {
+    db.resetFullSyncState();
+    res.json({
+      success: true,
+      message: 'Full sync state reset. Ready for new full sync.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== VOUCHER HISTORY ====================
+
+/**
+ * GET /api/voucher-history/stats
+ * Get history statistics (MUST be before :masterId route)
+ */
+router.get('/voucher-history/stats', (req, res) => {
+  try {
+    const stats = db.getHistoryStats();
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history/recent-changes
+ * Get recent field-level changes across all vouchers
+ */
+router.get('/voucher-history/recent-changes', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const changes = db.getRecentChanges(limit);
+    res.json({ success: true, count: changes.length, changes });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history/by-alterid/:alterId
+ * Get voucher by specific alter_id (from current or history)
+ */
+router.get('/voucher-history/by-alterid/:alterId', (req, res) => {
+  try {
+    const alterId = parseInt(req.params.alterId);
+    const voucher = db.getVoucherByAlterId(alterId);
+
+    if (!voucher) {
+      return res.status(404).json({
+        success: false,
+        message: `No voucher found with ALTERID ${alterId}`
+      });
+    }
+
+    res.json({
+      success: true,
+      alterId,
+      source: voucher.source,
+      voucher
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history
+ * Get all recent voucher changes (history log)
+ */
+router.get('/voucher-history', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const history = db.getAllVoucherHistory(limit);
+
+    res.json({
+      success: true,
+      count: history.length,
+      history
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history/:masterId/changes
+ * Get field-level change log for a voucher
+ */
+router.get('/voucher-history/:masterId/changes', (req, res) => {
+  try {
+    const { masterId } = req.params;
+    const changes = db.getVoucherChangeLog(masterId);
+
+    res.json({
+      success: true,
+      masterId,
+      changeCount: changes.length,
+      changes
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history/:masterId
+ * Get change history for a specific voucher (MUST be last)
+ */
+router.get('/voucher-history/:masterId', (req, res) => {
+  try {
+    const { masterId } = req.params;
+    const history = db.getVoucherHistory(masterId);
+    const current = db.db.prepare('SELECT * FROM bills WHERE tally_master_id = ?').get(masterId);
+
+    res.json({
+      success: true,
+      masterId,
+      currentVersion: current || null,
+      historyCount: history.length,
+      history
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history/recent-changes
+ * Get recent field-level changes across all vouchers
+ */
+router.get('/voucher-history/recent-changes', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const changes = db.getRecentChanges(limit);
+
+    res.json({
+      success: true,
+      count: changes.length,
+      changes
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voucher-history/stats
+ * Get history statistics
+ */
+router.get('/voucher-history/stats', (req, res) => {
+  try {
+    const stats = db.getHistoryStats();
+
+    res.json({
+      success: true,
+      ...stats
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1709,6 +2014,368 @@ router.get('/config/voucher-types', (req, res) => {
  */
 router.get('/config/bill-statuses', (req, res) => {
   res.json(config.billStatus);
+});
+
+// ==================== FONEPAY ====================
+
+/**
+ * GET /api/fonepay/dashboard
+ * Get Fonepay dashboard summary
+ */
+router.get('/fonepay/dashboard', (req, res) => {
+  try {
+    const dashboard = db.getFonepayDashboard();
+    const serviceStatus = fonepayService.getStatus();
+    res.json({
+      success: true,
+      ...dashboard,
+      service: serviceStatus
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/status
+ * Get Fonepay sync service status
+ */
+router.get('/fonepay/status', (req, res) => {
+  try {
+    const status = fonepayService.getStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/fonepay/sync
+ * Manually trigger Fonepay sync
+ */
+router.post('/fonepay/sync', async (req, res) => {
+  try {
+    const result = await fonepayService.syncNow();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/fonepay/start
+ * Start Fonepay sync service
+ */
+router.post('/fonepay/start', async (req, res) => {
+  try {
+    const started = await fonepayService.start();
+    res.json({
+      success: started,
+      message: started ? 'Fonepay sync service started' : 'Failed to start (check credentials)',
+      status: fonepayService.getStatus()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/fonepay/stop
+ * Stop Fonepay sync service
+ */
+router.post('/fonepay/stop', async (req, res) => {
+  try {
+    await fonepayService.stop();
+    res.json({
+      success: true,
+      message: 'Fonepay sync service stopped',
+      status: fonepayService.getStatus()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PUT /api/fonepay/credentials
+ * Update Fonepay credentials
+ */
+router.put('/fonepay/credentials', (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+
+    fonepayService.updateCredentials(username, password);
+    res.json({
+      success: true,
+      message: 'Credentials updated. Restart the service to apply.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PUT /api/fonepay/interval
+ * Update sync interval
+ */
+router.put('/fonepay/interval', (req, res) => {
+  try {
+    const { intervalMs } = req.body;
+
+    if (!intervalMs || intervalMs < 10000) {
+      return res.status(400).json({ error: 'Interval must be at least 10000ms (10 seconds)' });
+    }
+
+    fonepayService.updateInterval(intervalMs);
+    res.json({
+      success: true,
+      message: `Interval updated to ${intervalMs}ms`,
+      status: fonepayService.getStatus()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/transactions
+ * Get Fonepay transactions
+ */
+router.get('/fonepay/transactions', (req, res) => {
+  try {
+    const {
+      limit = 1000,
+      offset = 0,
+      date,
+      fromDate,
+      toDate,
+      initiator,
+      amount,
+      status,
+      issuer
+    } = req.query;
+
+    let query = 'SELECT * FROM fonepay_transactions WHERE 1=1';
+    const params = [];
+
+    // Filter by single date
+    if (date) {
+      query += ' AND DATE(transaction_date) = DATE(?)';
+      params.push(date);
+    }
+
+    // Filter by date range
+    if (fromDate) {
+      query += ' AND DATE(transaction_date) >= DATE(?)';
+      params.push(fromDate);
+    }
+    if (toDate) {
+      query += ' AND DATE(transaction_date) <= DATE(?)';
+      params.push(toDate);
+    }
+
+    // Filter by initiator (phone number) - partial match
+    if (initiator) {
+      query += ' AND initiator LIKE ?';
+      params.push(`%${initiator}%`);
+    }
+
+    // Filter by amount - partial match on string
+    if (amount) {
+      query += ' AND CAST(amount AS TEXT) LIKE ?';
+      params.push(`%${amount}%`);
+    }
+
+    // Filter by status
+    if (status && status !== 'all') {
+      query += ' AND LOWER(status) = LOWER(?)';
+      params.push(status);
+    }
+
+    // Filter by issuer
+    if (issuer && issuer !== 'all') {
+      query += ' AND LOWER(issuer_name) = LOWER(?)';
+      params.push(issuer);
+    }
+
+    query += ' ORDER BY transaction_date DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit), parseInt(offset));
+
+    const transactions = db.db.prepare(query).all(...params);
+
+    // Get total count for pagination (without limit)
+    let countQuery = query.replace(/ORDER BY.*$/, '').replace('SELECT *', 'SELECT COUNT(*) as total');
+    countQuery = countQuery.replace(' LIMIT ? OFFSET ?', '');
+    const countParams = params.slice(0, -2); // Remove limit and offset
+    const totalResult = db.db.prepare(countQuery).get(...countParams);
+
+    res.json({
+      success: true,
+      count: transactions.length,
+      total: totalResult?.total || transactions.length,
+      transactions
+    });
+  } catch (error) {
+    console.error('Fonepay transactions error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/summary
+ * Get Fonepay transaction summary
+ */
+router.get('/fonepay/summary', (req, res) => {
+  try {
+    const summary = db.db.prepare(`
+      SELECT
+        COUNT(*) as totalCount,
+        COALESCE(SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END), 0) as totalAmount,
+        COUNT(CASE WHEN status = 'success' THEN 1 END) as successCount,
+        COUNT(CASE WHEN status = 'failed' OR status = 'failure' THEN 1 END) as failedCount
+      FROM fonepay_transactions
+    `).get();
+
+    res.json({
+      success: true,
+      ...summary
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/transactions/today
+ * Get today's Fonepay transactions
+ */
+router.get('/fonepay/transactions/today', (req, res) => {
+  try {
+    const transactions = db.getTodayFonepayTransactions();
+    const total = transactions.reduce((sum, txn) => sum + (txn.amount || 0), 0);
+
+    res.json({
+      success: true,
+      count: transactions.length,
+      total,
+      transactions
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/settlements
+ * Get Fonepay settlements
+ */
+router.get('/fonepay/settlements', (req, res) => {
+  try {
+    const { limit = 50 } = req.query;
+    const settlements = db.getFonepaySettlements(parseInt(limit));
+
+    res.json({
+      success: true,
+      count: settlements.length,
+      settlements
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/balance
+ * Get latest Fonepay balance
+ */
+router.get('/fonepay/balance', (req, res) => {
+  try {
+    const balance = db.getLatestFonepayBalance();
+    res.json({
+      success: true,
+      ...balance
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/fonepay/balance/history
+ * Get Fonepay balance history
+ */
+router.get('/fonepay/balance/history', (req, res) => {
+  try {
+    const { limit = 100 } = req.query;
+    const history = db.getFonepayBalanceHistory(parseInt(limit));
+
+    res.json({
+      success: true,
+      count: history.length,
+      history
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/fonepay/historical
+ * Fetch historical transactions from Fonepay portal with date range
+ * Body: { fromDate: "YYYY-MM-DD", toDate: "YYYY-MM-DD" }
+ */
+router.post('/fonepay/historical', async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.body;
+
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ error: 'fromDate and toDate are required (YYYY-MM-DD format)' });
+    }
+
+    // Validate date format
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(fromDate) || !dateRegex.test(toDate)) {
+      return res.status(400).json({ error: 'Dates must be in YYYY-MM-DD format' });
+    }
+
+    console.log(`[Fonepay API] Fetching historical data from ${fromDate} to ${toDate}`);
+
+    const result = await fonepayService.fetchHistoricalData(fromDate, toDate);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/fonepay/qr/generate
+ * Generate a dynamic QR code for payment collection
+ * Body: { amount: number, remarks?: string }
+ */
+router.post('/fonepay/qr/generate', async (req, res) => {
+  try {
+    const { amount, remarks } = req.body;
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Valid amount is required' });
+    }
+
+    console.log(`[Fonepay API] Generating QR for Rs. ${amount}`);
+
+    const result = await fonepayService.generateQR(amount, remarks || '');
+
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(400).json(result);
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

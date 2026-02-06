@@ -57,4 +57,12 @@ export const markNotificationRead = (id) => api.patch(`/notifications/${id}/read
 export const getVoucherTypes = () => api.get('/config/voucher-types');
 export const getBillStatuses = () => api.get('/config/bill-statuses');
 
+// Fonepay
+export const getFonepayTransactions = (params = {}) => api.get('/fonepay/transactions', { params });
+export const getFonepaySummary = () => api.get('/fonepay/summary');
+export const getFonepayStatus = () => api.get('/fonepay/status');
+export const triggerFonepaySync = () => api.post('/fonepay/sync');
+export const fetchFonepayHistorical = (fromDate, toDate) => api.post('/fonepay/historical', { fromDate, toDate });
+export const generateFonepayQR = (amount, remarks = '') => api.post('/fonepay/qr/generate', { amount, remarks }, { timeout: 60000 });
+
 export default api;

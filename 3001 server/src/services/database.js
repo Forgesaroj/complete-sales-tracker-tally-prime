@@ -326,6 +326,13 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_psb_status ON pending_sales_bills(status);
     `);
 
+    // Add is_offline column if it doesn't exist (for offline invoice creation)
+    try {
+      this.db.exec(`ALTER TABLE pending_sales_bills ADD COLUMN is_offline INTEGER DEFAULT 0`);
+    } catch (e) {
+      // Column already exists, ignore
+    }
+
     // Pending sales bills sync state
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS psb_sync_state (
@@ -386,6 +393,197 @@ class DatabaseService {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_bii_master_id ON bill_inventory_items(bill_master_id);
       CREATE INDEX IF NOT EXISTS idx_bii_stock_item ON bill_inventory_items(stock_item_name);
+    `);
+
+    // All Vouchers table (cached from Tally for fast loading)
+    // Stores ALL voucher types: Sales, Credit Sales, Contra, Journal, Payment, Receipt, etc.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS all_vouchers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        master_id TEXT UNIQUE NOT NULL,
+        guid TEXT,
+        voucher_number TEXT NOT NULL,
+        voucher_type TEXT NOT NULL,
+        voucher_date TEXT NOT NULL,
+        party_name TEXT NOT NULL,
+        amount REAL NOT NULL,
+        narration TEXT,
+        alter_id INTEGER DEFAULT 0,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Indexes for all_vouchers
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_av_master_id ON all_vouchers(master_id);
+      CREATE INDEX IF NOT EXISTS idx_av_party ON all_vouchers(party_name);
+      CREATE INDEX IF NOT EXISTS idx_av_date ON all_vouchers(voucher_date);
+      CREATE INDEX IF NOT EXISTS idx_av_type ON all_vouchers(voucher_type);
+      CREATE INDEX IF NOT EXISTS idx_av_alter_id ON all_vouchers(alter_id);
+    `);
+
+    // All vouchers sync state
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS all_vouchers_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_sync_time TEXT,
+        voucher_count INTEGER DEFAULT 0,
+        from_date TEXT,
+        to_date TEXT,
+        last_alter_id INTEGER DEFAULT 0
+      )
+    `);
+
+    // Add last_alter_id column if not exists (migration)
+    try {
+      this.db.exec(`ALTER TABLE all_vouchers_sync_state ADD COLUMN last_alter_id INTEGER DEFAULT 0`);
+    } catch (e) {
+      // Column already exists
+    }
+
+    // Initialize all vouchers sync state
+    this.db.exec(`
+      INSERT OR IGNORE INTO all_vouchers_sync_state (id, voucher_count, last_alter_id) VALUES (1, 0, 0)
+    `);
+
+    // Voucher Ledger Entries table - stores each ledger line item within a voucher
+    // This allows calculating ledger balances locally without hitting Tally
+    // Contains all 3 IDs: master_id, guid, alter_id for complete tracking
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS voucher_ledger_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        voucher_master_id TEXT NOT NULL,
+        voucher_guid TEXT,
+        voucher_date TEXT NOT NULL,
+        voucher_type TEXT NOT NULL,
+        voucher_number TEXT,
+        ledger_name TEXT NOT NULL,
+        amount REAL NOT NULL,
+        is_debit INTEGER DEFAULT 0,
+        alter_id INTEGER DEFAULT 0,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (voucher_master_id) REFERENCES all_vouchers(master_id) ON DELETE CASCADE
+      )
+    `);
+
+    // Add voucher_guid column if not exists (migration)
+    try {
+      this.db.exec(`ALTER TABLE voucher_ledger_entries ADD COLUMN voucher_guid TEXT`);
+    } catch (e) {
+      // Column already exists
+    }
+
+    // Indexes for voucher_ledger_entries - all IDs indexed for fast lookups
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_vle_master_id ON voucher_ledger_entries(voucher_master_id);
+      CREATE INDEX IF NOT EXISTS idx_vle_guid ON voucher_ledger_entries(voucher_guid);
+      CREATE INDEX IF NOT EXISTS idx_vle_ledger ON voucher_ledger_entries(ledger_name);
+      CREATE INDEX IF NOT EXISTS idx_vle_date ON voucher_ledger_entries(voucher_date);
+      CREATE INDEX IF NOT EXISTS idx_vle_alter_id ON voucher_ledger_entries(alter_id);
+    `);
+
+    // Add GUID index to all_vouchers if not exists
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_av_guid ON all_vouchers(guid);
+    `);
+
+    // Add GUID index to pending_sales_bills if not exists
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_psb_guid ON pending_sales_bills(guid);
+    `);
+
+    // Chart of Accounts - Groups table (hierarchy from Tally)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS account_groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        parent TEXT,
+        primary_group TEXT,
+        is_revenue INTEGER DEFAULT 0,
+        is_deemedpositive INTEGER DEFAULT 0,
+        is_reserved INTEGER DEFAULT 0,
+        affects_gross_profit INTEGER DEFAULT 0,
+        sort_position INTEGER DEFAULT 0,
+        alter_id INTEGER DEFAULT 0,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Indexes for account_groups
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_ag_name ON account_groups(name);
+      CREATE INDEX IF NOT EXISTS idx_ag_parent ON account_groups(parent);
+      CREATE INDEX IF NOT EXISTS idx_ag_primary ON account_groups(primary_group);
+    `);
+
+    // Chart of Accounts - Ledgers table (all ledgers with full details)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS account_ledgers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        parent TEXT NOT NULL,
+        mailing_name TEXT,
+        opening_balance REAL DEFAULT 0,
+        closing_balance REAL DEFAULT 0,
+        address TEXT,
+        pincode TEXT,
+        state TEXT,
+        country TEXT,
+        gstin TEXT,
+        pan TEXT,
+        phone TEXT,
+        mobile TEXT,
+        email TEXT,
+        contact_person TEXT,
+        credit_limit REAL DEFAULT 0,
+        credit_days INTEGER DEFAULT 0,
+        bill_credit_period TEXT,
+        payment_terms TEXT,
+        price_level TEXT,
+        bank_name TEXT,
+        bank_branch TEXT,
+        bank_account_no TEXT,
+        ifsc_code TEXT,
+        is_bill_wise INTEGER DEFAULT 0,
+        master_id TEXT,
+        alter_id INTEGER DEFAULT 0,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Add new columns if they don't exist (migration for existing DBs)
+    const newLedgerColumns = [
+      'mailing_name TEXT', 'pincode TEXT', 'mobile TEXT', 'contact_person TEXT',
+      'bill_credit_period TEXT', 'payment_terms TEXT', 'price_level TEXT',
+      'bank_name TEXT', 'bank_branch TEXT', 'bank_account_no TEXT', 'ifsc_code TEXT', 'master_id TEXT'
+    ];
+    newLedgerColumns.forEach(col => {
+      try {
+        this.db.exec(`ALTER TABLE account_ledgers ADD COLUMN ${col}`);
+      } catch (e) { /* Column already exists */ }
+    });
+
+    // Indexes for account_ledgers
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_al_name ON account_ledgers(name);
+      CREATE INDEX IF NOT EXISTS idx_al_parent ON account_ledgers(parent);
+      CREATE INDEX IF NOT EXISTS idx_al_balance ON account_ledgers(closing_balance);
+      CREATE INDEX IF NOT EXISTS idx_al_gstin ON account_ledgers(gstin);
+    `);
+
+    // Chart of Accounts sync state
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS coa_sync_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        last_sync_time TEXT,
+        groups_count INTEGER DEFAULT 0,
+        ledgers_count INTEGER DEFAULT 0
+      )
+    `);
+
+    // Initialize COA sync state
+    this.db.exec(`
+      INSERT OR IGNORE INTO coa_sync_state (id, groups_count, ledgers_count) VALUES (1, 0, 0)
     `);
 
     // Daily invoice counter (resets each day)
@@ -473,6 +671,30 @@ class DatabaseService {
       AND voucher_type IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill')
       ORDER BY voucher_date DESC, id DESC
     `).all();
+  }
+
+  /**
+   * Get recent bills by voucher types
+   */
+  getRecentBillsByTypes(types, limit = 200) {
+    const placeholders = types.map(() => '?').join(',');
+    return this.db.prepare(`
+      SELECT * FROM bills
+      WHERE voucher_type IN (${placeholders})
+      ORDER BY voucher_date DESC, id DESC
+      LIMIT ?
+    `).all(...types, limit);
+  }
+
+  /**
+   * Get all recent bills regardless of type
+   */
+  getRecentBills(limit = 200) {
+    return this.db.prepare(`
+      SELECT * FROM bills
+      ORDER BY voucher_date DESC, id DESC
+      LIMIT ?
+    `).all(limit);
   }
 
   /**
@@ -1303,15 +1525,15 @@ class DatabaseService {
   // ==================== PENDING SALES BILLS ====================
 
   /**
-   * Upsert pending sales bill from Tally
+   * Upsert pending sales bill from Tally or offline
    */
   upsertPendingSalesBill(bill) {
     const stmt = this.db.prepare(`
       INSERT INTO pending_sales_bills (
         master_id, guid, voucher_number, voucher_date, party_name, amount,
         narration, alter_id, sfl1, sfl2, sfl3, sfl4, sfl5, sfl6, sfl7, sfl_tot,
-        status, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
+        status, is_offline, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, CURRENT_TIMESTAMP)
       ON CONFLICT(master_id) DO UPDATE SET
         guid = excluded.guid,
         voucher_number = excluded.voucher_number,
@@ -1328,6 +1550,7 @@ class DatabaseService {
         sfl6 = excluded.sfl6,
         sfl7 = excluded.sfl7,
         sfl_tot = excluded.sfl_tot,
+        is_offline = excluded.is_offline,
         updated_at = CURRENT_TIMESTAMP
     `);
     return stmt.run(
@@ -1346,7 +1569,8 @@ class DatabaseService {
       bill.sfl5 || 0,
       bill.sfl6 || 0,
       bill.sfl7 || 0,
-      bill.sflTot || 0
+      bill.sflTot || 0,
+      bill.isOffline || 0
     );
   }
 
@@ -1365,13 +1589,36 @@ class DatabaseService {
 
   /**
    * Get all pending sales bills from database
+   * Filters out paid bills (where sfl_tot >= amount)
    */
   getAllPendingSalesBills() {
     return this.db.prepare(`
       SELECT * FROM pending_sales_bills
-      WHERE status = 'pending'
-      ORDER BY voucher_date DESC, id DESC
+      WHERE status = 'pending' AND (sfl_tot IS NULL OR sfl_tot = 0 OR sfl_tot < amount)
+      ORDER BY alter_id DESC, voucher_date DESC
     `).all();
+  }
+
+  /**
+   * Get paid/completed pending sales bills (where sfl_tot >= amount)
+   */
+  getPaidPendingSalesBills() {
+    return this.db.prepare(`
+      SELECT * FROM pending_sales_bills
+      WHERE sfl_tot > 0 AND sfl_tot >= amount
+      ORDER BY alter_id DESC, voucher_date DESC
+    `).all();
+  }
+
+  /**
+   * Get pending sales bills with alterId > given value (for incremental sync)
+   */
+  getPendingSalesBillsSinceAlterId(sinceAlterId) {
+    return this.db.prepare(`
+      SELECT * FROM pending_sales_bills
+      WHERE status = 'pending' AND alter_id > ?
+      ORDER BY alter_id ASC
+    `).all(sinceAlterId);
   }
 
   /**
@@ -1453,6 +1700,59 @@ class DatabaseService {
   clearPendingSalesBills() {
     this.db.prepare('DELETE FROM pending_sales_bills').run();
     this.db.prepare('UPDATE psb_sync_state SET last_alter_id = 0, bill_count = 0 WHERE id = 1').run();
+  }
+
+  /**
+   * Update UDF fields for a pending sales bill
+   */
+  updatePSBUDFFields(masterId, udfFields) {
+    return this.db.prepare(`
+      UPDATE pending_sales_bills SET
+        sfl1 = ?,
+        sfl2 = ?,
+        sfl3 = ?,
+        sfl4 = ?,
+        sfl5 = ?,
+        sfl6 = ?,
+        sfl7 = ?,
+        sfl_tot = ?,
+        status = CASE WHEN ? >= amount THEN 'paid' ELSE 'pending' END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE master_id = ?
+    `).run(
+      udfFields.sfl1 || 0,
+      udfFields.sfl2 || 0,
+      udfFields.sfl3 || 0,
+      udfFields.sfl4 || 0,
+      udfFields.sfl5 || 0,
+      udfFields.sfl6 || 0,
+      udfFields.sfl7 || 0,
+      udfFields.sflTot || 0,
+      udfFields.sflTot || 0,
+      masterId
+    );
+  }
+
+  /**
+   * Get bills that need UDF sync (where alter_id changed but UDF not updated)
+   */
+  getBillsNeedingUDFSync(sinceAlterId) {
+    return this.db.prepare(`
+      SELECT * FROM pending_sales_bills
+      WHERE alter_id > ? AND status = 'pending'
+      ORDER BY alter_id ASC
+    `).all(sinceAlterId);
+  }
+
+  /**
+   * Mark bill as paid based on UDF total
+   */
+  markBillAsPaidIfComplete(masterId) {
+    return this.db.prepare(`
+      UPDATE pending_sales_bills
+      SET status = 'paid', updated_at = CURRENT_TIMESTAMP
+      WHERE master_id = ? AND sfl_tot >= amount
+    `).run(masterId);
   }
 
   // ==================== ACTIVITY LOG ====================
@@ -1625,6 +1925,582 @@ class DatabaseService {
       SELECT COUNT(*) as count FROM bill_inventory_items WHERE bill_master_id = ?
     `).get(billMasterId);
     return result.count > 0;
+  }
+
+  // ==================== ALL VOUCHERS (CACHED FROM TALLY) ====================
+
+  /**
+   * Upsert a single voucher
+   */
+  upsertAllVoucher(voucher) {
+    const stmt = this.db.prepare(`
+      INSERT INTO all_vouchers (
+        master_id, guid, voucher_number, voucher_type, voucher_date,
+        party_name, amount, narration, alter_id, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(master_id) DO UPDATE SET
+        guid = excluded.guid,
+        voucher_number = excluded.voucher_number,
+        voucher_type = excluded.voucher_type,
+        voucher_date = excluded.voucher_date,
+        party_name = excluded.party_name,
+        amount = excluded.amount,
+        narration = excluded.narration,
+        alter_id = excluded.alter_id,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(
+      voucher.masterId,
+      voucher.guid || '',
+      voucher.voucherNumber,
+      voucher.voucherType,
+      voucher.date,
+      voucher.partyName,
+      Math.abs(voucher.amount || 0),
+      voucher.narration || '',
+      voucher.alterId || 0
+    );
+  }
+
+  /**
+   * Bulk upsert all vouchers (efficient batch insert)
+   */
+  upsertAllVouchers(vouchers) {
+    const upsert = this.db.transaction((vouchers) => {
+      for (const voucher of vouchers) {
+        this.upsertAllVoucher(voucher);
+      }
+    });
+    upsert(vouchers);
+    return vouchers.length;
+  }
+
+  /**
+   * Get all vouchers from cache (sorted by alterId desc)
+   */
+  getAllVouchers(limit = 500) {
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      ORDER BY alter_id DESC, voucher_date DESC
+      LIMIT ?
+    `).all(limit);
+  }
+
+  /**
+   * Get vouchers by type
+   */
+  getVouchersByType(voucherType, limit = 200) {
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      WHERE voucher_type = ?
+      ORDER BY alter_id DESC, voucher_date DESC
+      LIMIT ?
+    `).all(voucherType, limit);
+  }
+
+  /**
+   * Search all vouchers by party name or voucher number
+   */
+  searchAllVouchers(query, limit = 100) {
+    const searchQuery = `%${query}%`;
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      WHERE party_name LIKE ? OR voucher_number LIKE ?
+      ORDER BY alter_id DESC
+      LIMIT ?
+    `).all(searchQuery, searchQuery, limit);
+  }
+
+  /**
+   * Get vouchers by date range
+   */
+  getVouchersByDateRange(fromDate, toDate, limit = 500) {
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      WHERE voucher_date BETWEEN ? AND ?
+      ORDER BY alter_id DESC, voucher_date DESC
+      LIMIT ?
+    `).all(fromDate, toDate, limit);
+  }
+
+  /**
+   * Get vouchers by party name (for ledger account book)
+   */
+  getVouchersByParty(partyName, limit = 1000) {
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      WHERE party_name = ?
+      ORDER BY voucher_date DESC, alter_id DESC
+      LIMIT ?
+    `).all(partyName, limit);
+  }
+
+  /**
+   * Get all vouchers count
+   */
+  getAllVouchersCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM all_vouchers').get();
+    return result.count;
+  }
+
+  /**
+   * Get all vouchers sync state
+   */
+  getAllVouchersSyncState() {
+    return this.db.prepare('SELECT * FROM all_vouchers_sync_state WHERE id = 1').get();
+  }
+
+  /**
+   * Update all vouchers sync state
+   */
+  updateAllVouchersSyncState(count, fromDate, toDate, lastAlterId = null) {
+    if (lastAlterId !== null) {
+      return this.db.prepare(`
+        UPDATE all_vouchers_sync_state SET
+          voucher_count = ?,
+          from_date = ?,
+          to_date = ?,
+          last_alter_id = ?,
+          last_sync_time = CURRENT_TIMESTAMP
+        WHERE id = 1
+      `).run(count, fromDate, toDate, lastAlterId);
+    }
+    return this.db.prepare(`
+      UPDATE all_vouchers_sync_state SET
+        voucher_count = ?,
+        from_date = ?,
+        to_date = ?,
+        last_sync_time = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run(count, fromDate, toDate);
+  }
+
+  /**
+   * Get last alter_id for all vouchers sync
+   */
+  getLastVoucherAlterId() {
+    const state = this.db.prepare('SELECT last_alter_id FROM all_vouchers_sync_state WHERE id = 1').get();
+    return state?.last_alter_id || 0;
+  }
+
+  /**
+   * Update last alter_id for all vouchers
+   */
+  updateVoucherAlterId(alterId) {
+    return this.db.prepare(`
+      UPDATE all_vouchers_sync_state SET last_alter_id = ?, last_sync_time = CURRENT_TIMESTAMP WHERE id = 1
+    `).run(alterId);
+  }
+
+  /**
+   * Get max alter_id from all_vouchers table
+   */
+  getMaxVoucherAlterId() {
+    const result = this.db.prepare('SELECT MAX(alter_id) as max_alter_id FROM all_vouchers').get();
+    return result?.max_alter_id || 0;
+  }
+
+  /**
+   * Get recently altered vouchers (ordered by alter_id DESC)
+   */
+  getRecentlyAlteredVouchers(limit = 100) {
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      ORDER BY alter_id DESC
+      LIMIT ?
+    `).all(limit);
+  }
+
+  /**
+   * Get vouchers altered after a specific alter_id
+   */
+  getVouchersAfterAlterId(alterId, limit = 500) {
+    return this.db.prepare(`
+      SELECT * FROM all_vouchers
+      WHERE alter_id > ?
+      ORDER BY alter_id DESC
+      LIMIT ?
+    `).all(alterId, limit);
+  }
+
+  /**
+   * Clear all vouchers cache
+   */
+  clearAllVouchers() {
+    this.db.prepare('DELETE FROM all_vouchers').run();
+    this.db.prepare('DELETE FROM voucher_ledger_entries').run();
+    this.db.prepare('UPDATE all_vouchers_sync_state SET voucher_count = 0, from_date = NULL, to_date = NULL, last_alter_id = 0 WHERE id = 1').run();
+  }
+
+  // ==================== VOUCHER LEDGER ENTRIES ====================
+
+  /**
+   * Upsert voucher ledger entries (line items within a voucher)
+   * Stores all 3 IDs: master_id, guid, alter_id for complete tracking
+   */
+  upsertVoucherLedgerEntries(voucherMasterId, entries, voucherInfo) {
+    // First delete existing entries for this voucher
+    this.db.prepare('DELETE FROM voucher_ledger_entries WHERE voucher_master_id = ?').run(voucherMasterId);
+
+    // Insert new entries with all IDs
+    const stmt = this.db.prepare(`
+      INSERT INTO voucher_ledger_entries (
+        voucher_master_id, voucher_guid, voucher_date, voucher_type, voucher_number,
+        ledger_name, amount, is_debit, alter_id, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+
+    const insertMany = this.db.transaction((entries) => {
+      for (const entry of entries) {
+        stmt.run(
+          voucherMasterId,
+          voucherInfo.guid || '',
+          voucherInfo.date || '',
+          voucherInfo.voucherType || '',
+          voucherInfo.voucherNumber || '',
+          entry.ledgerName,
+          Math.abs(entry.amount || 0),
+          entry.isDebit ? 1 : 0,
+          voucherInfo.alterId || 0
+        );
+      }
+    });
+
+    insertMany(entries);
+    return entries.length;
+  }
+
+  /**
+   * Get ledger entries for a specific ledger (for account book)
+   */
+  getLedgerEntries(ledgerName, limit = 1000) {
+    return this.db.prepare(`
+      SELECT
+        vle.*,
+        av.party_name,
+        av.narration
+      FROM voucher_ledger_entries vle
+      LEFT JOIN all_vouchers av ON vle.voucher_master_id = av.master_id
+      WHERE vle.ledger_name = ?
+      ORDER BY vle.voucher_date DESC, vle.alter_id DESC
+      LIMIT ?
+    `).all(ledgerName, limit);
+  }
+
+  /**
+   * Get ledger entries by date range
+   */
+  getLedgerEntriesByDateRange(ledgerName, fromDate, toDate) {
+    return this.db.prepare(`
+      SELECT
+        vle.*,
+        av.party_name,
+        av.narration
+      FROM voucher_ledger_entries vle
+      LEFT JOIN all_vouchers av ON vle.voucher_master_id = av.master_id
+      WHERE vle.ledger_name = ? AND vle.voucher_date BETWEEN ? AND ?
+      ORDER BY vle.voucher_date ASC, vle.alter_id ASC
+    `).all(ledgerName, fromDate, toDate);
+  }
+
+  /**
+   * Calculate ledger balance from local voucher data
+   * Returns { debit, credit, balance }
+   */
+  calculateLedgerBalance(ledgerName, upToDate = null) {
+    let query;
+    let params;
+
+    if (upToDate) {
+      query = `
+        SELECT
+          SUM(CASE WHEN is_debit = 1 THEN amount ELSE 0 END) as total_debit,
+          SUM(CASE WHEN is_debit = 0 THEN amount ELSE 0 END) as total_credit
+        FROM voucher_ledger_entries
+        WHERE ledger_name = ? AND voucher_date <= ?
+      `;
+      params = [ledgerName, upToDate];
+    } else {
+      query = `
+        SELECT
+          SUM(CASE WHEN is_debit = 1 THEN amount ELSE 0 END) as total_debit,
+          SUM(CASE WHEN is_debit = 0 THEN amount ELSE 0 END) as total_credit
+        FROM voucher_ledger_entries
+        WHERE ledger_name = ?
+      `;
+      params = [ledgerName];
+    }
+
+    const result = this.db.prepare(query).get(...params);
+    const debit = result?.total_debit || 0;
+    const credit = result?.total_credit || 0;
+
+    return {
+      debit,
+      credit,
+      balance: debit - credit,
+      balanceType: debit >= credit ? 'Dr' : 'Cr'
+    };
+  }
+
+  /**
+   * Get all ledger balances (summary)
+   */
+  getAllLedgerBalances() {
+    return this.db.prepare(`
+      SELECT
+        ledger_name,
+        SUM(CASE WHEN is_debit = 1 THEN amount ELSE 0 END) as total_debit,
+        SUM(CASE WHEN is_debit = 0 THEN amount ELSE 0 END) as total_credit,
+        SUM(CASE WHEN is_debit = 1 THEN amount ELSE -amount END) as balance,
+        COUNT(*) as transaction_count
+      FROM voucher_ledger_entries
+      GROUP BY ledger_name
+      ORDER BY ledger_name
+    `).all();
+  }
+
+  /**
+   * Get voucher ledger entries count
+   */
+  getVoucherLedgerEntriesCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM voucher_ledger_entries').get();
+    return result.count;
+  }
+
+  /**
+   * Delete ledger entries for a voucher
+   */
+  deleteVoucherLedgerEntries(voucherMasterId) {
+    return this.db.prepare('DELETE FROM voucher_ledger_entries WHERE voucher_master_id = ?').run(voucherMasterId);
+  }
+
+  // ==================== CHART OF ACCOUNTS ====================
+
+  /**
+   * Upsert an account group
+   */
+  upsertAccountGroup(group) {
+    const stmt = this.db.prepare(`
+      INSERT INTO account_groups (
+        name, parent, primary_group, is_revenue, is_deemedpositive,
+        is_reserved, affects_gross_profit, sort_position, alter_id, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(name) DO UPDATE SET
+        parent = excluded.parent,
+        primary_group = excluded.primary_group,
+        is_revenue = excluded.is_revenue,
+        is_deemedpositive = excluded.is_deemedpositive,
+        is_reserved = excluded.is_reserved,
+        affects_gross_profit = excluded.affects_gross_profit,
+        sort_position = excluded.sort_position,
+        alter_id = excluded.alter_id,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(
+      group.name,
+      group.parent || '',
+      group.primaryGroup || '',
+      group.isRevenue || 0,
+      group.isDeemedPositive || 0,
+      group.isReserved || 0,
+      group.affectsGrossProfit || 0,
+      group.sortPosition || 0,
+      group.alterId || 0
+    );
+  }
+
+  /**
+   * Bulk upsert account groups
+   */
+  upsertAccountGroups(groups) {
+    const upsert = this.db.transaction((groups) => {
+      for (const group of groups) {
+        this.upsertAccountGroup(group);
+      }
+    });
+    upsert(groups);
+    return groups.length;
+  }
+
+  /**
+   * Upsert an account ledger
+   */
+  upsertAccountLedger(ledger) {
+    const stmt = this.db.prepare(`
+      INSERT INTO account_ledgers (
+        name, parent, mailing_name, opening_balance, closing_balance, address, pincode,
+        state, country, gstin, pan, phone, mobile, email, contact_person,
+        credit_limit, credit_days, bill_credit_period, payment_terms, price_level,
+        bank_name, bank_branch, bank_account_no, ifsc_code, is_bill_wise, master_id, alter_id, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(name) DO UPDATE SET
+        parent = excluded.parent,
+        mailing_name = excluded.mailing_name,
+        opening_balance = excluded.opening_balance,
+        closing_balance = excluded.closing_balance,
+        address = excluded.address,
+        pincode = excluded.pincode,
+        state = excluded.state,
+        country = excluded.country,
+        gstin = excluded.gstin,
+        pan = excluded.pan,
+        phone = excluded.phone,
+        mobile = excluded.mobile,
+        email = excluded.email,
+        contact_person = excluded.contact_person,
+        credit_limit = excluded.credit_limit,
+        credit_days = excluded.credit_days,
+        bill_credit_period = excluded.bill_credit_period,
+        payment_terms = excluded.payment_terms,
+        price_level = excluded.price_level,
+        bank_name = excluded.bank_name,
+        bank_branch = excluded.bank_branch,
+        bank_account_no = excluded.bank_account_no,
+        ifsc_code = excluded.ifsc_code,
+        is_bill_wise = excluded.is_bill_wise,
+        master_id = excluded.master_id,
+        alter_id = excluded.alter_id,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+    return stmt.run(
+      ledger.name,
+      ledger.parent || '',
+      ledger.mailingName || '',
+      ledger.openingBalance || 0,
+      ledger.closingBalance || 0,
+      ledger.address || '',
+      ledger.pincode || '',
+      ledger.state || '',
+      ledger.country || '',
+      ledger.gstin || '',
+      ledger.pan || '',
+      ledger.phone || '',
+      ledger.mobile || '',
+      ledger.email || '',
+      ledger.contactPerson || '',
+      ledger.creditLimit || 0,
+      ledger.creditDays || 0,
+      ledger.billCreditPeriod || '',
+      ledger.paymentTerms || '',
+      ledger.priceLevel || '',
+      ledger.bankName || '',
+      ledger.bankBranch || '',
+      ledger.bankAccountNo || '',
+      ledger.ifscCode || '',
+      ledger.isBillWise || 0,
+      ledger.masterId || '',
+      ledger.alterId || 0
+    );
+  }
+
+  /**
+   * Bulk upsert account ledgers
+   */
+  upsertAccountLedgers(ledgers) {
+    const upsert = this.db.transaction((ledgers) => {
+      for (const ledger of ledgers) {
+        this.upsertAccountLedger(ledger);
+      }
+    });
+    upsert(ledgers);
+    return ledgers.length;
+  }
+
+  /**
+   * Get all account groups
+   */
+  getAllAccountGroups() {
+    return this.db.prepare(`
+      SELECT * FROM account_groups ORDER BY sort_position, name
+    `).all();
+  }
+
+  /**
+   * Get all account ledgers
+   */
+  getAllAccountLedgers() {
+    return this.db.prepare(`
+      SELECT * FROM account_ledgers ORDER BY parent, name
+    `).all();
+  }
+
+  /**
+   * Get ledgers by parent group
+   */
+  getLedgersByGroup(parentGroup) {
+    return this.db.prepare(`
+      SELECT * FROM account_ledgers WHERE parent = ? ORDER BY name
+    `).all(parentGroup);
+  }
+
+  /**
+   * Search ledgers by name
+   */
+  searchAccountLedgers(query) {
+    const searchQuery = `%${query}%`;
+    return this.db.prepare(`
+      SELECT * FROM account_ledgers
+      WHERE name LIKE ? OR parent LIKE ?
+      ORDER BY parent, name
+      LIMIT 100
+    `).all(searchQuery, searchQuery);
+  }
+
+  /**
+   * Get ledgers with non-zero balance
+   */
+  getLedgersWithBalance() {
+    return this.db.prepare(`
+      SELECT * FROM account_ledgers
+      WHERE closing_balance != 0
+      ORDER BY parent, name
+    `).all();
+  }
+
+  /**
+   * Get Chart of Accounts sync state
+   */
+  getCOASyncState() {
+    return this.db.prepare('SELECT * FROM coa_sync_state WHERE id = 1').get();
+  }
+
+  /**
+   * Update Chart of Accounts sync state
+   */
+  updateCOASyncState(groupsCount, ledgersCount) {
+    return this.db.prepare(`
+      UPDATE coa_sync_state SET
+        groups_count = ?,
+        ledgers_count = ?,
+        last_sync_time = CURRENT_TIMESTAMP
+      WHERE id = 1
+    `).run(groupsCount, ledgersCount);
+  }
+
+  /**
+   * Get account groups count
+   */
+  getAccountGroupsCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM account_groups').get();
+    return result.count;
+  }
+
+  /**
+   * Get account ledgers count
+   */
+  getAccountLedgersCount() {
+    const result = this.db.prepare('SELECT COUNT(*) as count FROM account_ledgers').get();
+    return result.count;
+  }
+
+  /**
+   * Clear Chart of Accounts data
+   */
+  clearChartOfAccounts() {
+    this.db.prepare('DELETE FROM account_groups').run();
+    this.db.prepare('DELETE FROM account_ledgers').run();
+    this.db.prepare('UPDATE coa_sync_state SET groups_count = 0, ledgers_count = 0 WHERE id = 1').run();
   }
 
   /**

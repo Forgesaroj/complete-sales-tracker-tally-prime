@@ -589,6 +589,267 @@ class SyncService {
       return { success: false, error: error.message };
     }
   }
+
+  /**
+   * FULL HISTORICAL SYNC
+   * Fetches ALL vouchers from Tally from a start date to today
+   * Uses date-based batching to avoid overwhelming Tally
+   * After completion, incremental sync can be used for ongoing updates
+   *
+   * @param {string} startDate - Start date in YYYYMMDD format (default: 1 year ago)
+   * @param {number} batchDays - Number of days per batch (default: 7)
+   */
+  async syncFullHistory(startDate = null, batchDays = 7) {
+    // Prevent overlapping syncs
+    if (this.isSyncing) {
+      console.log('Sync already in progress, cannot start full history sync');
+      return { success: false, error: 'Sync already in progress' };
+    }
+
+    this.isSyncing = true;
+    const startTime = Date.now();
+
+    try {
+      // Determine date range
+      const today = new Date();
+      const todayStr = this.formatDateYYYYMMDD(today);
+
+      // Default start: 1 year ago or provided date
+      let fromDate;
+      if (startDate) {
+        fromDate = startDate;
+      } else {
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        fromDate = this.formatDateYYYYMMDD(oneYearAgo);
+      }
+
+      console.log('='.repeat(60));
+      console.log('STARTING FULL HISTORICAL SYNC');
+      console.log('='.repeat(60));
+      console.log(`Date range: ${fromDate} to ${todayStr}`);
+      console.log(`Batch size: ${batchDays} days`);
+
+      // Initialize sync state
+      db.updateFullSyncState({
+        status: 'in_progress',
+        startDate: fromDate,
+        currentDate: fromDate,
+        endDate: todayStr,
+        totalVouchersSynced: 0,
+        maxAlterId: 0,
+        batchesCompleted: 0,
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        lastError: null
+      });
+
+      // Broadcast start
+      if (this.io) {
+        this.io.emit('fullSync:started', { fromDate, toDate: todayStr, batchDays });
+      }
+
+      // Calculate batches
+      const batches = this.generateDateBatches(fromDate, todayStr, batchDays);
+      console.log(`Total batches to process: ${batches.length}`);
+
+      let totalVouchers = 0;
+      let maxAlterId = 0;
+      let batchesCompleted = 0;
+      const allTypes = [...config.voucherTypes.sales, ...config.voucherTypes.receipt];
+
+      // Process each batch
+      for (const batch of batches) {
+        try {
+          console.log(`\nBatch ${batchesCompleted + 1}/${batches.length}: ${batch.from} to ${batch.to}`);
+
+          // Fetch vouchers for this date range
+          const vouchers = await tallyConnector.getVouchers(batch.from, batch.to, allTypes);
+          console.log(`  Fetched ${vouchers.length} vouchers`);
+
+          // Save to database
+          for (const voucher of vouchers) {
+            db.upsertBill(voucher);
+
+            // Track max ALTERID
+            if (voucher.alterId > maxAlterId) {
+              maxAlterId = voucher.alterId;
+            }
+          }
+
+          totalVouchers += vouchers.length;
+          batchesCompleted++;
+
+          // Update progress
+          db.updateFullSyncState({
+            currentDate: batch.to,
+            totalVouchersSynced: totalVouchers,
+            maxAlterId,
+            batchesCompleted
+          });
+
+          // Broadcast progress
+          if (this.io) {
+            this.io.emit('fullSync:progress', {
+              batch: batchesCompleted,
+              totalBatches: batches.length,
+              currentDate: batch.to,
+              vouchersSynced: totalVouchers,
+              maxAlterId,
+              percentComplete: Math.round((batchesCompleted / batches.length) * 100)
+            });
+          }
+
+          // Small delay between batches to be gentle on Tally
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+        } catch (batchError) {
+          console.error(`  Batch error: ${batchError.message}`);
+          db.updateFullSyncState({ lastError: batchError.message });
+
+          // Continue with next batch rather than failing completely
+          batchesCompleted++;
+        }
+      }
+
+      // Update sync state to completed
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      db.updateFullSyncState({
+        status: 'completed',
+        currentDate: todayStr,
+        completedAt: new Date().toISOString()
+      });
+
+      // Update main sync state with max ALTERID for future incremental syncs
+      if (maxAlterId > db.getLastAlterId()) {
+        db.setLastAlterId(maxAlterId);
+      }
+
+      console.log('\n' + '='.repeat(60));
+      console.log('FULL HISTORICAL SYNC COMPLETED');
+      console.log('='.repeat(60));
+      console.log(`Total vouchers synced: ${totalVouchers}`);
+      console.log(`Max ALTERID: ${maxAlterId}`);
+      console.log(`Duration: ${duration} seconds`);
+      console.log('='.repeat(60));
+
+      // Broadcast completion
+      if (this.io) {
+        this.io.emit('fullSync:completed', {
+          totalVouchers,
+          maxAlterId,
+          duration,
+          batchesCompleted: batches.length
+        });
+      }
+
+      return {
+        success: true,
+        totalVouchers,
+        maxAlterId,
+        batchesCompleted: batches.length,
+        duration,
+        message: `Full historical sync completed. ${totalVouchers} vouchers synced. Max ALTERID: ${maxAlterId}`
+      };
+
+    } catch (error) {
+      console.error('Full history sync error:', error.message);
+      db.updateFullSyncState({
+        status: 'error',
+        lastError: error.message
+      });
+
+      if (this.io) {
+        this.io.emit('fullSync:error', { error: error.message });
+      }
+
+      return { success: false, error: error.message };
+    } finally {
+      this.isSyncing = false;
+    }
+  }
+
+  /**
+   * Generate date batches for historical sync
+   * @param {string} fromDate - Start date YYYYMMDD
+   * @param {string} toDate - End date YYYYMMDD
+   * @param {number} batchDays - Days per batch
+   * @returns {Array} Array of {from, to} date pairs
+   */
+  generateDateBatches(fromDate, toDate, batchDays) {
+    const batches = [];
+    const parseDate = (str) => {
+      const y = parseInt(str.slice(0, 4));
+      const m = parseInt(str.slice(4, 6)) - 1;
+      const d = parseInt(str.slice(6, 8));
+      return new Date(y, m, d);
+    };
+
+    let current = parseDate(fromDate);
+    const end = parseDate(toDate);
+
+    while (current <= end) {
+      const batchEnd = new Date(current);
+      batchEnd.setDate(batchEnd.getDate() + batchDays - 1);
+
+      // Don't go past the end date
+      if (batchEnd > end) {
+        batchEnd.setTime(end.getTime());
+      }
+
+      batches.push({
+        from: this.formatDateYYYYMMDD(current),
+        to: this.formatDateYYYYMMDD(batchEnd)
+      });
+
+      // Move to next batch
+      current.setDate(current.getDate() + batchDays);
+    }
+
+    return batches;
+  }
+
+  /**
+   * Format date to YYYYMMDD
+   */
+  formatDateYYYYMMDD(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}${m}${d}`;
+  }
+
+  /**
+   * Resume a previously interrupted full sync
+   */
+  async resumeFullSync() {
+    const state = db.getFullSyncState();
+
+    if (!state || state.status !== 'in_progress') {
+      return { success: false, error: 'No sync in progress to resume' };
+    }
+
+    console.log(`Resuming full sync from ${state.current_date}`);
+
+    // Resume from where we left off
+    return this.syncFullHistory(state.current_date, 7);
+  }
+
+  /**
+   * Get full sync status
+   */
+  getFullSyncStatus() {
+    const state = db.getFullSyncState();
+    const billsCount = db.getBillsCount();
+    const maxAlterId = db.getMaxBillAlterId();
+
+    return {
+      ...state,
+      billsInDatabase: billsCount,
+      maxAlterIdInDatabase: maxAlterId,
+      canResumeSync: state?.status === 'in_progress'
+    };
+  }
 }
 
 // Export singleton
