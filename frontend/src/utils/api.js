@@ -21,6 +21,13 @@ export const getBillItems = (id) => api.get(`/bills/${id}/items`);
 export const getBillItemsBatch = (ids) => api.get('/bills/batch-items', { params: { ids: ids.join(',') } });
 export const addBillItem = (id, item) => api.post(`/bills/${id}/items`, item, { timeout: 60000 });
 export const updateBillItems = (id, items) => api.put(`/bills/${id}/items`, { items }, { timeout: 60000 });
+export const getBillPrintData = (id) => api.get(`/bills/${id}/print-data`);
+
+// Email
+export const testEmailConnection = () => api.post('/email/test-connection');
+export const sendTestEmail = (toEmail) => api.post('/email/test', { toEmail });
+export const emailBill = (billId, toEmail, nepaliDate = '') =>
+  api.post('/email/send-bill', { billId, toEmail, nepaliDate }, { timeout: 30000 });
 
 // Vouchers (ALL types - Sales, Receipt, Payment, Journal, Purchase, etc.)
 export const getAllVouchers = (params = {}) => api.get('/vouchers', { params });

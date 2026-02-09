@@ -134,6 +134,59 @@ router.get('/batch-items', (req, res) => {
 });
 
 /**
+ * GET /api/bills/:id/print-data
+ * Get all data needed to print a bill (bill + items + party + business info)
+ */
+router.get('/:id/print-data', (req, res) => {
+  try {
+    const bill = db.getBillById(req.params.id);
+    if (!bill) return res.status(404).json({ error: 'Bill not found' });
+
+    // Get items from cache
+    const rawItems = db.getBillItems(bill.id);
+    const items = rawItems.map(i => ({
+      stockItem: i.stock_item,
+      quantity: i.quantity,
+      rate: i.rate,
+      amount: i.amount,
+      unit: i.unit || 'Nos'
+    }));
+
+    // Get party details
+    const party = db.getPartyByName(bill.party_name);
+
+    // Get business settings
+    const businessName = db.getSetting('business_name') || tallyConnector.companyName || '';
+    const businessAddress = db.getSetting('business_address') || '';
+    const businessPhone = db.getSetting('business_phone') || '';
+    const businessPAN = db.getSetting('business_pan') || '';
+
+    res.json({
+      success: true,
+      bill: {
+        id: bill.id,
+        voucherNumber: bill.voucher_number,
+        voucherType: bill.voucher_type,
+        voucherDate: bill.voucher_date,
+        partyName: bill.party_name,
+        amount: bill.amount,
+        narration: bill.narration
+      },
+      party: party ? {
+        address: party.address,
+        phone: party.phone,
+        email: party.email,
+        gstin: party.gstin
+      } : null,
+      items,
+      business: { businessName, businessAddress, businessPhone, businessPAN }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /api/bills/:id
  * Get single bill with receipts
  */

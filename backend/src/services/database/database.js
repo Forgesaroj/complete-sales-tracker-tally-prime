@@ -488,7 +488,18 @@ class DatabaseService {
       INSERT OR IGNORE INTO app_settings (key, value, description) VALUES
         ('agent_ledger_group', 'Agent Agents', 'Tally ledger group for agents/staff'),
         ('sales_ledger', '1 Sales A/c', 'Default sales ledger for invoices'),
-        ('default_godown', 'Main Location', 'Default godown for inventory')
+        ('default_godown', 'Main Location', 'Default godown for inventory'),
+        ('business_name', '', 'Business name for invoices/prints'),
+        ('business_address', '', 'Business address line'),
+        ('business_phone', '', 'Business phone number'),
+        ('business_pan', '', 'Business PAN/VAT number'),
+        ('smtp_host', '', 'SMTP server hostname'),
+        ('smtp_port', '587', 'SMTP server port'),
+        ('smtp_secure', 'false', 'Use SSL/TLS (true for port 465)'),
+        ('smtp_user', '', 'SMTP username/email'),
+        ('smtp_pass', '', 'SMTP password'),
+        ('smtp_from_name', '', 'Email from name'),
+        ('smtp_from_email', '', 'Email from address')
     `);
 
     // Update existing setting if it was the old default

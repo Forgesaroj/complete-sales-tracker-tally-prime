@@ -13,7 +13,6 @@ import {
   getSacks,
   updateBillDispatch,
   updateSackStatus,
-  createPayment,
   getTallyStatus,
   getSyncStatus,
   getAllVouchers,
@@ -44,7 +43,11 @@ import {
   getBillItems,
   addBillItem,
   updateBillItems,
-  searchStockItems
+  searchStockItems,
+  getBillPrintData,
+  testEmailConnection,
+  sendTestEmail,
+  emailBill
 } from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -203,7 +206,18 @@ export default function RushDashboard({ onSwitchToLegacy }) {
   const [appSettings, setAppSettings] = useState({
     agent_ledger_group: 'Agent Agents',
     sales_ledger: '1 Sales A/c',
-    default_godown: 'Main Location'
+    default_godown: 'Main Location',
+    business_name: '',
+    business_address: '',
+    business_phone: '',
+    business_pan: '',
+    smtp_host: '',
+    smtp_port: '587',
+    smtp_secure: 'false',
+    smtp_user: '',
+    smtp_pass: '',
+    smtp_from_name: '',
+    smtp_from_email: ''
   });
   const [pendingInvoices, setPendingInvoices] = useState([]);
   const [pendingInvoicesLoading, setPendingInvoicesLoading] = useState(false);
@@ -264,12 +278,11 @@ export default function RushDashboard({ onSwitchToLegacy }) {
   const [billHistoryDate, setBillHistoryDate] = useState(getTodayISO());
   const [billSummary, setBillSummary] = useState({ total_count: 0, synced_count: 0, pending_count: 0, failed_count: 0, total_amount: 0, synced_amount: 0 });
 
-  // Payment modal state
+  // Payment modal state (SFL fields)
   const [paymentModal, setPaymentModal] = useState({ open: false, bill: null });
-  const [paymentMethod, setPaymentMethod] = useState('cash');
-  const [paymentAmount, setPaymentAmount] = useState('');
-  const [paymentRef, setPaymentRef] = useState('');
-  const [paymentNotes, setPaymentNotes] = useState('');
+  const [paymentModes, setPaymentModes] = useState({
+    cashTeller1: '', cashTeller2: '', chequeReceipt: '', qrCode: '', discount: '', bankDeposit: '', esewa: ''
+  });
   const [paymentLoading, setPaymentLoading] = useState(false);
 
   // Items modal state (for viewing/adding/editing items to pending bills)
@@ -283,6 +296,13 @@ export default function RushDashboard({ onSwitchToLegacy }) {
   const [addingItem, setAddingItem] = useState(false);
   const [savingItems, setSavingItems] = useState(false);
   const [editingItemIndex, setEditingItemIndex] = useState(-1); // Which item row is being edited
+
+  // Email modal state
+  const [emailModal, setEmailModal] = useState({ open: false, billId: null, sending: false });
+  const [emailRecipient, setEmailRecipient] = useState('');
+  const [emailTestResult, setEmailTestResult] = useState(null);
+  const [emailTestLoading, setEmailTestLoading] = useState(false);
+  const [testEmailAddress, setTestEmailAddress] = useState('');
 
   // Create Bill modal state
   const [createBillModal, setCreateBillModal] = useState(false);
@@ -831,15 +851,13 @@ export default function RushDashboard({ onSwitchToLegacy }) {
   // Open payment modal
   const openPaymentModal = (bill) => {
     setPaymentModal({ open: true, bill });
-    setPaymentAmount(bill.pending_amount?.toString() || bill.amount?.toString() || '');
-    setPaymentMethod('cash');
-    setPaymentRef('');
-    setPaymentNotes('');
+    setPaymentModes({ cashTeller1: '', cashTeller2: '', chequeReceipt: '', qrCode: '', discount: '', bankDeposit: '', esewa: '' });
   };
 
   // Close payment modal
   const closePaymentModal = () => {
     setPaymentModal({ open: false, bill: null });
+    setPaymentModes({ cashTeller1: '', cashTeller2: '', chequeReceipt: '', qrCode: '', discount: '', bankDeposit: '', esewa: '' });
   };
 
   // Open items modal for a pending bill
@@ -891,6 +909,138 @@ export default function RushDashboard({ onSwitchToLegacy }) {
     setEditingItemIndex(-1);
     setNewItemForm({ stockItem: '', quantity: 1, rate: '' });
     setItemStockSearch('');
+  };
+
+  // Print a pending bill
+  const printBill = async (bill) => {
+    try {
+      addToast('info', 'Preparing Print', 'Loading bill data...');
+      const { data } = await getBillPrintData(bill.id);
+
+      const nepaliDate = toNepaliDate(data.bill.voucherDate);
+      const printWindow = window.open('', '_blank', 'width=800,height=600');
+
+      const itemsHTML = data.items.map((item, idx) => `
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:center">${idx + 1}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #ddd">${item.stockItem}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:center">${item.quantity} ${item.unit}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:right">Rs ${Number(item.rate).toLocaleString('en-IN')}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #ddd;text-align:right">Rs ${Number(item.amount).toLocaleString('en-IN')}</td>
+        </tr>
+      `).join('');
+
+      const total = data.items.reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
+      const totalQty = data.items.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+
+      printWindow.document.write(`<!DOCTYPE html><html><head>
+        <title>Bill - ${data.bill.voucherNumber}</title>
+        <style>
+          *{margin:0;padding:0;box-sizing:border-box}
+          body{font-family:'Segoe UI',Arial,sans-serif;padding:20px;color:#333}
+          .header{text-align:center;margin-bottom:20px;border-bottom:2px solid #333;padding-bottom:15px}
+          .header h1{font-size:22px;margin-bottom:4px}
+          .header .addr{font-size:12px;color:#666}
+          .header .pan{font-size:11px;color:#888;margin-top:4px}
+          .doc-title-wrap{text-align:center}
+          .doc-title{font-size:16px;font-weight:700;margin:15px 0;text-transform:uppercase;letter-spacing:1px;border:1px solid #333;display:inline-block;padding:4px 20px}
+          .info-row{display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px}
+          .info-section{margin-bottom:15px;padding:10px;background:#f9f9f9;border-radius:4px}
+          table{width:100%;border-collapse:collapse;margin:15px 0}
+          th{background:#333;color:white;padding:8px 10px;font-size:12px;text-transform:uppercase}
+          th:first-child{border-radius:4px 0 0 0}th:last-child{border-radius:0 4px 0 0}
+          .total-row td{font-weight:700;border-top:2px solid #333;padding:10px}
+          .footer{margin-top:40px;display:flex;justify-content:space-between;font-size:12px}
+          .footer .sign{border-top:1px solid #999;padding-top:5px;text-align:center;width:150px}
+          @media print{body{padding:10px}.no-print{display:none}}
+        </style>
+      </head><body>
+        <div class="header">
+          <h1>${data.business.businessName || 'Business'}</h1>
+          ${data.business.businessAddress ? `<div class="addr">${data.business.businessAddress}</div>` : ''}
+          ${data.business.businessPhone ? `<div class="addr">Phone: ${data.business.businessPhone}</div>` : ''}
+          ${data.business.businessPAN ? `<div class="pan">PAN: ${data.business.businessPAN}</div>` : ''}
+        </div>
+        <div class="doc-title-wrap"><span class="doc-title">${data.bill.voucherType || 'Pending Sales Bill'}</span></div>
+        <div class="info-section">
+          <div class="info-row"><span><strong>Party:</strong> ${data.bill.partyName}</span><span><strong>Bill No:</strong> ${data.bill.voucherNumber}</span></div>
+          <div class="info-row"><span>${data.party?.address ? `<strong>Address:</strong> ${data.party.address}` : ''}</span><span><strong>Date:</strong> ${formatDate(data.bill.voucherDate)}</span></div>
+          <div class="info-row"><span>${data.party?.phone ? `<strong>Phone:</strong> ${data.party.phone}` : ''}</span><span style="font-size:12px;color:#555">${nepaliDate}</span></div>
+        </div>
+        <table>
+          <thead><tr>
+            <th style="width:40px;text-align:center">#</th>
+            <th style="text-align:left">Item</th>
+            <th style="width:100px;text-align:center">Qty</th>
+            <th style="width:100px;text-align:right">Rate</th>
+            <th style="width:120px;text-align:right">Amount</th>
+          </tr></thead>
+          <tbody>${itemsHTML}</tbody>
+          <tfoot><tr class="total-row">
+            <td colspan="2" style="text-align:right">Total:</td>
+            <td style="text-align:center">${totalQty}</td>
+            <td></td>
+            <td style="text-align:right">Rs ${total.toLocaleString('en-IN')}</td>
+          </tr></tfoot>
+        </table>
+        ${data.bill.narration ? `<div style="font-size:12px;color:#666;margin:10px 0"><strong>Narration:</strong> ${data.bill.narration}</div>` : ''}
+        <div class="footer"><div class="sign">Prepared By</div><div class="sign">Received By</div></div>
+        <script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script>
+      </body></html>`);
+      printWindow.document.close();
+    } catch (error) {
+      console.error('Print failed:', error);
+      addToast('error', 'Print Failed', error.message || 'Could not load bill data');
+    }
+  };
+
+  // Email handlers
+  const handleTestEmailConnection = async () => {
+    setEmailTestLoading(true);
+    setEmailTestResult(null);
+    try {
+      const { data } = await testEmailConnection();
+      setEmailTestResult(data);
+    } catch (error) {
+      setEmailTestResult({ success: false, error: error.response?.data?.error || error.message });
+    } finally {
+      setEmailTestLoading(false);
+    }
+  };
+
+  const handleSendTestEmail = async () => {
+    if (!testEmailAddress) return;
+    setEmailTestLoading(true);
+    setEmailTestResult(null);
+    try {
+      const { data } = await sendTestEmail(testEmailAddress);
+      setEmailTestResult(data);
+      addToast('success', 'Test Email Sent', `Email sent to ${testEmailAddress}`);
+    } catch (error) {
+      setEmailTestResult({ success: false, error: error.response?.data?.error || error.message });
+      addToast('error', 'Email Failed', error.response?.data?.error || error.message);
+    } finally {
+      setEmailTestLoading(false);
+    }
+  };
+
+  const handleEmailBill = async () => {
+    if (!emailRecipient || !emailModal.billId) return;
+    setEmailModal(prev => ({ ...prev, sending: true }));
+    try {
+      const { data } = await emailBill(emailModal.billId, emailRecipient);
+      if (data.success) {
+        addToast('success', 'Email Sent', `Bill emailed to ${emailRecipient}`);
+        setEmailModal({ open: false, billId: null, sending: false });
+        setEmailRecipient('');
+      } else {
+        addToast('error', 'Email Failed', data.error);
+      }
+    } catch (error) {
+      addToast('error', 'Email Failed', error.response?.data?.error || error.message);
+    } finally {
+      setEmailModal(prev => ({ ...prev, sending: false }));
+    }
   };
 
   // Search stock items for add item form
@@ -1174,25 +1324,48 @@ export default function RushDashboard({ onSwitchToLegacy }) {
     }
   };
 
-  // Submit payment
+  // Calculate total payment from SFL fields
+  const totalPayment = Object.values(paymentModes).reduce((sum, v) => sum + (parseFloat(v) || 0), 0);
+
+  // Submit payment with SFL fields to Tally
   const submitPayment = async () => {
-    if (!paymentModal.bill || !paymentAmount) return;
+    if (!paymentModal.bill || totalPayment <= 0) return;
+
+    const bill = paymentModal.bill;
+    const masterId = bill.tally_master_id || bill.master_id || bill.id;
+    const billAmount = Math.abs(bill.pending_amount || bill.amount);
+    const newVoucherType = totalPayment >= billAmount ? 'Sales' : 'Credit Sales';
 
     setPaymentLoading(true);
     try {
-      await createPayment({
-        billId: paymentModal.bill.id,
-        masterId: paymentModal.bill.master_id,
-        partyName: paymentModal.bill.party_name,
-        amount: parseFloat(paymentAmount.replace(/,/g, '')),
-        method: paymentMethod,
-        reference: paymentRef,
-        notes: paymentNotes
+      const response = await fetch(`/api/receipt/pending-sales-bills/${masterId}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          partyName: bill.party_name,
+          amount: billAmount,
+          date: bill.voucher_date,
+          voucherNumber: bill.voucher_number,
+          guid: bill.tally_guid,
+          paymentModes: {
+            cashTeller1: parseFloat(paymentModes.cashTeller1) || 0,
+            cashTeller2: parseFloat(paymentModes.cashTeller2) || 0,
+            chequeReceipt: parseFloat(paymentModes.chequeReceipt) || 0,
+            qrCode: parseFloat(paymentModes.qrCode) || 0,
+            discount: parseFloat(paymentModes.discount) || 0,
+            bankDeposit: parseFloat(paymentModes.bankDeposit) || 0,
+            esewa: parseFloat(paymentModes.esewa) || 0
+          }
+        })
       });
-
-      addToast('success', 'Payment Recorded', `${formatCurrency(paymentAmount)} from ${paymentModal.bill.party_name}`);
-      closePaymentModal();
-      fetchData();
+      const data = await response.json();
+      if (response.ok && data.success) {
+        addToast('success', 'Payment Completed', `${formatCurrency(totalPayment)} from ${bill.party_name} - Updated to ${newVoucherType}`);
+        closePaymentModal();
+        fetchData();
+      } else {
+        addToast('error', 'Payment Failed', data.error || 'Failed to complete payment');
+      }
     } catch (error) {
       addToast('error', 'Payment Failed', error.message);
     } finally {
@@ -2285,13 +2458,30 @@ export default function RushDashboard({ onSwitchToLegacy }) {
                       </div>
                       <div className="pending-right">
                         <div className="pending-amt">Rs {Math.abs(bill.pending_amount || bill.amount).toLocaleString('en-IN')}</div>
-                        <div style={{ display: 'flex', gap: '8px' }}>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                           <button
                             className="pending-pay-btn"
                             style={{ background: 'var(--blue-g)', color: 'var(--blue)' }}
                             onClick={() => openItemsModal(bill)}
                           >
                             📦 Items
+                          </button>
+                          <button
+                            className="pending-pay-btn"
+                            style={{ background: 'var(--cyan-g, rgba(0,188,212,0.1))', color: 'var(--cyan, #00bcd4)' }}
+                            onClick={() => printBill(bill)}
+                          >
+                            🖨 Print
+                          </button>
+                          <button
+                            className="pending-pay-btn"
+                            style={{ background: 'var(--purple-g, rgba(156,39,176,0.1))', color: 'var(--purple, #9c27b0)' }}
+                            onClick={() => {
+                              setEmailRecipient('');
+                              setEmailModal({ open: true, billId: bill.id, sending: false });
+                            }}
+                          >
+                            📧 Email
                           </button>
                           <button className="pending-pay-btn" onClick={() => openPaymentModal(bill)}>
                             💰 Pay
@@ -3476,6 +3666,110 @@ export default function RushDashboard({ onSwitchToLegacy }) {
                 </div>
 
                 <div className="s-card">
+                  <div className="s-card-h">🏢 Business Info (Print/Email)</div>
+                  <div className="s-card-b">
+                    {[
+                      { key: 'business_name', label: 'Business Name', placeholder: 'Your Business Name' },
+                      { key: 'business_address', label: 'Address', placeholder: 'City, District' },
+                      { key: 'business_phone', label: 'Phone', placeholder: '01-XXXXXXX' },
+                      { key: 'business_pan', label: 'PAN/VAT No.', placeholder: '000000000' }
+                    ].map(field => (
+                      <div key={field.key} className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '6px' }}>
+                        <div className="s-name">{field.label}</div>
+                        <input
+                          type="text"
+                          value={appSettings[field.key] || ''}
+                          onChange={(e) => setAppSettings(prev => ({ ...prev, [field.key]: e.target.value }))}
+                          onBlur={() => handleSaveSettings()}
+                          placeholder={field.placeholder}
+                          style={{ width: '100%', padding: '10px 12px', fontSize: '14px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="s-card">
+                  <div className="s-card-h">📧 Email / SMTP Settings</div>
+                  <div className="s-card-b">
+                    {[
+                      { key: 'smtp_host', label: 'SMTP Host', placeholder: 'smtp.gmail.com' },
+                      { key: 'smtp_port', label: 'SMTP Port', placeholder: '587' },
+                      { key: 'smtp_user', label: 'Username', placeholder: 'you@example.com' },
+                      { key: 'smtp_pass', label: 'Password', placeholder: '********', type: 'password' },
+                      { key: 'smtp_from_name', label: 'From Name', placeholder: 'Your Business' },
+                      { key: 'smtp_from_email', label: 'From Email', placeholder: 'billing@example.com' }
+                    ].map(field => (
+                      <div key={field.key} className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '6px' }}>
+                        <div className="s-name">{field.label}</div>
+                        <input
+                          type={field.type || 'text'}
+                          value={appSettings[field.key] || ''}
+                          onChange={(e) => setAppSettings(prev => ({ ...prev, [field.key]: e.target.value }))}
+                          onBlur={() => handleSaveSettings()}
+                          placeholder={field.placeholder}
+                          style={{ width: '100%', padding: '10px 12px', fontSize: '14px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                        />
+                      </div>
+                    ))}
+                    <div className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: 'var(--t2)' }}>
+                        <input
+                          type="checkbox"
+                          checked={appSettings.smtp_secure === 'true'}
+                          onChange={(e) => {
+                            const val = e.target.checked ? 'true' : 'false';
+                            setAppSettings(prev => ({ ...prev, smtp_secure: val }));
+                            setTimeout(() => handleSaveSettings(), 100);
+                          }}
+                        />
+                        Use SSL/TLS (port 465)
+                      </label>
+                    </div>
+                    <div className="s-row" style={{ flexDirection: 'column', gap: '8px' }}>
+                      <button
+                        onClick={handleTestEmailConnection}
+                        disabled={emailTestLoading}
+                        style={{
+                          width: '100%', padding: '10px', background: emailTestLoading ? 'var(--bg4)' : 'var(--blue)',
+                          color: 'white', border: 'none', borderRadius: '8px', fontWeight: '600', cursor: emailTestLoading ? 'not-allowed' : 'pointer'
+                        }}
+                      >
+                        {emailTestLoading ? '⟳ Testing...' : '🔌 Test SMTP Connection'}
+                      </button>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <input
+                          type="email"
+                          value={testEmailAddress}
+                          onChange={(e) => setTestEmailAddress(e.target.value)}
+                          placeholder="test@example.com"
+                          style={{ flex: 1, padding: '10px 12px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                        />
+                        <button
+                          onClick={handleSendTestEmail}
+                          disabled={emailTestLoading || !testEmailAddress}
+                          style={{
+                            padding: '10px 16px', background: emailTestLoading || !testEmailAddress ? 'var(--bg4)' : 'var(--green)',
+                            color: 'white', border: 'none', borderRadius: '8px', fontWeight: '600', cursor: emailTestLoading || !testEmailAddress ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap'
+                          }}
+                        >
+                          📨 Send Test
+                        </button>
+                      </div>
+                      {emailTestResult && (
+                        <div style={{
+                          padding: '10px', borderRadius: '8px', fontSize: '12px',
+                          background: emailTestResult.success ? 'var(--green-g, rgba(76,175,80,0.1))' : 'var(--red-g, rgba(244,67,54,0.1))',
+                          color: emailTestResult.success ? 'var(--green)' : 'var(--red)'
+                        }}>
+                          {emailTestResult.success ? (emailTestResult.message || 'Success!') : emailTestResult.error}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="s-card">
                   <div className="s-card-h">📊 Dashboard Info</div>
                   <div className="s-card-b">
                     <div className="s-row">
@@ -3521,7 +3815,11 @@ export default function RushDashboard({ onSwitchToLegacy }) {
             <button className="m-close" onClick={closePaymentModal}>✕</button>
           </div>
 
-          {paymentModal.bill && (
+          {paymentModal.bill && (() => {
+            const billAmt = Math.abs(paymentModal.bill.pending_amount || paymentModal.bill.amount);
+            const isFullPay = totalPayment >= billAmt;
+            const balanceAfter = Math.max(0, billAmt - totalPayment);
+            return (
             <>
               <div className="m-body">
                 <div className="m-bill">
@@ -3529,58 +3827,86 @@ export default function RushDashboard({ onSwitchToLegacy }) {
                     <div className="party">{paymentModal.bill.party_name}</div>
                     <div className="inv">{paymentModal.bill.voucher_number} · {paymentModal.bill.voucher_type}</div>
                   </div>
-                  <div className="total">{formatCurrency(paymentModal.bill.pending_amount || paymentModal.bill.amount)}</div>
+                  <div className="total">{formatCurrency(billAmt)}</div>
                 </div>
 
-                <div className="pay-label">Payment Method</div>
-                <div className="pay-methods">
-                  {[
-                    { id: 'cash', icon: '💵', name: 'Cash' },
-                    { id: 'cheque', icon: '📝', name: 'Cheque' },
-                    { id: 'esewa', icon: '📱', name: 'eSewa' },
-                    { id: 'bank', icon: '🏦', name: 'Bank' },
-                    { id: 'credit', icon: '📋', name: 'Credit' },
-                    { id: 'split', icon: '✂️', name: 'Split' }
-                  ].map(method => (
-                    <div
-                      key={method.id}
-                      className={`pay-m ${paymentMethod === method.id ? 'sel' : ''}`}
-                      onClick={() => setPaymentMethod(method.id)}
-                    >
-                      <div className="pay-m-ic">{method.icon}</div>
-                      <div className="pay-m-name">{method.name}</div>
+                {/* Quick Actions */}
+                <div style={{ display: 'flex', gap: '8px', margin: '12px 0' }}>
+                  <button
+                    className="btn btn-o"
+                    style={{ flex: 1, color: 'var(--green)' }}
+                    onClick={() => setPaymentModes({ cashTeller1: String(billAmt), cashTeller2: '', chequeReceipt: '', qrCode: '', discount: '', bankDeposit: '', esewa: '' })}
+                  >
+                    Full Payment
+                  </button>
+                  <button
+                    className="btn btn-o"
+                    style={{ flex: 1 }}
+                    onClick={() => setPaymentModes({ cashTeller1: '', cashTeller2: '', chequeReceipt: '', qrCode: '', discount: '', bankDeposit: '', esewa: '' })}
+                  >
+                    Clear All
+                  </button>
+                </div>
+
+                {/* SFL Payment Fields */}
+                <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t2)', marginBottom: '8px' }}>Payment Breakdown (SFL Fields)</div>
+                {[
+                  { key: 'cashTeller1', label: 'Cash Teller 1', icon: '💵', sfl: 'SFL1' },
+                  { key: 'cashTeller2', label: 'Cash Teller 2', icon: '💵', sfl: 'SFL2' },
+                  { key: 'chequeReceipt', label: 'Cheque Receipt', icon: '📝', sfl: 'SFL3' },
+                  { key: 'qrCode', label: 'Q/R Code', icon: '📱', sfl: 'SFL4' },
+                  { key: 'discount', label: 'Discount', icon: '🏷', sfl: 'SFL5' },
+                  { key: 'bankDeposit', label: 'Bank Deposit', icon: '🏦', sfl: 'SFL6' },
+                  { key: 'esewa', label: 'Esewa', icon: '📲', sfl: 'SFL7' }
+                ].map(field => (
+                  <div key={field.key} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0', borderBottom: '1px solid var(--bg3, rgba(255,255,255,0.05))' }}>
+                    <span style={{ fontSize: '16px', width: '24px', textAlign: 'center' }}>{field.icon}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: '12px', color: 'var(--t3)' }}>{field.label} <span style={{ opacity: 0.5 }}>({field.sfl})</span></div>
                     </div>
-                  ))}
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={paymentModes[field.key]}
+                      onChange={(e) => setPaymentModes(prev => ({ ...prev, [field.key]: e.target.value }))}
+                      placeholder="0"
+                      style={{
+                        width: '120px', padding: '8px 10px', textAlign: 'right',
+                        fontFamily: 'var(--mono)', fontSize: '14px', fontWeight: '600',
+                        border: '1px solid var(--border)', borderRadius: '6px',
+                        background: 'var(--bg)', color: 'var(--t1)'
+                      }}
+                    />
+                  </div>
+                ))}
+
+                {/* Summary */}
+                <div style={{ margin: '12px 0', padding: '12px', background: 'var(--bg2, rgba(255,255,255,0.03))', borderRadius: '8px', fontSize: '13px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <span style={{ color: 'var(--t3)' }}>Bill Amount:</span>
+                    <span style={{ fontWeight: '600' }}>{formatCurrency(billAmt)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <span style={{ color: 'var(--t3)' }}>Total Payment:</span>
+                    <span style={{ fontWeight: '600', color: totalPayment > 0 ? 'var(--green)' : 'var(--t3)' }}>{formatCurrency(totalPayment)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid var(--border)', paddingTop: '6px' }}>
+                    <span style={{ fontWeight: '700' }}>Balance After:</span>
+                    <span style={{ fontWeight: '700', color: balanceAfter > 0 ? 'var(--amber)' : 'var(--green)' }}>{formatCurrency(balanceAfter)}</span>
+                  </div>
                 </div>
 
-                <div className="field">
-                  <label>Amount</label>
-                  <input
-                    type="text"
-                    value={paymentAmount}
-                    onChange={(e) => setPaymentAmount(e.target.value)}
-                  />
-                </div>
-
-                <div className="field">
-                  <label>Reference No</label>
-                  <input
-                    type="text"
-                    placeholder="Cheque/eSewa/Bank ref"
-                    value={paymentRef}
-                    onChange={(e) => setPaymentRef(e.target.value)}
-                  />
-                </div>
-
-                <div className="field">
-                  <label>Notes</label>
-                  <input
-                    type="text"
-                    placeholder="Optional remarks"
-                    value={paymentNotes}
-                    onChange={(e) => setPaymentNotes(e.target.value)}
-                  />
-                </div>
+                {/* Voucher Type Preview */}
+                {totalPayment > 0 && (
+                  <div style={{
+                    padding: '10px', borderRadius: '8px', textAlign: 'center', fontSize: '13px', fontWeight: '600',
+                    background: isFullPay ? 'var(--green-g, rgba(76,175,80,0.1))' : 'var(--amber-g, rgba(255,152,0,0.1))',
+                    color: isFullPay ? 'var(--green)' : 'var(--amber)'
+                  }}>
+                    Will update to: <strong>{isFullPay ? 'Sales' : 'Credit Sales'}</strong>
+                    {isFullPay ? ' (Full Payment)' : ' (Partial Payment)'}
+                  </div>
+                )}
               </div>
 
               <div className="m-foot">
@@ -3588,13 +3914,18 @@ export default function RushDashboard({ onSwitchToLegacy }) {
                 <button
                   className="btn-confirm"
                   onClick={submitPayment}
-                  disabled={paymentLoading}
+                  disabled={paymentLoading || totalPayment <= 0}
+                  style={{
+                    background: paymentLoading || totalPayment <= 0 ? 'var(--bg4)' : isFullPay ? 'var(--green)' : 'var(--amber)',
+                    cursor: paymentLoading || totalPayment <= 0 ? 'not-allowed' : 'pointer'
+                  }}
                 >
-                  {paymentLoading ? '⟳ Processing...' : '✅ Confirm & Sync to Tally'}
+                  {paymentLoading ? '⟳ Processing...' : `✅ Complete (${formatCurrency(totalPayment)})`}
                 </button>
               </div>
             </>
-          )}
+            );
+          })()}
         </div>
       </div>
 
@@ -3831,8 +4162,30 @@ export default function RushDashboard({ onSwitchToLegacy }) {
                 </div>
               </div>
 
-              <div className="m-foot" style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-                <button className="btn btn-o" onClick={closeItemsModal}>Cancel</button>
+              <div className="m-foot" style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button className="btn btn-o" onClick={closeItemsModal}>Cancel</button>
+                  <button
+                    className="btn btn-o"
+                    style={{ color: 'var(--cyan, #00bcd4)' }}
+                    onClick={() => itemsModal.bill && printBill(itemsModal.bill)}
+                    disabled={editingItems.length === 0}
+                  >
+                    🖨 Print
+                  </button>
+                  <button
+                    className="btn btn-o"
+                    style={{ color: 'var(--purple, #9c27b0)' }}
+                    onClick={() => {
+                      if (!itemsModal.bill) return;
+                      setEmailRecipient('');
+                      setEmailModal({ open: true, billId: itemsModal.bill.id, sending: false });
+                    }}
+                    disabled={editingItems.length === 0}
+                  >
+                    📧 Email
+                  </button>
+                </div>
                 <button
                   onClick={saveAllItemChanges}
                   disabled={savingItems || editingItems.length === 0}
@@ -3852,6 +4205,47 @@ export default function RushDashboard({ onSwitchToLegacy }) {
               </div>
             </>
           )}
+        </div>
+      </div>
+
+      {/* EMAIL BILL MODAL */}
+      <div className={`overlay ${emailModal.open ? 'open' : ''}`} onClick={() => !emailModal.sending && setEmailModal({ open: false, billId: null, sending: false })}>
+        <div className="modal" style={{ maxWidth: '400px' }} onClick={(e) => e.stopPropagation()}>
+          <div className="m-head">
+            <h3>📧 Email Bill</h3>
+            <button className="m-close" onClick={() => setEmailModal({ open: false, billId: null, sending: false })}>✕</button>
+          </div>
+          <div className="m-body" style={{ padding: '20px' }}>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', marginBottom: '6px', color: 'var(--t2)' }}>Recipient Email</label>
+              <input
+                type="email"
+                value={emailRecipient}
+                onChange={(e) => setEmailRecipient(e.target.value)}
+                placeholder="party@example.com"
+                disabled={emailModal.sending}
+                style={{
+                  width: '100%', padding: '10px 12px', fontSize: '14px',
+                  border: '1px solid var(--border)', borderRadius: '8px',
+                  background: 'var(--bg)', color: 'var(--t1)'
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && handleEmailBill()}
+              />
+            </div>
+          </div>
+          <div className="m-foot" style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+            <button className="btn btn-o" onClick={() => setEmailModal({ open: false, billId: null, sending: false })}>Cancel</button>
+            <button
+              onClick={handleEmailBill}
+              disabled={emailModal.sending || !emailRecipient}
+              style={{
+                padding: '10px 20px', background: emailModal.sending || !emailRecipient ? 'var(--bg4)' : 'var(--blue)',
+                color: 'white', border: 'none', borderRadius: '8px', fontWeight: '600', cursor: emailModal.sending || !emailRecipient ? 'not-allowed' : 'pointer'
+              }}
+            >
+              {emailModal.sending ? '⟳ Sending...' : '📨 Send Email'}
+            </button>
+          </div>
         </div>
       </div>
 

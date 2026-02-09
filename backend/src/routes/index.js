@@ -37,6 +37,7 @@ import vouchersRoutes from './vouchers.js';
 import paymentsRoutes from './payments.js';
 import daybookRoutes from './daybook.js';
 import configRoutes from './config.js';
+import emailRoutes from './email.js';
 
 const router = Router();
 
@@ -60,6 +61,7 @@ router.use('/vouchers', vouchersRoutes);
 router.use('/payments', paymentsRoutes);
 router.use('/daybook', daybookRoutes);
 router.use('/config', configRoutes);
+router.use('/email', emailRoutes);
 
 // Legacy routes for backward compatibility
 // Redirect old /api/auth/login to /api/users/auth/login
