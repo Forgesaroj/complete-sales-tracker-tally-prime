@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rush Wholesale Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg0: #0B0D13;
+  --bg1: #111318;
+  --bg2: #181B24;
+  --bg3: #1F2331;
+  --bg4: #272C3D;
+  --border: rgba(255,255,255,0.06);
+  --border2: rgba(255,255,255,0.1);
+  --t1: #F0F1F5;
+  --t2: #9499AD;
+  --t3: #5C6178;
+  --blue: #4E8EF7;
+  --blue-g: rgba(78,142,247,0.12);
+  --green: #34D399;
+  --green-g: rgba(52,211,153,0.1);
+  --red: #F87171;
+  --red-g: rgba(248,113,113,0.1);
+  --amber: #FBBF24;
+  --amber-g: rgba(251,191,36,0.1);
+  --purple: #A78BFA;
+  --purple-g: rgba(167,139,250,0.1);
+  --cyan: #22D3EE;
+  --cyan-g: rgba(34,211,238,0.1);
+  --orange: #FB923C;
+  --orange-g: rgba(251,146,60,0.1);
+  --r: 12px;
+  --r2: 16px;
+  --font: 'DM Sans', sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:var(--font); background:var(--bg0); color:var(--t1); height:100vh; overflow:hidden; }
+
+/* SIDEBAR */
+.sidebar {
+  position:fixed; left:0; top:0; bottom:0; width:240px;
+  background:var(--bg1); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; z-index:100;
+}
+.brand { padding:18px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+.brand-icon {
+  width:36px; height:36px; border-radius:10px;
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  display:flex; align-items:center; justify-content:center;
+  font-size:16px; font-weight:800; color:#fff;
+}
+.brand h2 { font-size:15px; font-weight:700; }
+.brand span { font-size:11px; color:var(--t3); }
+.nav { flex:1; padding:10px 8px; overflow-y:auto; }
+.nav-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--t3); padding:14px 12px 6px; }
+.nav-item {
+  display:flex; align-items:center; gap:10px; padding:10px 12px;
+  border-radius:var(--r); cursor:pointer; font-size:13px; font-weight:500;
+  color:var(--t2); transition:all .15s; margin-bottom:1px; position:relative;
+}
+.nav-item:hover { background:rgba(255,255,255,.03); color:var(--t1); }
+.nav-item.active { background:var(--blue-g); color:var(--blue); }
+.nav-item.active::before {
+  content:''; position:absolute; left:0; top:50%; transform:translateY(-50%);
+  width:3px; height:18px; background:var(--blue); border-radius:0 3px 3px 0;
+}
+.nav-icon { font-size:15px; width:20px; text-align:center; }
+.badge {
+  margin-left:auto; font-size:10px; font-weight:700; padding:2px 7px;
+  border-radius:10px; min-width:20px; text-align:center; color:#fff;
+}
+.badge.red { background:var(--red); }
+.badge.amber { background:var(--amber); color:#000; }
+.sidebar-footer { padding:12px; border-top:1px solid var(--border); }
+.sync-bar {
+  display:flex; align-items:center; gap:8px; padding:10px 12px;
+  background:var(--bg2); border-radius:var(--r); font-size:11px; color:var(--t2);
+}
+.sync-dot { width:7px; height:7px; border-radius:50%; background:var(--green); animation:pulse 2s infinite; }
+@keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.4)} 50%{box-shadow:0 0 0 5px rgba(52,211,153,0)} }
+
+/* TOPBAR */
+.topbar {
+  position:fixed; top:0; left:240px; right:0; height:56px;
+  background:var(--bg1); border-bottom:1px solid var(--border);
+  display:flex; align-items:center; padding:0 20px; z-index:90; gap:12px;
+}
+.page-title { font-size:16px; font-weight:700; flex:1; display:flex; align-items:center; gap:10px; }
+.live { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600; color:var(--green); }
+.live-dot { width:7px; height:7px; border-radius:50%; background:var(--green); animation:pulse 1.5s infinite; }
+.search-box {
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--r);
+  padding:7px 12px 7px 32px; color:var(--t1); font-size:12px; width:240px;
+  font-family:var(--font); outline:none; transition:border .2s;
+}
+.search-box:focus { border-color:var(--blue); }
+.mode-tog { display:flex; background:var(--bg2); border-radius:var(--r); border:1px solid var(--border); overflow:hidden; }
+.mode-tog button {
+  padding:7px 14px; font-size:11px; font-weight:600; border:none;
+  background:transparent; color:var(--t3); cursor:pointer; font-family:var(--font);
+}
+.mode-tog button.active { background:var(--blue); color:#fff; }
+.top-btn {
+  width:36px; height:36px; border-radius:var(--r); border:1px solid var(--border);
+  background:var(--bg2); color:var(--t2); cursor:pointer; font-size:15px;
+  display:flex; align-items:center; justify-content:center; position:relative;
+}
+.top-btn:hover { color:var(--t1); background:var(--bg3); }
+.notif-dot { position:absolute; top:7px; right:7px; width:6px; height:6px; background:var(--red); border-radius:50%; }
+.avatar {
+  width:32px; height:32px; border-radius:var(--r);
+  background:linear-gradient(135deg,var(--blue),var(--cyan));
+  display:flex; align-items:center; justify-content:center;
+  font-size:13px; font-weight:700; cursor:pointer;
+}
+
+/* MAIN */
+.main {
+  margin-left:240px; margin-top:56px; height:calc(100vh - 56px);
+  overflow-y:auto; padding:20px; scroll-behavior:smooth;
+}
+.main::-webkit-scrollbar { width:5px; }
+.main::-webkit-scrollbar-thumb { background:var(--border2); border-radius:3px; }
+
+/* PAGES */
+.page { display:none; animation:fadeUp .25s ease; }
+.page.active { display:block; }
+@keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+
+/* STATS */
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-bottom:20px; }
+.stat {
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2);
+  padding:18px; position:relative; overflow:hidden; transition:all .2s;
+}
+.stat:hover { border-color:var(--border2); transform:translateY(-1px); }
+.stat::before { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
+.stat.blue::before{background:var(--blue)} .stat.green::before{background:var(--green)}
+.stat.red::before{background:var(--red)} .stat.amber::before{background:var(--amber)}
+.stat.purple::before{background:var(--purple)} .stat.cyan::before{background:var(--cyan)}
+.stat-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.stat-label { font-size:12px; color:var(--t2); font-weight:500; }
+.stat-ic {
+  width:32px; height:32px; border-radius:8px; display:flex;
+  align-items:center; justify-content:center; font-size:14px;
+}
+.stat-ic.blue{background:var(--blue-g)} .stat-ic.green{background:var(--green-g)}
+.stat-ic.red{background:var(--red-g)} .stat-ic.amber{background:var(--amber-g)}
+.stat-val { font-size:26px; font-weight:800; font-family:var(--mono); letter-spacing:-1px; }
+.stat-sub { font-size:11px; color:var(--t3); margin-top:4px; }
+.stat-sub .up{color:var(--green)} .stat-sub .dn{color:var(--red)}
+
+/* SECTION */
+.sec-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+.sec-title { font-size:15px; font-weight:700; display:flex; align-items:center; gap:8px; }
+.sec-title .cnt { background:var(--bg3); padding:2px 8px; border-radius:12px; font-size:11px; color:var(--t2); }
+.tabs { display:flex; gap:3px; background:var(--bg2); padding:3px; border-radius:var(--r); border:1px solid var(--border); }
+.tab {
+  padding:6px 12px; border-radius:8px; font-size:11px; font-weight:600;
+  color:var(--t3); cursor:pointer; border:none; background:transparent; font-family:var(--font);
+}
+.tab.active { background:var(--blue); color:#fff; }
+.tab:hover:not(.active) { color:var(--t2); }
+.btn {
+  display:inline-flex; align-items:center; gap:5px; padding:7px 14px;
+  border-radius:var(--r); font-size:12px; font-weight:600; cursor:pointer;
+  border:none; font-family:var(--font); transition:all .15s;
+}
+.btn-p { background:var(--blue); color:#fff; }
+.btn-p:hover { box-shadow:0 4px 14px rgba(78,142,247,.25); }
+.btn-o { background:transparent; border:1px solid var(--border); color:var(--t2); }
+.btn-o:hover { border-color:var(--border2); color:var(--t1); }
+
+/* BILL CARDS */
+.bills { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:12px; }
+.bill {
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2);
+  padding:16px; transition:all .2s; cursor:pointer;
+}
+.bill:hover { border-color:var(--border2); }
+.bill.unpaid{border-left:3px solid var(--red)} .bill.paid{border-left:3px solid var(--green)}
+.bill.partial{border-left:3px solid var(--amber)} .bill.credit{border-left:3px solid var(--purple)}
+.bill-top { display:flex; justify-content:space-between; margin-bottom:12px; }
+.bill-party { font-size:14px; font-weight:700; }
+.bill-inv { font-size:11px; color:var(--t3); font-family:var(--mono); margin-top:2px; }
+.bill-amt { font-size:18px; font-weight:800; font-family:var(--mono); letter-spacing:-.5px; }
+.bill-cur { font-size:11px; color:var(--t3); }
+.bill-meta { display:flex; gap:10px; font-size:11px; color:var(--t2); margin-bottom:12px; flex-wrap:wrap; }
+.bill-bot { display:flex; justify-content:space-between; align-items:center; padding-top:12px; border-top:1px solid var(--border); }
+.badge-s {
+  display:inline-flex; align-items:center; gap:4px; padding:4px 10px;
+  border-radius:14px; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.4px;
+}
+.badge-s.unpaid{background:var(--red-g);color:var(--red)} .badge-s.paid{background:var(--green-g);color:var(--green)}
+.badge-s.partial{background:var(--amber-g);color:var(--amber)} .badge-s.credit{background:var(--purple-g);color:var(--purple)}
+.badge-d { padding:4px 10px; border-radius:14px; font-size:10px; font-weight:600; }
+.badge-d.pending{background:rgba(255,255,255,.04);color:var(--t3)}
+.badge-d.packing{background:var(--orange-g);color:var(--orange)}
+.badge-d.ready{background:var(--cyan-g);color:var(--cyan)}
+.badge-d.done{background:var(--green-g);color:var(--green)}
+.bill-acts { display:flex; gap:4px; }
+.bill-act {
+  width:28px; height:28px; border-radius:8px; border:1px solid var(--border);
+  background:var(--bg3); color:var(--t3); cursor:pointer; font-size:12px;
+  display:flex; align-items:center; justify-content:center;
+}
+.bill-act:hover { color:var(--t1); }
+.bill-act.pay:hover { color:var(--green); border-color:var(--green); background:var(--green-g); }
+
+/* COUNTER */
+.counter-list { display:flex; flex-direction:column; gap:10px; }
+.counter-row {
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2);
+  padding:20px 24px; display:flex; align-items:center; gap:16px; animation:slideR .3s ease;
+}
+@keyframes slideR { from{opacity:0;transform:translateX(-16px)} to{opacity:1;transform:translateX(0)} }
+.counter-row.unpaid { border-left:4px solid var(--red); background:linear-gradient(90deg,rgba(248,113,113,.03),var(--bg2)); }
+.counter-row.paid { border-left:4px solid var(--green); opacity:.55; }
+.c-num {
+  width:48px; height:48px; border-radius:var(--r); background:var(--bg3);
+  display:flex; align-items:center; justify-content:center;
+  font-size:18px; font-weight:800; font-family:var(--mono); color:var(--blue); flex-shrink:0;
+}
+.c-info { flex:1; }
+.c-party { font-size:17px; font-weight:700; }
+.c-inv { font-size:12px; color:var(--t3); font-family:var(--mono); }
+.c-time { font-size:11px; color:var(--t3); margin-top:2px; }
+.c-amt { font-size:28px; font-weight:800; font-family:var(--mono); letter-spacing:-1px; margin-right:16px; }
+.c-btn {
+  padding:14px 32px; border-radius:var(--r); border:none; font-size:15px;
+  font-weight:700; cursor:pointer; font-family:var(--font); min-width:130px; transition:all .15s;
+}
+.c-btn.pay { background:var(--green); color:#000; }
+.c-btn.pay:hover { box-shadow:0 6px 20px rgba(52,211,153,.3); transform:scale(1.02); }
+.c-btn.done { background:var(--bg3); color:var(--green); cursor:default; }
+
+/* DISPATCH KANBAN */
+.kanban { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+.kanban-col { background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2); }
+.kanban-head {
+  padding:14px 16px; border-bottom:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between;
+}
+.kanban-title { font-size:13px; font-weight:700; display:flex; align-items:center; gap:7px; }
+.dot { width:9px; height:9px; border-radius:50%; }
+.dot.amber{background:var(--amber)} .dot.orange{background:var(--orange)}
+.dot.cyan{background:var(--cyan)} .dot.green{background:var(--green)}
+.kanban-cnt { font-size:11px; color:var(--t3); }
+.kanban-body { padding:10px; display:flex; flex-direction:column; gap:8px; max-height:450px; overflow-y:auto; }
+.k-item { background:var(--bg3); border:1px solid var(--border); border-radius:var(--r); padding:12px; }
+.k-item:hover { border-color:var(--border2); }
+.k-top { display:flex; justify-content:space-between; margin-bottom:6px; }
+.k-party { font-size:13px; font-weight:700; }
+.k-amt { font-size:13px; font-weight:700; font-family:var(--mono); }
+.k-inv { font-size:10px; color:var(--t3); font-family:var(--mono); margin-bottom:8px; }
+.k-move {
+  width:100%; padding:7px; border-radius:8px; border:1px dashed var(--border2);
+  background:transparent; color:var(--t3); font-size:11px; font-weight:600;
+  cursor:pointer; font-family:var(--font); transition:all .15s;
+}
+.k-move:hover { background:var(--blue-g); border-color:var(--blue); color:var(--blue); }
+
+/* SACKS */
+.sacks { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:14px; }
+.sack { background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2); overflow:hidden; }
+.sack-head { padding:16px 18px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
+.sack-party { font-size:15px; font-weight:700; }
+.sack-st { padding:4px 10px; border-radius:14px; font-size:10px; font-weight:700; }
+.sack-st.collecting{background:var(--amber-g);color:var(--amber)}
+.sack-st.ready{background:var(--cyan-g);color:var(--cyan)}
+.sack-st.dispatched{background:var(--green-g);color:var(--green)}
+.sack-body { padding:14px 18px; }
+.sack-label { font-size:10px; font-weight:700; color:var(--t3); text-transform:uppercase; letter-spacing:.6px; margin:10px 0 6px; }
+.sack-label:first-child { margin-top:0; }
+.sack-bag {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:8px 12px; background:var(--bg3); border-radius:8px; margin-bottom:4px; font-size:12px;
+}
+.sack-bag .src { display:flex; align-items:center; gap:6px; }
+.bag-cnt { font-weight:700; font-family:var(--mono); color:var(--blue); }
+.sack-bag.out .bag-cnt { color:var(--amber); }
+.sack-total {
+  display:flex; justify-content:space-between; padding:10px 12px;
+  background:var(--bg3); border-radius:var(--r); margin-top:12px; font-weight:700; font-size:13px;
+}
+.sack-acts { padding:12px 18px; border-top:1px solid var(--border); display:flex; gap:6px; }
+.sack-btn {
+  flex:1; padding:9px; border-radius:var(--r); border:1px solid var(--border);
+  background:var(--bg3); color:var(--t2); font-size:11px; font-weight:600;
+  cursor:pointer; font-family:var(--font);
+}
+.sack-btn:hover { color:var(--t1); }
+.sack-btn.pri { background:var(--blue); color:#fff; border-color:var(--blue); }
+
+/* DAYBOOK */
+.daybook { background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2); overflow:hidden; }
+.db-head {
+  padding:16px 20px; border-bottom:1px solid var(--border);
+  display:flex; justify-content:space-between; align-items:center;
+}
+.db-head input[type=date] {
+  background:var(--bg3); border:1px solid var(--border); border-radius:8px;
+  padding:5px 10px; color:var(--t1); font-family:var(--mono); font-size:12px; outline:none;
+}
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th {
+  background:var(--bg3); padding:10px 14px; text-align:left;
+  font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.4px;
+  color:var(--t3); border-bottom:1px solid var(--border); position:sticky; top:0;
+}
+th.r,td.r { text-align:right; }
+td { padding:10px 14px; border-bottom:1px solid var(--border); color:var(--t2); }
+tr:hover td { background:rgba(255,255,255,.015); }
+td.party { color:var(--t1); font-weight:600; }
+td.dr { color:var(--red); font-family:var(--mono); font-weight:600; }
+td.cr { color:var(--green); font-family:var(--mono); font-weight:600; }
+td.bal { color:var(--blue); font-family:var(--mono); font-weight:700; }
+.vt { display:inline-block; padding:2px 8px; border-radius:10px; font-size:10px; font-weight:600; }
+.vt.sales{background:var(--blue-g);color:var(--blue)} .vt.receipt{background:var(--green-g);color:var(--green)}
+.vt.payment{background:var(--red-g);color:var(--red)} .vt.journal{background:var(--purple-g);color:var(--purple)}
+tfoot td { background:var(--bg3); font-weight:700; color:var(--t1); border-top:2px solid var(--border2); }
+.db-summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; padding:16px 20px; border-top:1px solid var(--border); }
+.db-sum-item { display:flex; justify-content:space-between; padding:10px 14px; background:var(--bg3); border-radius:var(--r); }
+.db-sum-item .lb { font-size:12px; color:var(--t2); }
+.db-sum-item .vl { font-weight:700; font-family:var(--mono); font-size:13px; }
+
+/* SETTINGS */
+.settings { display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:16px; }
+.s-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--r2); }
+.s-card-h { padding:16px 20px; border-bottom:1px solid var(--border); font-size:14px; font-weight:700; display:flex; align-items:center; gap:8px; }
+.s-card-b { padding:16px 20px; }
+.s-row { display:flex; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--border); }
+.s-row:last-child { border-bottom:none; }
+.s-name { font-size:13px; font-weight:600; }
+.s-desc { font-size:11px; color:var(--t3); margin-top:1px; }
+.toggle {
+  width:40px; height:22px; background:var(--bg3); border-radius:11px;
+  position:relative; cursor:pointer; border:1px solid var(--border); transition:.2s;
+}
+.toggle.on { background:var(--blue); border-color:var(--blue); }
+.toggle::after {
+  content:''; position:absolute; width:16px; height:16px; background:#fff;
+  border-radius:50%; top:2px; left:2px; transition:.2s;
+}
+.toggle.on::after { transform:translateX(18px); }
+
+/* PERMISSIONS */
+.perm { display:grid; grid-template-columns:auto repeat(4,44px); gap:0; font-size:12px; }
+.perm .ph { padding:6px; font-weight:700; font-size:10px; color:var(--t3); text-transform:uppercase; text-align:center; border-bottom:1px solid var(--border); }
+.perm .ph:first-child { text-align:left; }
+.perm .pm { padding:8px 6px; font-weight:600; border-bottom:1px solid var(--border); }
+.perm .pc { display:flex; align-items:center; justify-content:center; padding:8px; border-bottom:1px solid var(--border); }
+.chk {
+  width:16px; height:16px; border-radius:4px; border:2px solid var(--border2);
+  background:var(--bg3); cursor:pointer; display:flex; align-items:center;
+  justify-content:center; font-size:10px; color:transparent; transition:.15s;
+}
+.chk.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+
+/* MODAL */
+.overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,.55); backdrop-filter:blur(6px);
+  z-index:1000; display:none; align-items:center; justify-content:center;
+}
+.overlay.open { display:flex; }
+.modal {
+  background:var(--bg1); border:1px solid var(--border); border-radius:var(--r2);
+  width:500px; max-height:85vh; overflow-y:auto; box-shadow:0 8px 40px rgba(0,0,0,.4);
+  animation:mIn .25s ease;
+}
+@keyframes mIn { from{opacity:0;transform:scale(.96) translateY(8px)} to{opacity:1;transform:scale(1) translateY(0)} }
+.m-head { padding:20px 24px 14px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+.m-head h3 { font-size:16px; font-weight:700; }
+.m-close {
+  width:28px; height:28px; border-radius:8px; border:1px solid var(--border);
+  background:var(--bg2); color:var(--t3); cursor:pointer; font-size:14px;
+  display:flex; align-items:center; justify-content:center;
+}
+.m-close:hover { color:var(--t1); }
+.m-body { padding:20px 24px; }
+.m-bill {
+  background:var(--bg2); border-radius:var(--r); padding:14px;
+  display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;
+}
+.m-bill .party { font-weight:700; font-size:15px; }
+.m-bill .inv { font-size:11px; color:var(--t3); font-family:var(--mono); margin-top:2px; }
+.m-bill .total { font-size:22px; font-weight:800; font-family:var(--mono); }
+.pay-label { font-size:12px; font-weight:600; color:var(--t2); margin-bottom:10px; }
+.pay-methods { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:20px; }
+.pay-m {
+  display:flex; flex-direction:column; align-items:center; gap:6px;
+  padding:14px 6px; border-radius:var(--r); border:2px solid var(--border);
+  background:var(--bg2); cursor:pointer; transition:.15s;
+}
+.pay-m:hover { border-color:var(--border2); }
+.pay-m.sel { border-color:var(--blue); background:var(--blue-g); }
+.pay-m-ic { font-size:22px; width:40px; height:40px; border-radius:var(--r); background:var(--bg3); display:flex; align-items:center; justify-content:center; }
+.pay-m.sel .pay-m-ic { background:rgba(78,142,247,.15); }
+.pay-m-name { font-size:11px; font-weight:600; color:var(--t2); }
+.pay-m.sel .pay-m-name { color:var(--blue); }
+.field { margin-bottom:10px; }
+.field label { display:block; font-size:11px; font-weight:600; color:var(--t3); margin-bottom:4px; }
+.field input {
+  width:100%; background:var(--bg3); border:1px solid var(--border); border-radius:8px;
+  padding:9px 12px; color:var(--t1); font-size:13px; font-family:var(--mono); outline:none;
+}
+.field input:focus { border-color:var(--blue); }
+.m-foot { padding:14px 24px 20px; display:flex; gap:8px; justify-content:flex-end; }
+.btn-confirm {
+  background:var(--green); color:#000; padding:10px 24px; border-radius:var(--r);
+  border:none; font-size:13px; font-weight:700; cursor:pointer; font-family:var(--font);
+}
+.btn-confirm:hover { box-shadow:0 4px 14px rgba(52,211,153,.3); }
+
+/* TOASTS */
+.toasts { position:fixed; top:70px; right:20px; z-index:500; display:flex; flex-direction:column; gap:6px; }
+.toast {
+  background:var(--bg3); border:1px solid var(--border); border-radius:var(--r);
+  padding:12px 16px; display:flex; align-items:center; gap:10px;
+  box-shadow:0 8px 30px rgba(0,0,0,.3); animation:toastIn .3s ease; min-width:300px;
+}
+@keyframes toastIn { from{opacity:0;transform:translateX(30px)} to{opacity:1;transform:translateX(0)} }
+.toast.bill{border-left:3px solid var(--blue)} .toast.success{border-left:3px solid var(--green)}
+.toast-ic { font-size:18px; }
+.toast-title { font-size:12px; font-weight:700; }
+.toast-msg { font-size:11px; color:var(--t2); margin-top:1px; }
+
+/* NOTIF PANEL */
+.notif-panel {
+  position:fixed; top:0; right:-360px; bottom:0; width:340px;
+  background:var(--bg1); border-left:1px solid var(--border);
+  z-index:200; transition:right .25s ease; display:flex; flex-direction:column;
+}
+.notif-panel.open { right:0; }
+.np-head { padding:18px 20px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+.np-head h3 { font-size:15px; font-weight:700; }
+.np-list { flex:1; overflow-y:auto; padding:10px; }
+.np-item {
+  padding:12px 14px; border-radius:var(--r); margin-bottom:6px; cursor:pointer;
+  border-left:3px solid transparent; transition:.15s;
+}
+.np-item:hover { background:var(--bg2); }
+.np-item.unread { background:var(--bg2); border-left-color:var(--blue); }
+.np-title { font-size:12px; font-weight:600; margin-bottom:3px; }
+.np-msg { font-size:11px; color:var(--t2); line-height:1.4; }
+.np-time { font-size:10px; color:var(--t3); margin-top:4px; }
+
+/* ADVANCED ONLY */
+[data-mode="simple"] .adv { display:none !important; }
+</style>
+</head>
+<body data-mode="simple">
+
+<!-- SIDEBAR -->
+<nav class="sidebar">
+  <div class="brand">
+    <div class="brand-icon">R</div>
+    <div>
+      <h2>Rush Wholesale</h2>
+      <span>POS Dashboard</span>
+    </div>
+  </div>
+  <div class="nav">
+    <div class="nav-label">Main</div>
+    <div class="nav-item active" onclick="go('dashboard')"><span class="nav-icon">📊</span> Dashboard</div>
+    <div class="nav-item" onclick="go('counter')"><span class="nav-icon">🖥️</span> Counter <span class="badge red">7</span></div>
+    <div class="nav-item" onclick="go('bills')"><span class="nav-icon">🧾</span> All Bills</div>
+    <div class="nav-label">Operations</div>
+    <div class="nav-item" onclick="go('dispatch')"><span class="nav-icon">📦</span> Dispatch <span class="badge amber">4</span></div>
+    <div class="nav-item" onclick="go('sacks')"><span class="nav-icon">🎒</span> Sacks</div>
+    <div class="nav-label">Accounts</div>
+    <div class="nav-item" onclick="go('daybook')"><span class="nav-icon">📒</span> Daybook</div>
+    <div class="nav-item" onclick="go('parties')"><span class="nav-icon">👥</span> Parties</div>
+    <div class="nav-label adv">System</div>
+    <div class="nav-item adv" onclick="go('settings')"><span class="nav-icon">⚙️</span> Settings</div>
+  </div>
+  <div class="sidebar-footer">
+    <div class="sync-bar">
+      <span class="sync-dot"></span> Tally Connected
+      <span style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--t3)">2s</span>
+    </div>
+  </div>
+</nav>
+
+<!-- TOPBAR -->
+<header class="topbar">
+  <div class="page-title" id="pageTitle">📊 Dashboard <span class="live"><span class="live-dot"></span>LIVE</span></div>
+  <input class="search-box" placeholder="🔍 Search bills, parties...">
+  <div class="mode-tog">
+    <button class="active" onclick="setMode('simple',this)">Simple</button>
+    <button onclick="setMode('advanced',this)">Advanced</button>
+  </div>
+  <div class="top-btn" onclick="toggleNotif()">🔔<span class="notif-dot"></span></div>
+  <div class="avatar">S</div>
+</header>
+
+<!-- TOASTS -->
+<div class="toasts" id="toasts">
+  <div class="toast bill">
+    <span class="toast-ic">🧾</span>
+    <div><div class="toast-title">New Bill Created</div><div class="toast-msg">INV-0458 · Gopal Traders · ₹38,500</div></div>
+  </div>
+</div>
+
+<!-- NOTIF PANEL -->
+<div class="notif-panel" id="notifPanel">
+  <div class="np-head"><h3>🔔 Notifications</h3><button class="m-close" onclick="toggleNotif()">✕</button></div>
+  <div class="np-list">
+    <div class="np-item unread"><div class="np-title">🧾 New Bill: INV-0458</div><div class="np-msg">Gopal Traders · ₹38,500</div><div class="np-time">Just now</div></div>
+    <div class="np-item unread"><div class="np-title">⚠️ Unpaid 18 min!</div><div class="np-msg">INV-0455 · Hari Wholesale · ₹28,000</div><div class="np-time">2 min ago</div></div>
+    <div class="np-item"><div class="np-title">✅ Payment Received</div><div class="np-msg">INV-0453 · Ram Kapda · ₹45,000 Cash</div><div class="np-time">15 min ago</div></div>
+    <div class="np-item"><div class="np-title">📦 Dispatch Ready</div><div class="np-msg">INV-0451 · Sharma Traders — Pickup ready</div><div class="np-time">30 min ago</div></div>
+    <div class="np-item"><div class="np-title">🔴 Large Bill!</div><div class="np-msg">INV-0450 · Nepal Cloth House · ₹1,20,000</div><div class="np-time">1 hr ago</div></div>
+  </div>
+</div>
+
+<!-- MAIN CONTENT -->
+<main class="main">
+
+  <!-- DASHBOARD -->
+  <div class="page active" id="p-dashboard">
+    <div class="stats">
+      <div class="stat blue"><div class="stat-top"><span class="stat-label">Today's Sales</span><span class="stat-ic blue">🧾</span></div><div class="stat-val">₹3,28,500</div><div class="stat-sub"><span class="up">↑ 12%</span> vs yesterday</div></div>
+      <div class="stat green"><div class="stat-top"><span class="stat-label">Received</span><span class="stat-ic green">💰</span></div><div class="stat-val">₹2,85,000</div><div class="stat-sub">87% collected</div></div>
+      <div class="stat red"><div class="stat-top"><span class="stat-label">Unpaid Bills</span><span class="stat-ic red">⚠️</span></div><div class="stat-val">7</div><div class="stat-sub">₹43,500 outstanding</div></div>
+      <div class="stat amber"><div class="stat-top"><span class="stat-label">Pending Dispatch</span><span class="stat-ic amber">📦</span></div><div class="stat-val">4</div><div class="stat-sub">Awaiting dispatch</div></div>
+      <div class="stat purple adv"><div class="stat-top"><span class="stat-label">Credit Outstanding</span><span class="stat-ic blue">📋</span></div><div class="stat-val">₹1,85,000</div><div class="stat-sub">12 parties</div></div>
+      <div class="stat cyan adv"><div class="stat-top"><span class="stat-label">Sacks In Progress</span><span class="stat-ic blue">🎒</span></div><div class="stat-val">3</div><div class="stat-sub">Collecting bags</div></div>
+    </div>
+
+    <div class="sec-head">
+      <div class="sec-title">Recent Bills <span class="cnt">24 today</span></div>
+      <div class="tabs">
+        <button class="tab active">All</button><button class="tab">Unpaid</button><button class="tab">Paid</button><button class="tab">Credit</button>
+      </div>
+    </div>
+
+    <div class="bills">
+      <div class="bill unpaid"><div class="bill-top"><div><div class="bill-party">Gopal Traders</div><div class="bill-inv">INV-0458</div></div><div><div class="bill-amt">₹38,500</div></div></div><div class="bill-meta"><span>🕐 2 min ago</span><span>📋 Credit Sales</span><span>📦 3 items</span></div><div class="bill-bot"><span class="badge-s unpaid">● UNPAID</span><span class="badge-d pending">Pending</span><div class="bill-acts"><button class="bill-act pay" onclick="openPay()">💰</button><button class="bill-act">👁️</button></div></div></div>
+
+      <div class="bill unpaid"><div class="bill-top"><div><div class="bill-party">Hari Wholesale</div><div class="bill-inv">INV-0455</div></div><div><div class="bill-amt">₹28,000</div></div></div><div class="bill-meta"><span>🕐 18 min</span><span>📋 Sales</span><span>📦 5 items</span></div><div class="bill-bot"><span class="badge-s unpaid">● UNPAID</span><span class="badge-d packing">Packing</span><div class="bill-acts"><button class="bill-act pay" onclick="openPay()">💰</button><button class="bill-act">👁️</button></div></div></div>
+
+      <div class="bill paid"><div class="bill-top"><div><div class="bill-party">Ram Kapda Store</div><div class="bill-inv">INV-0453</div></div><div><div class="bill-amt">₹45,000</div></div></div><div class="bill-meta"><span>🕐 35 min</span><span>📋 Sales</span><span>💵 Cash</span></div><div class="bill-bot"><span class="badge-s paid">● PAID</span><span class="badge-d ready">Ready</span><div class="bill-acts"><button class="bill-act">👁️</button></div></div></div>
+
+      <div class="bill partial"><div class="bill-top"><div><div class="bill-party">Shyam Traders</div><div class="bill-inv">INV-0454</div></div><div><div class="bill-amt">₹32,000</div></div></div><div class="bill-meta"><span>🕐 22 min</span><span>📋 Credit Sales</span><span>💵 ₹20K paid</span></div><div class="bill-bot"><span class="badge-s partial">● PARTIAL</span><span class="badge-d pending">Pending</span><div class="bill-acts"><button class="bill-act pay" onclick="openPay()">💰</button><button class="bill-act">👁️</button></div></div></div>
+
+      <div class="bill credit"><div class="bill-top"><div><div class="bill-party">Nepal Cloth House</div><div class="bill-inv">INV-0450</div></div><div><div class="bill-amt">₹1,20,000</div></div></div><div class="bill-meta"><span>🕐 1 hr</span><span>📋 Credit Sales</span><span>📅 Due: 15 days</span></div><div class="bill-bot"><span class="badge-s credit">● CREDIT</span><span class="badge-d done">Dispatched</span><div class="bill-acts"><button class="bill-act">👁️</button></div></div></div>
+
+      <div class="bill paid"><div class="bill-top"><div><div class="bill-party">Purwanchal Garment</div><div class="bill-inv">INV-0449</div></div><div><div class="bill-amt">₹65,000</div></div></div><div class="bill-meta"><span>🕐 2 hr</span><span>📋 Sales</span><span>🏦 Bank+Cash</span></div><div class="bill-bot"><span class="badge-s paid">● PAID</span><span class="badge-d done">Customer Taken</span><div class="bill-acts"><button class="bill-act">👁️</button></div></div></div>
+    </div>
+  </div>
+
+  <!-- COUNTER -->
+  <div class="page" id="p-counter">
+    <div class="sec-head" style="margin-bottom:16px"><div class="sec-title" style="font-size:18px">💳 Counter — Live Bills</div><span class="live" style="font-size:13px"><span class="live-dot"></span>Real-time from Tally</span></div>
+    <div class="counter-list">
+      <div class="counter-row unpaid"><div class="c-num">01</div><div class="c-info"><div class="c-party">Gopal Traders</div><div class="c-inv">INV-0458 · Credit Sales</div><div class="c-time">2 min ago</div></div><div class="c-amt" style="color:var(--red)">₹38,500</div><button class="c-btn pay" onclick="openPay()">💰 PAY</button></div>
+      <div class="counter-row unpaid"><div class="c-num">02</div><div class="c-info"><div class="c-party">Hari Wholesale</div><div class="c-inv">INV-0455 · Sales</div><div class="c-time">18 min ago</div></div><div class="c-amt" style="color:var(--red)">₹28,000</div><button class="c-btn pay" onclick="openPay()">💰 PAY</button></div>
+      <div class="counter-row unpaid"><div class="c-num">03</div><div class="c-info"><div class="c-party">Shyam Traders</div><div class="c-inv">INV-0454 · Credit Sales</div><div class="c-time">22 min ago</div></div><div class="c-amt" style="color:var(--amber)">₹32,000</div><button class="c-btn pay" onclick="openPay()">💰 PAY</button></div>
+      <div class="counter-row paid"><div class="c-num">04</div><div class="c-info"><div class="c-party">Ram Kapda Store</div><div class="c-inv">INV-0453 · Sales</div><div class="c-time">35 min ago</div></div><div class="c-amt" style="color:var(--green)">₹45,000</div><button class="c-btn done">✅ PAID</button></div>
+      <div class="counter-row paid"><div class="c-num">05</div><div class="c-info"><div class="c-party">Purwanchal Garment</div><div class="c-inv">INV-0449 · Sales</div><div class="c-time">2 hr ago</div></div><div class="c-amt" style="color:var(--green)">₹65,000</div><button class="c-btn done">✅ PAID</button></div>
+    </div>
+  </div>
+
+  <!-- ALL BILLS -->
+  <div class="page" id="p-bills">
+    <div class="sec-head"><div class="sec-title">🧾 All Bills <span class="cnt">24</span></div><div style="display:flex;gap:8px"><button class="btn btn-p">+ Create Bill</button><button class="btn btn-o">Export</button></div></div>
+    <div style="color:var(--t3);font-size:13px;padding:40px;text-align:center;background:var(--bg2);border-radius:var(--r2);border:1px dashed var(--border2)">Full bill list with search, date range filters, and table view — will be built in code phase.</div>
+  </div>
+
+  <!-- DISPATCH -->
+  <div class="page" id="p-dispatch">
+    <div class="sec-head" style="margin-bottom:16px"><div class="sec-title" style="font-size:18px">📦 Dispatch Board</div></div>
+    <div class="kanban">
+      <div class="kanban-col"><div class="kanban-head"><div class="kanban-title"><span class="dot amber"></span>Paid — To Pack</div><span class="kanban-cnt">2</span></div><div class="kanban-body">
+        <div class="k-item"><div class="k-top"><span class="k-party">Ram Kapda Store</span><span class="k-amt">₹45,000</span></div><div class="k-inv">INV-0453 · Cash</div><button class="k-move">→ Move to Packing</button></div>
+        <div class="k-item"><div class="k-top"><span class="k-party">Krishna Vastra</span><span class="k-amt">₹22,000</span></div><div class="k-inv">INV-0447 · eSewa</div><button class="k-move">→ Move to Packing</button></div>
+      </div></div>
+      <div class="kanban-col"><div class="kanban-head"><div class="kanban-title"><span class="dot orange"></span>Packing</div><span class="kanban-cnt">1</span></div><div class="kanban-body">
+        <div class="k-item"><div class="k-top"><span class="k-party">Hari Wholesale</span><span class="k-amt">₹28,000</span></div><div class="k-inv">INV-0455 · Pending Payment</div><button class="k-move">→ Mark Ready</button></div>
+      </div></div>
+      <div class="kanban-col"><div class="kanban-head"><div class="kanban-title"><span class="dot cyan"></span>Ready</div><span class="kanban-cnt">1</span></div><div class="kanban-body">
+        <div class="k-item"><div class="k-top"><span class="k-party">Sharma Traders</span><span class="k-amt">₹55,000</span></div><div class="k-inv">INV-0451 · Bank</div><button class="k-move" style="border-color:var(--green);color:var(--green)">✓ Dispatched</button></div>
+      </div></div>
+      <div class="kanban-col"><div class="kanban-head"><div class="kanban-title"><span class="dot green"></span>Dispatched</div><span class="kanban-cnt">2</span></div><div class="kanban-body">
+        <div class="k-item" style="opacity:.55"><div class="k-top"><span class="k-party">Purwanchal Garment</span><span class="k-amt">₹65,000</span></div><div class="k-inv">INV-0449 · Customer Taken · 2:15 PM</div></div>
+        <div class="k-item" style="opacity:.55"><div class="k-top"><span class="k-party">Nepal Cloth House</span><span class="k-amt">₹1,20,000</span></div><div class="k-inv">INV-0450 · Dispatched · 1:45 PM</div></div>
+      </div></div>
+    </div>
+  </div>
+
+  <!-- SACKS -->
+  <div class="page" id="p-sacks">
+    <div class="sec-head" style="margin-bottom:16px"><div class="sec-title" style="font-size:18px">🎒 Sack / Bag Consolidation</div><button class="btn btn-p">+ New Sack</button></div>
+    <div class="sacks">
+      <div class="sack">
+        <div class="sack-head"><div class="sack-party">Ram Kapda Store</div><span class="sack-st collecting">Collecting</span></div>
+        <div class="sack-body">
+          <div class="sack-label">Our Bags</div>
+          <div class="sack-bag"><div class="src">🏪 INV-0453</div><span class="bag-cnt">1 bag</span></div>
+          <div class="sack-label">Outside Bags</div>
+          <div class="sack-bag out"><div class="src">📦 Sharma Traders</div><span class="bag-cnt">2 bags</span></div>
+          <div class="sack-bag out"><div class="src">📦 Gupta Wholesale</div><span class="bag-cnt">1 bag</span></div>
+          <div class="sack-bag" style="border:1px dashed var(--border2);background:transparent;cursor:pointer;color:var(--t3)"><div class="src">➕ Add outside bag</div></div>
+          <div class="sack-total"><span>Total Bags</span><span style="color:var(--blue)">4 bags → 1 sack</span></div>
+        </div>
+        <div class="sack-acts"><button class="sack-btn">Add Bag</button><button class="sack-btn pri">All Collected ✓</button></div>
+      </div>
+      <div class="sack">
+        <div class="sack-head"><div class="sack-party">Bisht Garment</div><span class="sack-st ready">Ready</span></div>
+        <div class="sack-body">
+          <div class="sack-label">Our Bags</div>
+          <div class="sack-bag"><div class="src">🏪 INV-0440</div><span class="bag-cnt">2 bags</span></div>
+          <div class="sack-bag"><div class="src">🏪 INV-0442</div><span class="bag-cnt">1 bag</span></div>
+          <div class="sack-label">Outside Bags</div>
+          <div class="sack-bag out"><div class="src">📦 Other vendors</div><span class="bag-cnt">3 bags</span></div>
+          <div class="sack-total"><span>Total Bags</span><span style="color:var(--cyan)">6 bags → 1 sack ✓</span></div>
+        </div>
+        <div class="sack-acts"><button class="sack-btn pri" style="background:var(--green);border-color:var(--green)">🚚 Dispatch Sack</button></div>
+      </div>
+      <div class="sack">
+        <div class="sack-head"><div class="sack-party">Joshi Cloth Center</div><span class="sack-st dispatched">Dispatched</span></div>
+        <div class="sack-body">
+          <div class="sack-label">Our Bags</div>
+          <div class="sack-bag"><div class="src">🏪 INV-0435</div><span class="bag-cnt">3 bags</span></div>
+          <div class="sack-label">Outside Bags</div>
+          <div class="sack-bag out"><div class="src">📦 2 vendors</div><span class="bag-cnt">4 bags</span></div>
+          <div class="sack-total"><span>Total Bags</span><span style="color:var(--green)">7 bags → 1 sack ✅</span></div>
+        </div>
+        <div class="sack-acts"><button class="sack-btn" style="opacity:.5;cursor:default">Dispatched at 1:30 PM</button></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DAYBOOK -->
+  <div class="page" id="p-daybook">
+    <div class="daybook">
+      <div class="db-head">
+        <div class="sec-title" style="margin-bottom:0">📒 Columnar Daybook</div>
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-size:12px;color:var(--t2)">Date:</span><input type="date" value="2026-02-06"><button class="btn btn-o" style="padding:5px 10px;font-size:11px">Export</button></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>#</th><th>Type</th><th>Vch No</th><th>Party</th><th>Method</th><th class="r">Debit</th><th class="r">Credit</th><th class="r">Balance</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0449</td><td class="party">Purwanchal Garment</td><td>—</td><td class="dr r">65,000</td><td class="r">—</td><td class="bal r">65,000 Dr</td></tr>
+            <tr><td>2</td><td><span class="vt receipt">Receipt</span></td><td style="font-family:var(--mono);font-size:11px">REC-0201</td><td class="party">Purwanchal Garment</td><td>Cash+Bank</td><td class="r">—</td><td class="cr r">65,000</td><td class="bal r">0</td></tr>
+            <tr><td>3</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0450</td><td class="party">Nepal Cloth House</td><td>—</td><td class="dr r">1,20,000</td><td class="r">—</td><td class="bal r">1,20,000 Dr</td></tr>
+            <tr><td>4</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0451</td><td class="party">Sharma Traders</td><td>—</td><td class="dr r">55,000</td><td class="r">—</td><td class="bal r">1,75,000 Dr</td></tr>
+            <tr><td>5</td><td><span class="vt receipt">Receipt</span></td><td style="font-family:var(--mono);font-size:11px">REC-0202</td><td class="party">Sharma Traders</td><td>Bank</td><td class="r">—</td><td class="cr r">55,000</td><td class="bal r">1,20,000 Dr</td></tr>
+            <tr><td>6</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0453</td><td class="party">Ram Kapda Store</td><td>—</td><td class="dr r">45,000</td><td class="r">—</td><td class="bal r">1,65,000 Dr</td></tr>
+            <tr><td>7</td><td><span class="vt receipt">Receipt</span></td><td style="font-family:var(--mono);font-size:11px">REC-0203</td><td class="party">Ram Kapda Store</td><td>Cash</td><td class="r">—</td><td class="cr r">45,000</td><td class="bal r">1,20,000 Dr</td></tr>
+            <tr><td>8</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0454</td><td class="party">Shyam Traders</td><td>—</td><td class="dr r">32,000</td><td class="r">—</td><td class="bal r">1,52,000 Dr</td></tr>
+            <tr><td>9</td><td><span class="vt receipt">Receipt</span></td><td style="font-family:var(--mono);font-size:11px">REC-0204</td><td class="party">Shyam Traders</td><td>eSewa</td><td class="r">—</td><td class="cr r">20,000</td><td class="bal r">1,32,000 Dr</td></tr>
+            <tr><td>10</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0455</td><td class="party">Hari Wholesale</td><td>—</td><td class="dr r">28,000</td><td class="r">—</td><td class="bal r">1,60,000 Dr</td></tr>
+            <tr><td>11</td><td><span class="vt sales">Sales</span></td><td style="font-family:var(--mono);font-size:11px">INV-0458</td><td class="party">Gopal Traders</td><td>—</td><td class="dr r">38,500</td><td class="r">—</td><td class="bal r">1,98,500 Dr</td></tr>
+          </tbody>
+          <tfoot><tr><td colspan="5" style="text-align:right;font-size:13px">TOTAL</td><td class="r" style="color:var(--red);font-family:var(--mono)">3,83,500</td><td class="r" style="color:var(--green);font-family:var(--mono)">1,85,000</td><td class="r" style="color:var(--blue);font-family:var(--mono)">1,98,500 Dr</td></tr></tfoot>
+        </table>
+      </div>
+      <div class="db-summary">
+        <div class="db-sum-item"><span class="lb">💵 Cash</span><span class="vl" style="color:var(--green)">₹1,10,000</span></div>
+        <div class="db-sum-item"><span class="lb">🏦 Bank</span><span class="vl" style="color:var(--cyan)">₹55,000</span></div>
+        <div class="db-sum-item"><span class="lb">📱 eSewa</span><span class="vl" style="color:var(--purple)">₹20,000</span></div>
+        <div class="db-sum-item"><span class="lb">⏳ Outstanding</span><span class="vl" style="color:var(--red)">₹1,98,500</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PARTIES -->
+  <div class="page" id="p-parties">
+    <div class="sec-head"><div class="sec-title" style="font-size:18px">👥 Parties</div></div>
+    <div style="color:var(--t3);font-size:13px;padding:40px;text-align:center;background:var(--bg2);border-radius:var(--r2);border:1px dashed var(--border2)">Party ledger with outstanding balances — will be built in code phase.</div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="page" id="p-settings">
+    <div class="sec-head" style="margin-bottom:16px"><div class="sec-title" style="font-size:18px">⚙️ Settings</div></div>
+    <div class="settings">
+      <div class="s-card">
+        <div class="s-card-h">🔗 Tally Connection</div>
+        <div class="s-card-b">
+          <div class="s-row"><div><div class="s-name">Tally Host</div><div class="s-desc">localhost:9000</div></div><span style="color:var(--green);font-size:12px;font-weight:600">● Connected</span></div>
+          <div class="s-row"><div><div class="s-name">Auto Sync</div><div class="s-desc">Sync every 5 seconds</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+          <div class="s-row"><div><div class="s-name">Company</div><div class="s-desc">Rush Wholesale (Main)</div></div><button class="btn btn-o" style="padding:5px 10px;font-size:11px">Switch</button></div>
+          <div class="s-row"><div><div class="s-name">2nd Company</div><div class="s-desc">Cheque Tracking (Not connected)</div></div><button class="btn btn-o" style="padding:5px 10px;font-size:11px">Connect</button></div>
+        </div>
+      </div>
+      <div class="s-card">
+        <div class="s-card-h">🔐 Role Permissions</div>
+        <div class="s-card-b">
+          <div style="margin-bottom:10px;display:flex;gap:3px"><button class="tab active">Cashier</button><button class="tab">Biller</button><button class="tab">Warehouse</button><button class="tab">Owner</button></div>
+          <div class="perm">
+            <div class="ph">Module</div><div class="ph">View</div><div class="ph">Create</div><div class="ph">Edit</div><div class="ph">Del</div>
+            <div class="pm">💳 Payment</div><div class="pc"><div class="chk on" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk on" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div>
+            <div class="pm">📦 Dispatch</div><div class="pc"><div class="chk on" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div>
+            <div class="pm">🧾 Billing</div><div class="pc"><div class="chk on" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div>
+            <div class="pm">📒 Daybook</div><div class="pc"><div class="chk on" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div>
+            <div class="pm">⚙️ Settings</div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div><div class="pc"><div class="chk" onclick="this.classList.toggle('on')">✓</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="s-card">
+        <div class="s-card-h">🔔 Notifications</div>
+        <div class="s-card-b">
+          <div class="s-row"><div><div class="s-name">New Bill Alert</div><div class="s-desc">Sound + Toast on new bill</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+          <div class="s-row"><div><div class="s-name">Unpaid Warning</div><div class="s-desc">Alert after 15 min unpaid</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+          <div class="s-row"><div><div class="s-name">Telegram Bot</div><div class="s-desc">Not configured</div></div><button class="btn btn-o" style="padding:5px 10px;font-size:11px">Setup</button></div>
+          <div class="s-row"><div><div class="s-name">Large Bill Alert</div><div class="s-desc">Bills over ₹50,000</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div>
+        </div>
+      </div>
+      <div class="s-card">
+        <div class="s-card-h">👤 Users & Staff</div>
+        <div class="s-card-b">
+          <div class="s-row"><div><div class="s-name">Santosh (Owner)</div><div class="s-desc">Full access · All notifications</div></div><span style="color:var(--green);font-size:11px;font-weight:600">● Online</span></div>
+          <div class="s-row"><div><div class="s-name">Ram (Cashier)</div><div class="s-desc">Counter + Payment only</div></div><span style="color:var(--t3);font-size:11px">Offline</span></div>
+          <div class="s-row"><div><div class="s-name">Sita (Biller)</div><div class="s-desc">Billing + View only</div></div><span style="color:var(--green);font-size:11px;font-weight:600">● Online</span></div>
+          <div class="s-row"><div><div class="s-name">Hari (Warehouse)</div><div class="s-desc">Dispatch + Sacks only</div></div><span style="color:var(--t3);font-size:11px">Offline</span></div>
+          <div style="margin-top:10px"><button class="btn btn-p">+ Add Staff</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- PAYMENT MODAL -->
+<div class="overlay" id="payModal">
+  <div class="modal">
+    <div class="m-head"><h3>💰 Record Payment</h3><button class="m-close" onclick="closePay()">✕</button></div>
+    <div class="m-body">
+      <div class="m-bill"><div><div class="party">Gopal Traders</div><div class="inv">INV-0458 · Credit Sales</div></div><div class="total">₹38,500</div></div>
+      <div class="pay-label">Payment Method</div>
+      <div class="pay-methods">
+        <div class="pay-m sel" onclick="selPay(this)"><div class="pay-m-ic">💵</div><div class="pay-m-name">Cash</div></div>
+        <div class="pay-m" onclick="selPay(this)"><div class="pay-m-ic">📝</div><div class="pay-m-name">Cheque</div></div>
+        <div class="pay-m" onclick="selPay(this)"><div class="pay-m-ic">📱</div><div class="pay-m-name">eSewa</div></div>
+        <div class="pay-m" onclick="selPay(this)"><div class="pay-m-ic">🏦</div><div class="pay-m-name">Bank</div></div>
+        <div class="pay-m" onclick="selPay(this)"><div class="pay-m-ic">📋</div><div class="pay-m-name">Credit</div></div>
+        <div class="pay-m" onclick="selPay(this)"><div class="pay-m-ic">✂️</div><div class="pay-m-name">Split</div></div>
+      </div>
+      <div class="field"><label>Amount</label><input type="text" value="38,500"></div>
+      <div class="field"><label>Reference No</label><input type="text" placeholder="Cheque/eSewa/Bank ref"></div>
+      <div class="field"><label>Notes</label><input type="text" placeholder="Optional remarks"></div>
+    </div>
+    <div class="m-foot"><button class="btn btn-o" onclick="closePay()">Cancel</button><button class="btn-confirm">✅ Confirm & Sync to Tally</button></div>
+  </div>
+</div>
+
+<script>
+const titles = {
+  dashboard:'📊 Dashboard', counter:'💳 Counter', bills:'🧾 All Bills',
+  dispatch:'📦 Dispatch', sacks:'🎒 Sacks', daybook:'📒 Daybook',
+  parties:'👥 Parties', settings:'⚙️ Settings'
+};
+
+function go(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('p-'+page).classList.add('active');
+  event.currentTarget.classList.add('active');
+  document.getElementById('pageTitle').innerHTML = titles[page]+' <span class="live"><span class="live-dot"></span>LIVE</span>';
+  document.querySelector('.main').scrollTop = 0;
+}
+
+function setMode(mode, btn) {
+  document.body.dataset.mode = mode;
+  document.querySelectorAll('.mode-tog button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function openPay() { document.getElementById('payModal').classList.add('open'); }
+function closePay() { document.getElementById('payModal').classList.remove('open'); }
+
+function selPay(el) {
+  document.querySelectorAll('.pay-m').forEach(m => m.classList.remove('sel'));
+  el.classList.add('sel');
+}
+
+function toggleNotif() { document.getElementById('notifPanel').classList.toggle('open'); }
+
+// Auto-dismiss toast
+setTimeout(() => {
+  const t = document.querySelector('.toast');
+  if(t) t.style.cssText = 'opacity:0;transform:translateX(30px);transition:.3s';
+  setTimeout(() => { const tc = document.getElementById('toasts'); if(tc.firstElementChild) tc.firstElementChild.remove(); }, 300);
+}, 4000);
+
+// Tab click handler
+document.querySelectorAll('.tabs').forEach(tabs => {
+  tabs.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      tabs.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+    });
+  });
+});
+</script>
+</body>
+</html>
