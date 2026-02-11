@@ -15,7 +15,7 @@ export const config = {
     host: process.env.TALLY_HOST || 'localhost',
     port: parseInt(process.env.TALLY_PORT) || 9000,
     companyName: process.env.TALLY_COMPANY || '',  // Set your company name
-    syncInterval: parseInt(process.env.SYNC_INTERVAL) || 5000  // Poll every 5 seconds
+    syncInterval: parseInt(process.env.SYNC_INTERVAL) || 120000  // Poll every 2 minutes (gentle on Tally)
   },
 
   // Database settings

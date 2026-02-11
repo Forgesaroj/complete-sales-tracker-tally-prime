@@ -38,6 +38,18 @@ import paymentsRoutes from './payments.js';
 import daybookRoutes from './daybook.js';
 import configRoutes from './config.js';
 import emailRoutes from './email.js';
+import outstandingRoutes from './outstanding.js';
+import profitLossRoutes from './profit-loss.js';
+import stockGroupsRoutes from './stock-groups.js';
+import priceListsRoutes from './price-lists.js';
+import inventoryMovementRoutes from './inventory-movement.js';
+import bankReconRoutes from './bank-recon.js';
+import balanceSheetRoutes from './balance-sheet.js';
+import trialBalanceRoutes from './trial-balance.js';
+import cashFlowRoutes from './cash-flow.js';
+import ratioAnalysisRoutes from './ratio-analysis.js';
+import tallyXmlRoutes from './tally-xml.js';
+import columnarRoutes from './columnar.js';
 
 const router = Router();
 
@@ -62,6 +74,33 @@ router.use('/payments', paymentsRoutes);
 router.use('/daybook', daybookRoutes);
 router.use('/config', configRoutes);
 router.use('/email', emailRoutes);
+router.use('/outstanding', outstandingRoutes);
+router.use('/profit-loss', profitLossRoutes);
+router.use('/stock-groups', stockGroupsRoutes);
+router.use('/price-lists', priceListsRoutes);
+router.use('/inventory-movement', inventoryMovementRoutes);
+router.use('/bank-recon', bankReconRoutes);
+router.use('/balance-sheet', balanceSheetRoutes);
+router.use('/trial-balance', trialBalanceRoutes);
+router.use('/cash-flow', cashFlowRoutes);
+router.use('/ratios', ratioAnalysisRoutes);
+router.use('/tally-xml', tallyXmlRoutes);
+router.use('/columnar', columnarRoutes);
+
+// Frontend error logging endpoint
+import fs from 'fs';
+import path from 'path';
+import express from 'express';
+const ERROR_LOG = path.join(process.cwd(), 'frontend-errors.log');
+router.post('/log/error', express.text({ type: '*/*' }), (req, res) => {
+  try {
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const { message, stack, url, timestamp } = body;
+    const line = `[${timestamp || new Date().toISOString()}] ${message}\n  URL: ${url || 'unknown'}\n  ${(stack || '').split('\n').slice(0, 3).join('\n  ')}\n\n`;
+    fs.appendFileSync(ERROR_LOG, line);
+  } catch {}
+  res.json({ ok: true });
+});
 
 // Legacy routes for backward compatibility
 // Redirect old /api/auth/login to /api/users/auth/login

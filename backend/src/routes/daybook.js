@@ -10,26 +10,31 @@ const router = Router();
 
 /**
  * GET /api/daybook
- * Get columnar daybook
+ * Get daybook entries (supports date range)
  */
 router.get('/', (req, res) => {
   try {
-    const { date, voucherTypes } = req.query;
+    const { date, fromDate, toDate, voucherTypes } = req.query;
 
-    const queryDate = date || new Date().toISOString().split('T')[0].replace(/-/g, '');
+    const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
+    // Support both single date and date range
+    const from = fromDate || date || today;
+    const to = toDate || date || today;
     const types = voucherTypes ? voucherTypes.split(',') : null;
 
-    const daybook = db.getDaybook(queryDate, types);
+    const entries = db.getDaybook(from, to, types);
 
     // Calculate totals
-    const totals = daybook.reduce((acc, row) => ({
+    const totals = entries.reduce((acc, row) => ({
       debit: acc.debit + (row.debit || 0),
       credit: acc.credit + (row.credit || 0)
     }), { debit: 0, credit: 0 });
 
     res.json({
-      date: queryDate,
-      entries: daybook,
+      fromDate: from,
+      toDate: to,
+      entries,
+      count: entries.length,
       totals: {
         ...totals,
         balance: totals.debit - totals.credit

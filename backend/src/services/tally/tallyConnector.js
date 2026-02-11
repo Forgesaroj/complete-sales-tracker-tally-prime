@@ -64,6 +64,26 @@ class TallyConnector {
   }
 
   /**
+   * Send XML request to Tally and return raw XML string (no parsing)
+   */
+  async sendRawRequest(xmlData) {
+    await this.throttle();
+    try {
+      const response = await axios.post(this.baseUrl, xmlData, {
+        headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
+        timeout: 120000,
+        responseType: 'text'
+      });
+      return response.data;
+    } catch (error) {
+      if (error.code === 'ECONNREFUSED') {
+        throw new Error('Cannot connect to Tally on port ' + config.tally.port);
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Check if Tally is connected
    */
   async checkConnection() {
@@ -159,7 +179,7 @@ class TallyConnector {
 <TDLMESSAGE>
 <COLLECTION NAME="VchColl" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,ALLLEDGERENTRIES.LIST</FETCH>
 <COMPUTE>UDFSFLTOT: $$AsAmount:$$String:$VCHNarr_AIARSM_SFLTot</COMPUTE>
 <COMPUTE>UDFSFL3: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL3</COMPUTE>
 <COMPUTE>UDFSFL5: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL5</COMPUTE>
@@ -200,7 +220,7 @@ class TallyConnector {
 <TDLMESSAGE>
 <COLLECTION NAME="VchIncr" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,ALLLEDGERENTRIES.LIST</FETCH>
 <COMPUTE>UDFSFLTOT: $$AsAmount:$$String:$VCHNarr_AIARSM_SFLTot</COMPUTE>
 <COMPUTE>UDFSFL3: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL3</COMPUTE>
 <COMPUTE>UDFSFL5: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL5</COMPUTE>
@@ -216,7 +236,7 @@ class TallyConnector {
 </ENVELOPE>`;
 
     try {
-      console.log(`Fetching vouchers with ALTERID > ${lastAlterId} (incremental sync)`);
+      // Quiet log - only log when there are new vouchers (parsed in caller)
       const response = await this.sendRequest(xml);
       return this.parseVouchers(response, voucherTypes);
     } catch (error) {
@@ -248,34 +268,87 @@ class TallyConnector {
   parseVouchers(response, filterTypes = null) {
     try {
       const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
-      if (!collection) {
-        console.log('No collection in response');
-        return [];
-      }
+      if (!collection) return [];
 
       let vouchers = collection.VOUCHER;
-      if (!vouchers) {
-        console.log('No vouchers in collection');
-        return [];
-      }
+      if (!vouchers) return [];
 
       vouchers = Array.isArray(vouchers) ? vouchers : [vouchers];
-      console.log(`Found ${vouchers.length} vouchers from Tally`);
 
       const parsed = vouchers.map(v => {
         // Handle different response formats
         const guid = v.GUID || v.$?.GUID || v.$?.REMOTEID || '';
-        const masterId = v.MASTERID?._ || v.MASTERID || '';
-        const alterId = v.ALTERID?._ || v.ALTERID || '0';
-        const dateRaw = v.DATE?._ || v.DATE || '';
-        const voucherType = v.VOUCHERTYPENAME || '';
-        const voucherNumber = v.VOUCHERNUMBER || '';
-        const partyName = v.PARTYLEDGERNAME?._ || v.PARTYLEDGERNAME || '';
-        const amountRaw = v.AMOUNT?._ || v.AMOUNT || '0';
-        let narration = v.NARRATION || '';
-        // Handle narration as object or string
-        if (typeof narration === 'object') {
-          narration = narration._ || '';
+        const safeStr = (val) => {
+          if (val == null) return '';
+          if (typeof val === 'string') return val;
+          if (typeof val === 'number') return String(val);
+          if (val._ != null) return String(val._);
+          if (val.$ && Object.keys(val).length === 1) return '';
+          return '';
+        };
+        const masterId = safeStr(v.MASTERID);
+        const alterId = safeStr(v.ALTERID) || '0';
+        const dateRaw = safeStr(v.DATE);
+        const voucherType = safeStr(v.VOUCHERTYPENAME);
+        const voucherNumber = safeStr(v.VOUCHERNUMBER);
+        const partyLedgerName = safeStr(v.PARTYLEDGERNAME);
+        const partyNameField = safeStr(v.PARTYNAME);
+        // For Receipt-type vouchers, PARTYLEDGERNAME often returns cash/bank ledger.
+        // Try PARTYNAME first, then extract from ledger entries (credit-side = party).
+        const receiptTypes = ['Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt'];
+        let partyName = partyLedgerName || partyNameField;
+        if (receiptTypes.includes(voucherType)) {
+          if (partyNameField) {
+            partyName = partyNameField;
+          } else {
+            // Extract party from ledger entries: the non-deemed-positive entry is the party
+            let ledgerEntries = v['ALLLEDGERENTRIES.LIST'];
+            if (ledgerEntries && !Array.isArray(ledgerEntries)) ledgerEntries = [ledgerEntries];
+            if (ledgerEntries) {
+              const partyEntry = ledgerEntries.find(le => {
+                const deemed = safeStr(le.ISDEEMEDPOSITIVE);
+                return deemed === 'No' || deemed === 'no';
+              });
+              if (partyEntry) {
+                partyName = safeStr(partyEntry.LEDGERNAME);
+              }
+            }
+          }
+        }
+        const amountRaw = safeStr(v.AMOUNT) || '0';
+        let narration = safeStr(v.NARRATION);
+
+        // Extract payment mode breakdown from ledger entries for receipt-type vouchers
+        // Deemed-positive entries (Yes) = debit side = payment modes
+        let payCash = 0, payQr = 0, payCheque = 0, payDiscount = 0, payEsewa = 0, payBankDeposit = 0;
+        if (receiptTypes.includes(voucherType)) {
+          let allEntries = v['ALLLEDGERENTRIES.LIST'];
+          if (allEntries && !Array.isArray(allEntries)) allEntries = [allEntries];
+          if (allEntries) {
+            for (const le of allEntries) {
+              const deemed = safeStr(le.ISDEEMEDPOSITIVE);
+              if (deemed === 'Yes' || deemed === 'yes') {
+                const ledgerName = safeStr(le.LEDGERNAME).toLowerCase();
+                const amt = Math.abs(parseFloat(String(safeStr(le.AMOUNT)).replace(/[^\d.-]/g, '')) || 0);
+                if (ledgerName.includes('cash teller') || ledgerName === 'cash') {
+                  payCash += amt;
+                } else if (ledgerName.includes('qr') || ledgerName.includes('q/r')) {
+                  payQr += amt;
+                } else if (ledgerName.includes('cheque')) {
+                  payCheque += amt;
+                } else if (ledgerName.includes('discount')) {
+                  payDiscount += amt;
+                } else if (ledgerName.includes('esewa') || ledgerName.includes('e-sewa')) {
+                  payEsewa += amt;
+                } else if (ledgerName.includes('bank deposit')) {
+                  payBankDeposit += amt;
+                } else {
+                  // Unknown ledger - treat as cash
+                  payCash += amt;
+                }
+              }
+            }
+          }
         }
 
         // Timestamp fields from Tally
@@ -313,7 +386,9 @@ class TallyConnector {
           // UDF payment fields - if has value, bill is critical/exceptional
           udfPaymentTotal: Math.abs(udfPaymentTotal),
           udfSfl3: Math.abs(udfSfl3),
-          udfSfl5: Math.abs(udfSfl5)
+          udfSfl5: Math.abs(udfSfl5),
+          // Payment mode breakdown (receipts only)
+          payCash, payQr, payCheque, payDiscount, payEsewa, payBankDeposit
         };
       });
 
@@ -488,19 +563,12 @@ class TallyConnector {
   parseStockItems(response) {
     try {
       const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
-      if (!collection) {
-        console.log('No stock collection in response');
-        return [];
-      }
+      if (!collection) return [];
 
       let items = collection.STOCKITEM;
-      if (!items) {
-        console.log('No stock items found');
-        return [];
-      }
+      if (!items) return [];
 
       items = Array.isArray(items) ? items : [items];
-      console.log(`Found ${items.length} stock items from Tally`);
 
       return items.map(item => {
         // Extract name (multiple formats like ledgers)
@@ -580,7 +648,6 @@ class TallyConnector {
 </ENVELOPE>`;
 
     try {
-      console.log(`Fetching ledgers under ${parentGroup}...`);
       const response = await this.sendRequest(xml);
       return this.parseLedgers(response);
     } catch (error) {
@@ -739,44 +806,14 @@ class TallyConnector {
     // Calculate totals
     const totalAmount = items.reduce((sum, item) => sum + (item.amount || item.quantity * item.rate), 0);
 
-    // Build inventory entries XML - minimal format for Tally
-    const inventoryEntries = items.map(item => {
-      const qty = item.quantity || 1;
-      const rate = item.rate || 0;
-      const amount = item.amount || (qty * rate);
-      const safeStockItem = this.escapeXml(item.stockItem);
-      const safeUnit = this.escapeXml(item.unit || 'Nos');
-      const itemGodown = item.godown ? this.escapeXml(item.godown) : safeGodown;
-
-      return `<ALLINVENTORYENTRIES.LIST>
-<STOCKITEMNAME>${safeStockItem}</STOCKITEMNAME>
-<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-<RATE>${rate}/${safeUnit}</RATE>
-<AMOUNT>${amount}</AMOUNT>
-<ACTUALQTY>${qty} ${safeUnit}</ACTUALQTY>
-<BILLEDQTY>${qty} ${safeUnit}</BILLEDQTY>
-<BATCHALLOCATIONS.LIST>
-<GODOWNNAME>${itemGodown}</GODOWNNAME>
-<AMOUNT>${amount}</AMOUNT>
-<ACTUALQTY>${qty} ${safeUnit}</ACTUALQTY>
-<BILLEDQTY>${qty} ${safeUnit}</BILLEDQTY>
-</BATCHALLOCATIONS.LIST>
-<ACCOUNTINGALLOCATIONS.LIST>
-<LEDGERNAME>${safeSalesLedger}</LEDGERNAME>
-<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-<AMOUNT>${amount}</AMOUNT>
-</ACCOUNTINGALLOCATIONS.LIST>
-</ALLINVENTORYENTRIES.LIST>`;
-    }).join('\n');
-
     // Build company variable if set
     const companyVar = this.companyName ? `<SVCURRENTCOMPANY>${this.escapeXml(this.companyName)}</SVCURRENTCOMPANY>` : '';
 
-    // Build inventory entries with BATCHALLOCATIONS for godown tracking
+    // Build inventory entries XML - positive amounts matching Tally native format
     const inventoryXml = items.map(item => {
-      const qty = item.quantity || 1;
-      const rate = item.rate || 0;
-      const amount = item.amount || (qty * rate);
+      const qty = Math.abs(item.quantity || 1);
+      const rate = Math.abs(item.rate || 0);
+      const amount = Math.abs(item.amount || (qty * rate));
       const safeStockItem = this.escapeXml(item.stockItem);
       const safeUnit = this.escapeXml(item.unit || 'Nos');
       const itemGodown = item.godown ? this.escapeXml(item.godown) : safeGodown;
@@ -784,15 +821,17 @@ class TallyConnector {
       return `<ALLINVENTORYENTRIES.LIST>
 <STOCKITEMNAME>${safeStockItem}</STOCKITEMNAME>
 <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+<ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
+<ISAUTONEGATE>No</ISAUTONEGATE>
 <RATE>${rate}/${safeUnit}</RATE>
 <AMOUNT>${amount}</AMOUNT>
-<ACTUALQTY>${qty} ${safeUnit}</ACTUALQTY>
-<BILLEDQTY>${qty} ${safeUnit}</BILLEDQTY>
+<ACTUALQTY> ${qty} ${safeUnit}</ACTUALQTY>
+<BILLEDQTY> ${qty} ${safeUnit}</BILLEDQTY>
 <BATCHALLOCATIONS.LIST>
 <GODOWNNAME>${itemGodown}</GODOWNNAME>
 <AMOUNT>${amount}</AMOUNT>
-<ACTUALQTY>${qty} ${safeUnit}</ACTUALQTY>
-<BILLEDQTY>${qty} ${safeUnit}</BILLEDQTY>
+<ACTUALQTY> ${qty} ${safeUnit}</ACTUALQTY>
+<BILLEDQTY> ${qty} ${safeUnit}</BILLEDQTY>
 </BATCHALLOCATIONS.LIST>
 <ACCOUNTINGALLOCATIONS.LIST>
 <LEDGERNAME>${safeSalesLedger}</LEDGERNAME>
@@ -2157,6 +2196,499 @@ ${companyVar}
   }
 
   /**
+   * Get balance for a specific ledger from a company
+   * Used for reconciliation between Cheque Receipt and Cheque Management
+   */
+  async getLedgerBalance(ledgerName, targetCompany = null) {
+    const companyVar = targetCompany
+      ? `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`
+      : (this.companyName ? `<SVCURRENTCOMPANY>${this.escapeXml(this.companyName)}</SVCURRENTCOMPANY>` : '');
+
+    const safeName = this.escapeXml(ledgerName);
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerBal</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="LedgerBal" ISMODIFY="No">
+<TYPE>Ledger</TYPE>
+<FETCH>NAME,PARENT,CLOSINGBALANCE,OPENINGBALANCE</FETCH>
+<FILTER>MatchName</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="MatchName">$$IsEqual:$NAME:"${safeName}"</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      console.log(`Fetching balance for "${ledgerName}" from ${targetCompany || 'default company'}...`);
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return null;
+
+      let ledger = collection.LEDGER;
+      if (!ledger) return null;
+      if (Array.isArray(ledger)) ledger = ledger[0];
+
+      let name = '';
+      if (ledger.$?.NAME) name = ledger.$.NAME;
+      else if (ledger.NAME?._ ) name = ledger.NAME._;
+      else if (typeof ledger.NAME === 'string') name = ledger.NAME;
+
+      return {
+        name: String(name),
+        parent: ledger.PARENT?._ || ledger.PARENT || '',
+        closingBalance: parseFloat(String(ledger.CLOSINGBALANCE?._ || ledger.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0,
+        openingBalance: parseFloat(String(ledger.OPENINGBALANCE?._ || ledger.OPENINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0
+      };
+    } catch (error) {
+      console.error(`Error fetching balance for "${ledgerName}":`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Get reconciliation balances for cheque management
+   * - Cheque Receipt (For DB): balance > 0 = cheques not yet posted to ODBC
+   * - Cheque Management (For DB) vs Counter Sales (ODBC CHq Mgmt): must match
+   */
+  async getChequeReconBalances(billingCompany = 'For DB', chequeCompany = 'ODBC CHq Mgmt') {
+    try {
+      const [chequeReceipt, chequeManagement, counterSales] = await Promise.all([
+        this.getLedgerBalance('Cheque Receipt', billingCompany),
+        this.getLedgerBalance('Cheque Management', billingCompany),
+        this.getLedgerBalance('Counter Sales Account', chequeCompany)
+      ]);
+
+      const receiptBal = chequeReceipt?.closingBalance || 0;
+      const mgmtBal = chequeManagement?.closingBalance || 0;
+      const counterSalesBal = counterSales?.closingBalance || 0;
+      // Cheque Management (For DB) should match Counter Sales (ODBC) — compare absolute values
+      const mismatch = Math.abs(Math.abs(mgmtBal) - Math.abs(counterSalesBal));
+
+      return {
+        chequeReceipt: { name: 'Cheque Receipt', balance: receiptBal },
+        chequeManagement: { name: 'Cheque Management', balance: mgmtBal },
+        counterSales: { name: 'Counter Sales Account', balance: counterSalesBal, company: chequeCompany },
+        pendingToPost: receiptBal,
+        mismatch,
+        isReconciled: mismatch < 0.01
+      };
+    } catch (error) {
+      console.error('Error fetching cheque recon balances:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch all cheques from ODBC Cheque Management company
+   * Pulls Sales Vouchers with Bill Allocations and Bank Allocations
+   */
+  async getODBCCheques(targetCompany = 'ODBC CHq Mgmt') {
+    const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>ODBCVch</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="ODBCVch" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,MASTERID,ALTERID,ALLLEDGERENTRIES.LIST</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      console.log(`Fetching cheques from ${targetCompany}...`);
+      const response = await this.sendRequest(xml);
+      return this.parseODBCCheques(response);
+    } catch (error) {
+      console.error('Error fetching ODBC cheques:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch today's cheque receipt vouchers from billing company
+   * Returns vouchers where "Cheque Receipt" ledger appears in entries
+   */
+  async getChequeReceiptVouchers(date = null, billingCompany = 'For DB') {
+    const voucherDate = date || this.formatDate(new Date());
+    const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(billingCompany)}</SVCURRENTCOMPANY>`;
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>ChequeRcptVch</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+<SVFROMDATE>${voucherDate}</SVFROMDATE>
+<SVTODATE>${voucherDate}</SVTODATE>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="ChequeRcptVch" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,MASTERID,ALTERID,ALLLEDGERENTRIES.LIST</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      console.log(`Fetching cheque receipt vouchers for ${voucherDate} from ${billingCompany}...`);
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let vouchers = collection.VOUCHER;
+      if (!vouchers) return [];
+      vouchers = Array.isArray(vouchers) ? vouchers : [vouchers];
+
+      console.log(`Total vouchers fetched from Tally: ${vouchers.length}`);
+      // Debug: log sample dates
+      if (vouchers.length > 0) {
+        const sampleDates = vouchers.slice(0, 3).map(v => v.DATE?._ || v.DATE || 'none');
+        console.log(`  Sample dates: ${sampleDates.join(', ')} (looking for: ${voucherDate})`);
+      }
+      const results = [];
+      for (const vch of vouchers) {
+        // Verify date matches (safety check in case SVFROMDATE/SVTODATE didn't filter)
+        const vchDate = vch.DATE?._ || vch.DATE || '';
+        if (vchDate && vchDate !== voucherDate) continue;
+
+        let entries = vch['ALLLEDGERENTRIES.LIST'];
+        if (!entries) continue;
+        entries = Array.isArray(entries) ? entries : [entries];
+
+        // Check if "Cheque Receipt" ledger is in this voucher
+        const hasChequeReceipt = entries.some(e => {
+          const ledgerName = (e.LEDGERNAME?._ || e.LEDGERNAME || '').toLowerCase();
+          return ledgerName.includes('cheque receipt');
+        });
+        if (!hasChequeReceipt) continue;
+
+        // Find the cheque receipt entry to get the amount
+        const chequeEntry = entries.find(e => {
+          const ledgerName = (e.LEDGERNAME?._ || e.LEDGERNAME || '').toLowerCase();
+          return ledgerName.includes('cheque receipt');
+        });
+        const chequeAmount = Math.abs(parseFloat(String(chequeEntry?.AMOUNT?._ || chequeEntry?.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0);
+
+        const partyName = vch.PARTYLEDGERNAME?._ || vch.PARTYLEDGERNAME || '';
+        const voucherNumber = vch.VOUCHERNUMBER?._ || vch.VOUCHERNUMBER || '';
+        const voucherType = vch.VOUCHERTYPENAME?._ || vch.VOUCHERTYPENAME || '';
+        const totalAmount = Math.abs(parseFloat(String(vch.AMOUNT?._ || vch.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0);
+        const rawNarr = vch.NARRATION;
+        const narration = typeof rawNarr === 'string' ? rawNarr : (rawNarr?._ || '');
+
+        results.push({
+          partyName,
+          voucherNumber,
+          voucherType,
+          voucherDate,
+          totalAmount,
+          chequeReceiptAmount: chequeAmount,
+          narration,
+          masterId: vch.MASTERID?._ || vch.MASTERID || '',
+          alterId: vch.ALTERID?._ || vch.ALTERID || ''
+        });
+      }
+
+      console.log(`Found ${results.length} cheque receipt vouchers for ${voucherDate}`);
+      return results;
+    } catch (error) {
+      console.error('Error fetching cheque receipt vouchers:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Create Sales Voucher in ODBC CHq Mgmt with multiple cheque lines
+   * Each cheque line becomes a bank entry with bill allocation + bank allocation
+   */
+  async createODBCSalesVoucher(data, targetCompany = 'ODBC CHq Mgmt') {
+    const {
+      partyName,
+      chequeLines,
+      date: voucherDate,
+      narration = '',
+      voucherNumber = ''
+    } = data;
+
+    const safeParty = this.escapeXml(partyName);
+    const safeNarration = this.escapeXml(narration);
+    const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
+    const totalAmount = chequeLines.reduce((s, c) => s + Math.abs(parseFloat(c.amount) || 0), 0);
+
+    // Build bill allocations XML (one per cheque, all under party ledger entry)
+    // Bill Name format: "chequeNumber, bankName, accountHolderName"
+    console.log('Cheque lines received:', JSON.stringify(chequeLines.map(c => ({ chequeNumber: c.chequeNumber, chequeDate: c.chequeDate, amount: c.amount, bankName: c.bankName }))));
+    const billAllocationsXml = chequeLines.map(c => {
+      const amt = Math.abs(parseFloat(c.amount) || 0);
+      const parts = [c.chequeNumber || '', c.bankName || '', c.accountHolderName || ''].filter(Boolean);
+      const billName = this.escapeXml(parts.join(', '));
+
+      // Format cheque date as Tally Due Date with TYPE and JD attributes
+      // Tally requires TYPE="Due Date" and JD (Julian Day) for BILLCREDITPERIOD to work
+      let dueDateTag = '';
+      if (c.chequeDate) {
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        // Handle both YYYYMMDD and YYYY-MM-DD formats
+        let dateStr = String(c.chequeDate);
+        if (/^\d{8}$/.test(dateStr)) {
+          dateStr = `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
+        }
+        const cd = new Date(dateStr);
+        if (!isNaN(cd.getTime())) {
+          const tallyDate = `${cd.getDate()}-${months[cd.getMonth()]}-${cd.getFullYear()}`;
+          // Tally JD = serial date (days since Dec 31, 1899)
+          const tallyEpoch = new Date('1899-12-31T00:00:00Z');
+          const jd = Math.floor((cd.getTime() - tallyEpoch.getTime()) / 86400000);
+          dueDateTag = `<BILLCREDITPERIOD TYPE="Due Date" JD="${jd}">${tallyDate}</BILLCREDITPERIOD>`;
+        }
+      }
+
+      console.log(`  Bill "${billName}": chequeDate="${c.chequeDate}" -> dueDateTag="${dueDateTag}"`);
+      return `<BILLALLOCATIONS.LIST>
+<NAME>${billName}</NAME>
+<BILLTYPE>New Ref</BILLTYPE>
+${dueDateTag}
+<AMOUNT>-${amt}</AMOUNT>
+</BILLALLOCATIONS.LIST>`;
+    }).join('\n');
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST><TYPE>Data</TYPE><ID>Vouchers</ID></HEADER>
+<BODY>
+<DESC><STATICVARIABLES>${companyVar}</STATICVARIABLES></DESC>
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+<VOUCHER VCHTYPE="Sales" ACTION="Create">
+<DATE>${voucherDate}</DATE>
+<VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+<PARTYLEDGERNAME>${safeParty}</PARTYLEDGERNAME>
+${voucherNumber ? `<VOUCHERNUMBER>${this.escapeXml(voucherNumber)}</VOUCHERNUMBER>` : ''}
+<NARRATION>${safeNarration}</NARRATION>
+<ALLLEDGERENTRIES.LIST>
+<LEDGERNAME>${safeParty}</LEDGERNAME>
+<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+<AMOUNT>-${totalAmount.toFixed(2)}</AMOUNT>
+${billAllocationsXml}
+</ALLLEDGERENTRIES.LIST>
+<ALLLEDGERENTRIES.LIST>
+<LEDGERNAME>Counter Sales Account</LEDGERNAME>
+<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+<AMOUNT>${totalAmount.toFixed(2)}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>
+</VOUCHER>
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      console.log(`Creating ODBC Sales Voucher in ${targetCompany}: Party=${partyName}, Total=${totalAmount}, Lines=${chequeLines.length}`);
+
+      const response = await this.sendRequest(xml);
+      const result = this.parseImportResponse(response);
+      console.log('ODBC Sales Voucher result:', result);
+
+      if (result.success) {
+        result.company = targetCompany;
+        result.partyName = partyName;
+        result.totalAmount = totalAmount;
+        result.chequeCount = chequeLines.length;
+      }
+      return result;
+    } catch (error) {
+      console.error('Error creating ODBC Sales Voucher:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Create Journal Voucher in Billing Company for cheque transfer
+   * Dr Cheque Management / Cr Cheque Receipt
+   * @param {Object} data - Journal data
+   * @param {number} data.totalAmount - Total amount of all cheques
+   * @param {number} data.chequeCount - Total number of cheques
+   * @param {string} data.narration - Narration text
+   * @param {string} data.date - Voucher date (YYYYMMDD)
+   * @param {string} targetCompany - Billing company name
+   */
+  async createChequeJournal(data, targetCompany = 'For DB') {
+    const {
+      totalAmount,
+      chequeCount = 0,
+      narration = '',
+      date: voucherDate
+    } = data;
+
+    const vchDate = voucherDate || this.formatDate(new Date());
+    const safeNarration = this.escapeXml(narration);
+    const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
+    const voucherNumber = `CHQ-${chequeCount}chqs-${vchDate}`;
+    const amt = Math.abs(totalAmount).toFixed(2);
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST><TYPE>Data</TYPE><ID>Vouchers</ID></HEADER>
+<BODY>
+<DESC><STATICVARIABLES>${companyVar}</STATICVARIABLES></DESC>
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+<VOUCHER VCHTYPE="Journal" ACTION="Create">
+<DATE>${vchDate}</DATE>
+<VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+<VOUCHERNUMBER>${this.escapeXml(voucherNumber)}</VOUCHERNUMBER>
+<NARRATION>${safeNarration}</NARRATION>
+<ALLLEDGERENTRIES.LIST>
+<LEDGERNAME>Cheque Management</LEDGERNAME>
+<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+<AMOUNT>-${amt}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>
+<ALLLEDGERENTRIES.LIST>
+<LEDGERNAME>Cheque Receipt</LEDGERNAME>
+<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+<AMOUNT>${amt}</AMOUNT>
+</ALLLEDGERENTRIES.LIST>
+</VOUCHER>
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      console.log(`Creating Cheque Journal in ${targetCompany}:`);
+      console.log(`  Amount: ${amt}, Cheques: ${chequeCount}`);
+      console.log(`  Narration: ${narration}`);
+
+      const response = await this.sendRequest(xml);
+      const result = this.parseImportResponse(response);
+      console.log('Cheque Journal result:', result);
+
+      if (result.success) {
+        result.company = targetCompany;
+        result.voucherNumber = voucherNumber;
+        result.amount = totalAmount;
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error creating cheque journal:', error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Parse ODBC cheque vouchers from Tally XML response
+   * Extracts bill allocations and bank allocations for cheque details
+   */
+  parseODBCCheques(response) {
+    try {
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let vouchers = collection.VOUCHER;
+      if (!vouchers) return [];
+      vouchers = Array.isArray(vouchers) ? vouchers : [vouchers];
+
+      const results = [];
+
+      for (const vch of vouchers) {
+        const partyName = vch.PARTYLEDGERNAME?._ || vch.PARTYLEDGERNAME || '';
+        const voucherNumber = vch.VOUCHERNUMBER?._ || vch.VOUCHERNUMBER || '';
+        const voucherDate = vch.DATE?._ || vch.DATE || '';
+        const amount = Math.abs(parseFloat(String(vch.AMOUNT?._ || vch.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0);
+        const rawNarr = vch.NARRATION;
+        const narration = typeof rawNarr === 'string' ? rawNarr : (rawNarr?._ || '');
+        const masterId = vch.MASTERID?._ || vch.MASTERID || '';
+        const alterId = vch.ALTERID?._ || vch.ALTERID || '';
+
+        let entries = vch['ALLLEDGERENTRIES.LIST'];
+        if (!entries) continue;
+        entries = Array.isArray(entries) ? entries : [entries];
+
+        for (const entry of entries) {
+          const isDeemedPositive = (entry.ISDEEMEDPOSITIVE?._ || entry.ISDEEMEDPOSITIVE || '').toLowerCase();
+          if (isDeemedPositive !== 'yes') continue;
+
+          const bankName = entry.LEDGERNAME?._ || entry.LEDGERNAME || '';
+          const entryAmount = Math.abs(parseFloat(String(entry.AMOUNT?._ || entry.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0);
+
+          // Parse bill allocations
+          let billAllocs = entry['BILLALLOCATIONS.LIST'];
+          const billAllocations = [];
+          if (billAllocs) {
+            billAllocs = Array.isArray(billAllocs) ? billAllocs : [billAllocs];
+            for (const ba of billAllocs) {
+              if (typeof ba === 'string') continue;
+              billAllocations.push({
+                billName: ba.NAME?._ || ba.NAME || '',
+                amount: Math.abs(parseFloat(String(ba.AMOUNT?._ || ba.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0),
+                billDate: ba.BILLDATE?._ || ba.BILLDATE || ''
+              });
+            }
+          }
+
+          // Parse bank allocations for cheque number/date
+          let bankAllocs = entry['BANKALLOCATIONS.LIST'];
+          let chequeNumber = '';
+          let chequeDate = '';
+          if (bankAllocs) {
+            bankAllocs = Array.isArray(bankAllocs) ? bankAllocs : [bankAllocs];
+            for (const bk of bankAllocs) {
+              if (typeof bk === 'string') continue;
+              chequeNumber = bk.INSTRUMENTNUMBER?._ || bk.INSTRUMENTNUMBER || bk.CHEQUENUMBER?._ || bk.CHEQUENUMBER || '';
+              chequeDate = bk.INSTRUMENTDATE?._ || bk.INSTRUMENTDATE || bk.CHEQUEDATE?._ || bk.CHEQUEDATE || '';
+            }
+          }
+
+          results.push({
+            partyName,
+            voucherNumber,
+            voucherDate,
+            amount: entryAmount || amount,
+            bankName,
+            chequeNumber,
+            chequeDate,
+            narration,
+            billAllocations,
+            masterId,
+            alterId
+          });
+        }
+      }
+
+      console.log(`Parsed ${results.length} cheque entries from ODBC company`);
+      return results;
+    } catch (error) {
+      console.error('Error parsing ODBC cheques:', error);
+      return [];
+    }
+  }
+
+  /**
    * Check if a party (ledger) exists in a specific company
    */
   async partyExistsInCompany(partyName, targetCompany) {
@@ -2465,9 +2997,13 @@ ${companyVar}
         if (!entry) continue;
 
         const stockItem = entry.STOCKITEMNAME?._ || entry.STOCKITEMNAME || '';
-        const qty = parseFloat(entry.ACTUALQTY?._ || entry.ACTUALQTY || entry.BILLEDQTY?._ || entry.BILLEDQTY || 0);
-        const rate = parseFloat(entry.RATE?._ || entry.RATE || 0);
-        const amount = parseFloat(entry.AMOUNT?._ || entry.AMOUNT || 0);
+        const qtyStr = String(entry.ACTUALQTY?._ || entry.ACTUALQTY || entry.BILLEDQTY?._ || entry.BILLEDQTY || '0');
+        const qty = parseFloat(qtyStr.replace(/[^\d.-]/g, '')) || 0;
+        const rate = parseFloat(String(entry.RATE?._ || entry.RATE || '0').replace(/[^\d.-]/g, '')) || 0;
+        const amount = parseFloat(String(entry.AMOUNT?._ || entry.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0;
+        // Extract unit from qty string (e.g., "5 ps" → "ps")
+        const unitMatch = qtyStr.match(/[\d.]+\s*(.+)/);
+        const unit = unitMatch ? unitMatch[1].trim() : 'Nos';
 
         if (stockItem) {
           existingTotal += Math.abs(amount);
@@ -2480,15 +3016,16 @@ ${companyVar}
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
   <ISAUTONEGATE>No</ISAUTONEGATE>
-  <RATE>${absRate}/Nos</RATE>
+  <RATE>${absRate}/${unit}</RATE>
   <AMOUNT>${absAmt}</AMOUNT>
-  <ACTUALQTY>${absQty} Nos</ACTUALQTY>
-  <BILLEDQTY>${absQty} Nos</BILLEDQTY>
+  <ACTUALQTY> ${absQty} ${unit}</ACTUALQTY>
+  <BILLEDQTY> ${absQty} ${unit}</BILLEDQTY>
   <BATCHALLOCATIONS.LIST>
     <GODOWNNAME>Main Location</GODOWNNAME>
+    <BATCHNAME>Primary Batch</BATCHNAME>
     <AMOUNT>${absAmt}</AMOUNT>
-    <ACTUALQTY>${absQty} Nos</ACTUALQTY>
-    <BILLEDQTY>${absQty} Nos</BILLEDQTY>
+    <ACTUALQTY> ${absQty} ${unit}</ACTUALQTY>
+    <BILLEDQTY> ${absQty} ${unit}</BILLEDQTY>
   </BATCHALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
         }
@@ -2498,21 +3035,23 @@ ${companyVar}
       const newItemAmount = Math.abs(newItem.quantity * newItem.rate);
       const newItemQty = Math.abs(newItem.quantity);
       const newItemRate = Math.abs(newItem.rate);
+      const newItemUnit = newItem.unit || 'Nos';
       const newItemXml = `
 <ALLINVENTORYENTRIES.LIST>
   <STOCKITEMNAME>${this.escapeXml(newItem.stockItem)}</STOCKITEMNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
   <ISAUTONEGATE>No</ISAUTONEGATE>
-  <RATE>${newItemRate}/Nos</RATE>
+  <RATE>${newItemRate}/${newItemUnit}</RATE>
   <AMOUNT>${newItemAmount}</AMOUNT>
-  <ACTUALQTY>${newItemQty} Nos</ACTUALQTY>
-  <BILLEDQTY>${newItemQty} Nos</BILLEDQTY>
+  <ACTUALQTY> ${newItemQty} ${newItemUnit}</ACTUALQTY>
+  <BILLEDQTY> ${newItemQty} ${newItemUnit}</BILLEDQTY>
   <BATCHALLOCATIONS.LIST>
     <GODOWNNAME>Main Location</GODOWNNAME>
+    <BATCHNAME>Primary Batch</BATCHNAME>
     <AMOUNT>${newItemAmount}</AMOUNT>
-    <ACTUALQTY>${newItemQty} Nos</ACTUALQTY>
-    <BILLEDQTY>${newItemQty} Nos</BILLEDQTY>
+    <ACTUALQTY> ${newItemQty} ${newItemUnit}</ACTUALQTY>
+    <BILLEDQTY> ${newItemQty} ${newItemUnit}</BILLEDQTY>
   </BATCHALLOCATIONS.LIST>
 </ALLINVENTORYENTRIES.LIST>`;
 
@@ -2665,13 +3204,14 @@ ${newItemXml}
   <ISAUTONEGATE>No</ISAUTONEGATE>
   <RATE>${rate}/${unit}</RATE>
   <AMOUNT>${amount}</AMOUNT>
-  <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
-  <BILLEDQTY>${qty} ${unit}</BILLEDQTY>
+  <ACTUALQTY> ${qty} ${unit}</ACTUALQTY>
+  <BILLEDQTY> ${qty} ${unit}</BILLEDQTY>
   <BATCHALLOCATIONS.LIST>
     <GODOWNNAME>${godown}</GODOWNNAME>
+    <BATCHNAME>Primary Batch</BATCHNAME>
     <AMOUNT>${amount}</AMOUNT>
-    <ACTUALQTY>${qty} ${unit}</ACTUALQTY>
-    <BILLEDQTY>${qty} ${unit}</BILLEDQTY>
+    <ACTUALQTY> ${qty} ${unit}</ACTUALQTY>
+    <BILLEDQTY> ${qty} ${unit}</BILLEDQTY>
   </BATCHALLOCATIONS.LIST>
   <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>${this.escapeXml(salesLedger)}</LEDGERNAME>
@@ -2686,20 +3226,14 @@ ${newItemXml}
 
       const companyVar = this.companyName ? `<SVCURRENTCOMPANY>${this.escapeXml(this.companyName)}</SVCURRENTCOMPANY>` : '';
 
-      // Build the alter voucher XML with all items
+      // Build the alter voucher XML using the old Import format (works reliably)
       const xml = `<ENVELOPE>
-<HEADER>
-<TALLYREQUEST>Import Data</TALLYREQUEST>
-</HEADER>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST><TYPE>Data</TYPE><ID>Vouchers</ID></HEADER>
 <BODY>
-<IMPORTDATA>
-<REQUESTDESC>
-<REPORTNAME>Vouchers</REPORTNAME>
-${companyVar ? `<STATICVARIABLES>${companyVar}</STATICVARIABLES>` : ''}
-</REQUESTDESC>
-<REQUESTDATA>
+<DESC><STATICVARIABLES>${companyVar}</STATICVARIABLES></DESC>
+<DATA>
 <TALLYMESSAGE xmlns:UDF="TallyUDF">
-<VOUCHER REMOTEID="${guid || masterId}" VCHTYPE="Pending Sales Bill" ACTION="Alter">
+<VOUCHER REMOTEID="${guid || masterId}" VCHTYPE="Pending Sales Bill" ACTION="Alter" OBJVIEW="Invoice Voucher View">
 <MASTERID>${masterId}</MASTERID>
 ${voucherNumber ? `<VOUCHERNUMBER>${voucherNumber}</VOUCHERNUMBER>` : ''}
 <DATE>${voucherDate}</DATE>
@@ -2714,8 +3248,7 @@ ${voucherNumber ? `<VOUCHERNUMBER>${voucherNumber}</VOUCHERNUMBER>` : ''}
 ${itemsXml}
 </VOUCHER>
 </TALLYMESSAGE>
-</REQUESTDATA>
-</IMPORTDATA>
+</DATA>
 </BODY>
 </ENVELOPE>`;
 
@@ -2746,6 +3279,1054 @@ ${itemsXml}
     } catch (error) {
       console.error('Error updating pending bill items:', error.message);
       return { success: false, error: error.message };
+    }
+  }
+
+  // ==================== REPORT FEATURES ====================
+
+  /**
+   * Helper: Get company XML variable
+   */
+  getCompanyVar(companyOverride = null) {
+    const company = companyOverride || this.companyName;
+    return company ? `<SVCURRENTCOMPANY>${this.escapeXml(company)}</SVCURRENTCOMPANY>` : '';
+  }
+
+  /**
+   * Get outstanding bills with bill allocations per debtor ledger
+   * Returns party-wise outstanding with individual bill breakup
+   */
+  async getLedgerBillAllocations(companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerBills</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="LedgerBills" ISMODIFY="No">
+<TYPE>Ledger</TYPE>
+<CHILDOF>Sundry Debtors</CHILDOF>
+<BELONGSTO>Yes</BELONGSTO>
+<FETCH>NAME,CLOSINGBALANCE,OPENINGBALANCE,BILLALLOCATIONS.LIST</FETCH>
+<FILTER>HasBalance</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="HasBalance">$$IsNotEqual:$CLOSINGBALANCE:0</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let ledgers = collection.LEDGER;
+      if (!ledgers) return [];
+      ledgers = Array.isArray(ledgers) ? ledgers : [ledgers];
+
+      const today = new Date();
+      const results = [];
+
+      for (const ledger of ledgers) {
+        const name = ledger.$?.NAME || ledger.NAME?._ || ledger.NAME || '';
+        const closingBalance = parseFloat(String(ledger.CLOSINGBALANCE?._ || ledger.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+
+        if (!name || closingBalance === 0) continue;
+
+        // Extract bill allocations
+        let billAllocs = ledger['BILLALLOCATIONS.LIST'];
+        if (!billAllocs) {
+          results.push({ partyName: name, totalOutstanding: Math.abs(closingBalance), bills: [] });
+          continue;
+        }
+        billAllocs = Array.isArray(billAllocs) ? billAllocs : [billAllocs];
+
+        const bills = [];
+        for (const bill of billAllocs) {
+          const billName = bill.NAME?._ || bill.NAME || '';
+          const billDate = bill.BILLDATE?._ || bill.BILLDATE || '';
+          const billClosing = parseFloat(String(bill.CLOSINGBALANCE?._ || bill.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+          const creditPeriod = parseInt(String(bill.BILLCREDITPERIOD?._ || bill.BILLCREDITPERIOD || '0').replace(/[^\d]/g, '')) || 0;
+
+          if (billClosing === 0) continue;
+
+          // Calculate ageing
+          let ageingDays = 0;
+          let ageingBucket = '0-30';
+          if (billDate) {
+            const dateStr = String(billDate).replace(/-/g, '');
+            if (dateStr.length === 8) {
+              const billDateObj = new Date(
+                parseInt(dateStr.substring(0, 4)),
+                parseInt(dateStr.substring(4, 6)) - 1,
+                parseInt(dateStr.substring(6, 8))
+              );
+              ageingDays = Math.floor((today - billDateObj) / (1000 * 60 * 60 * 24));
+            }
+          }
+          if (ageingDays > 90) ageingBucket = '90+';
+          else if (ageingDays > 60) ageingBucket = '60-90';
+          else if (ageingDays > 30) ageingBucket = '30-60';
+          else ageingBucket = '0-30';
+
+          bills.push({
+            billName,
+            billDate,
+            closingBalance: Math.abs(billClosing),
+            creditPeriod,
+            ageingDays,
+            ageingBucket
+          });
+        }
+
+        results.push({
+          partyName: name,
+          totalOutstanding: Math.abs(closingBalance),
+          bills
+        });
+      }
+
+      return results.sort((a, b) => b.totalOutstanding - a.totalOutstanding);
+    } catch (error) {
+      console.error('Error fetching ledger bill allocations:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get Profit & Loss data from Tally
+   * Fetches all ledgers under P&L-relevant groups
+   */
+  async getProfitAndLoss(fromDate = null, toDate = null, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const dateVars = fromDate && toDate
+      ? `<SVFROMDATE>${fromDate}</SVFROMDATE><SVTODATE>${toDate}</SVTODATE>`
+      : '';
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>PLLedgers</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+${dateVars}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="PLLedgers" ISMODIFY="No">
+<TYPE>Ledger</TYPE>
+<FETCH>NAME,PARENT,CLOSINGBALANCE,OPENINGBALANCE</FETCH>
+<FILTER>IsPLLedger</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="IsPLLedger">$$IsSales:$Parent OR $$IsPurchase:$Parent OR $$IsDirectExpenses:$Parent OR $$IsIndirectExpenses:$Parent OR $$IsDirectIncomes:$Parent OR $$IsIndirectIncomes:$Parent</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return this._emptyPL(fromDate, toDate);
+
+      let ledgers = collection.LEDGER;
+      if (!ledgers) return this._emptyPL(fromDate, toDate);
+      ledgers = Array.isArray(ledgers) ? ledgers : [ledgers];
+
+      // Categorize by parent group
+      const salesAccounts = [];
+      const purchaseAccounts = [];
+      const directExpenses = [];
+      const indirectExpenses = [];
+      const directIncomes = [];
+      const indirectIncomes = [];
+
+      // Known Tally group names for P&L
+      const salesGroups = ['sales accounts', 'sales account'];
+      const purchaseGroups = ['purchase accounts', 'purchase account'];
+      const directExpGroups = ['direct expenses', 'direct expense', 'manufacturing expenses'];
+      const indirectExpGroups = ['indirect expenses', 'indirect expense', 'administrative expenses', 'selling expenses'];
+      const directIncGroups = ['direct incomes', 'direct income'];
+      const indirectIncGroups = ['indirect incomes', 'indirect income'];
+
+      for (const ledger of ledgers) {
+        const name = ledger.$?.NAME || ledger.NAME?._ || ledger.NAME || '';
+        const parent = (ledger.PARENT?._ || ledger.PARENT || '').toLowerCase();
+        const balance = parseFloat(String(ledger.CLOSINGBALANCE?._ || ledger.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+
+        if (!name) continue;
+        const entry = { name, parent: ledger.PARENT?._ || ledger.PARENT || '', balance: Math.abs(balance) };
+
+        if (salesGroups.includes(parent)) salesAccounts.push(entry);
+        else if (purchaseGroups.includes(parent)) purchaseAccounts.push(entry);
+        else if (directExpGroups.some(g => parent.includes(g))) directExpenses.push(entry);
+        else if (indirectExpGroups.some(g => parent.includes(g))) indirectExpenses.push(entry);
+        else if (directIncGroups.some(g => parent.includes(g))) directIncomes.push(entry);
+        else if (indirectIncGroups.some(g => parent.includes(g))) indirectIncomes.push(entry);
+      }
+
+      const totalSales = salesAccounts.reduce((s, l) => s + l.balance, 0);
+      const totalPurchases = purchaseAccounts.reduce((s, l) => s + l.balance, 0);
+      const totalDirectExp = directExpenses.reduce((s, l) => s + l.balance, 0);
+      const totalIndirectExp = indirectExpenses.reduce((s, l) => s + l.balance, 0);
+      const totalDirectInc = directIncomes.reduce((s, l) => s + l.balance, 0);
+      const totalIndirectInc = indirectIncomes.reduce((s, l) => s + l.balance, 0);
+
+      const grossProfit = totalSales + totalDirectInc - totalPurchases - totalDirectExp;
+      const netProfit = grossProfit + totalIndirectInc - totalIndirectExp;
+
+      return {
+        income: {
+          salesAccounts, directIncomes, indirectIncomes,
+          totalSales, totalDirectInc, totalIndirectInc,
+          totalIncome: totalSales + totalDirectInc + totalIndirectInc
+        },
+        expenses: {
+          purchaseAccounts, directExpenses, indirectExpenses,
+          totalPurchases, totalDirectExp, totalIndirectExp,
+          totalExpenses: totalPurchases + totalDirectExp + totalIndirectExp
+        },
+        grossProfit,
+        netProfit,
+        period: { from: fromDate, to: toDate }
+      };
+    } catch (error) {
+      console.error('Error fetching P&L:', error.message);
+      return this._emptyPL(fromDate, toDate);
+    }
+  }
+
+  _emptyPL(from, to) {
+    return {
+      income: { salesAccounts: [], directIncomes: [], indirectIncomes: [], totalSales: 0, totalDirectInc: 0, totalIndirectInc: 0, totalIncome: 0 },
+      expenses: { purchaseAccounts: [], directExpenses: [], indirectExpenses: [], totalPurchases: 0, totalDirectExp: 0, totalIndirectExp: 0, totalExpenses: 0 },
+      grossProfit: 0, netProfit: 0, period: { from, to }
+    };
+  }
+
+  /**
+   * Get stock groups with closing balance and value
+   */
+  async getStockGroups(companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>StockGroupReport</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="StockGroupReport" ISMODIFY="No">
+<TYPE>Stock Group</TYPE>
+<FETCH>NAME,PARENT,CLOSINGBALANCE,CLOSINGVALUE,CLOSINGRATE</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let groups = collection.STOCKGROUP || collection['STOCK GROUP'];
+      if (!groups) return [];
+      groups = Array.isArray(groups) ? groups : [groups];
+
+      return groups.map(g => {
+        const name = g.$?.NAME || g.NAME?._ || g.NAME || '';
+        const parent = g.PARENT?._ || g.PARENT || '';
+        const closingBalance = parseFloat(String(g.CLOSINGBALANCE?._ || g.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+        const closingValue = parseFloat(String(g.CLOSINGVALUE?._ || g.CLOSINGVALUE || '0').replace(/[^\d.-]/g, '')) || 0;
+        return { name, parent, closingBalance, closingValue };
+      }).filter(g => g.name);
+    } catch (error) {
+      console.error('Error fetching stock groups:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get price lists - stock items with price level rates
+   */
+  async getPriceLists(companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>PriceListColl</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="PriceListColl" ISMODIFY="No">
+<TYPE>Stock Item</TYPE>
+<FETCH>NAME,PARENT,BASEUNITS,STANDARDPRICE,PRICELEVELLIST.LIST</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let items = collection.STOCKITEM;
+      if (!items) return [];
+      items = Array.isArray(items) ? items : [items];
+
+      return items.map(item => {
+        const name = item.$?.NAME || item.NAME?._ || item.NAME || '';
+        const parent = item.PARENT?._ || item.PARENT || '';
+        const baseUnits = item.BASEUNITS?._ || item.BASEUNITS || '';
+        const standardPrice = parseFloat(String(item.STANDARDPRICE?._ || item.STANDARDPRICE || '0').replace(/[^\d.-]/g, '')) || 0;
+
+        // Parse price level list
+        let priceLevelList = item['PRICELEVELLIST.LIST'];
+        const priceLevels = [];
+        if (priceLevelList) {
+          priceLevelList = Array.isArray(priceLevelList) ? priceLevelList : [priceLevelList];
+          for (const pl of priceLevelList) {
+            const levelName = pl.PRICELEVEL?._ || pl.PRICELEVEL || '';
+            const rate = parseFloat(String(pl.RATE?._ || pl.RATE || '0').replace(/[^\d.-]/g, '').split('/')[0]) || 0;
+            if (levelName && rate > 0) {
+              priceLevels.push({ levelName, rate });
+            }
+          }
+        }
+
+        return { name, parent, baseUnits, standardPrice, priceLevels };
+      }).filter(i => i.name);
+    } catch (error) {
+      console.error('Error fetching price lists:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get bank vouchers for reconciliation
+   */
+  async getBankVouchers(bankLedgerName = 'Bank Account', fromDate = null, toDate = null, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const safeBankLedger = this.escapeXml(bankLedgerName);
+    const dateVars = fromDate && toDate
+      ? `<SVFROMDATE>${fromDate}</SVFROMDATE><SVTODATE>${toDate}</SVTODATE>`
+      : '';
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>BankVch</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+${dateVars}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="BankVch" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,EFFECTIVEDATE</FETCH>
+<FILTER>IsBankVoucher,NotCancelled</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="IsBankVoucher">$$IsLedgerInVoucher:"${safeBankLedger}"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="NotCancelled">$$IsEqual:$IsCancelled:No</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let vouchers = collection.VOUCHER;
+      if (!vouchers) return [];
+      vouchers = Array.isArray(vouchers) ? vouchers : [vouchers];
+
+      return vouchers.map(v => {
+        const date = v.DATE?._ || v.DATE || '';
+        const voucherType = v.VOUCHERTYPENAME?._ || v.VOUCHERTYPENAME || '';
+        const voucherNumber = v.VOUCHERNUMBER?._ || v.VOUCHERNUMBER || '';
+        const partyName = v.PARTYLEDGERNAME?._ || v.PARTYLEDGERNAME || '';
+        const amount = parseFloat(String(v.AMOUNT?._ || v.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0;
+        const narration = v.NARRATION?._ || v.NARRATION || '';
+        const guid = v.GUID?._ || v.GUID || '';
+        const masterId = v.MASTERID?._ || v.MASTERID || '';
+        return { date, voucherType, voucherNumber, partyName, amount, narration, guid, masterId };
+      });
+    } catch (error) {
+      console.error('Error fetching bank vouchers:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get inventory movement - vouchers with stock entries for a date range
+   */
+  async getInventoryMovement(fromDate, toDate, stockItemName = null, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+
+    let filterList = 'NotCancelled';
+    let extraFilter = '';
+    if (stockItemName) {
+      filterList = 'NotCancelled,MatchStockItem';
+      extraFilter = `<SYSTEM TYPE="Formulae" NAME="MatchStockItem">$$IsStockItemInVoucher:${this.escapeXml(stockItemName)}</SYSTEM>`;
+    }
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>InvMovement</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+<SVFROMDATE>${fromDate}</SVFROMDATE>
+<SVTODATE>${toDate}</SVTODATE>
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="InvMovement" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,NARRATION,GUID,MASTERID,ALLINVENTORYENTRIES.LIST</FETCH>
+<FILTER>${filterList}</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="NotCancelled">$$IsEqual:$IsCancelled:No</SYSTEM>
+${extraFilter}
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+
+      let vouchers = collection.VOUCHER;
+      if (!vouchers) return [];
+      vouchers = Array.isArray(vouchers) ? vouchers : [vouchers];
+
+      const inwardTypes = ['purchase', 'stock journal', 'receipt note', 'delivery note in'];
+      const results = [];
+
+      for (const v of vouchers) {
+        const date = v.DATE?._ || v.DATE || '';
+        const voucherType = v.VOUCHERTYPENAME?._ || v.VOUCHERTYPENAME || '';
+        const voucherNumber = v.VOUCHERNUMBER?._ || v.VOUCHERNUMBER || '';
+        const partyName = v.PARTYLEDGERNAME?._ || v.PARTYLEDGERNAME || '';
+        const narration = v.NARRATION?._ || v.NARRATION || '';
+
+        let entries = v['ALLINVENTORYENTRIES.LIST'];
+        if (!entries) continue;
+        entries = Array.isArray(entries) ? entries : [entries];
+
+        const items = [];
+        for (const entry of entries) {
+          const stockItem = entry.STOCKITEMNAME?._ || entry.STOCKITEMNAME || '';
+          const qty = parseFloat(String(entry.ACTUALQTY?._ || entry.ACTUALQTY || '0').replace(/[^\d.-]/g, '')) || 0;
+          const rate = parseFloat(String(entry.RATE?._ || entry.RATE || '0').replace(/[^\d.-]/g, '').split('/')[0]) || 0;
+          const amount = parseFloat(String(entry.AMOUNT?._ || entry.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0;
+          const godown = entry.GODOWNNAME?._ || entry.GODOWNNAME || '';
+          const direction = inwardTypes.includes(voucherType.toLowerCase()) ? 'in' : 'out';
+
+          if (stockItem) {
+            items.push({ stockItem, quantity: Math.abs(qty), rate, amount: Math.abs(amount), godown, direction });
+          }
+        }
+
+        if (items.length > 0) {
+          results.push({ date, voucherType, voucherNumber, partyName, narration, items });
+        }
+      }
+
+      return results;
+    } catch (error) {
+      console.error('Error fetching inventory movement:', error.message);
+      return [];
+    }
+  }
+  /**
+   * Get Balance Sheet data from Tally
+   * Fetches all groups under Balance Sheet categories (Assets, Liabilities, Equity)
+   */
+  async getBalanceSheet(fromDate = null, toDate = null, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const dateVars = fromDate && toDate
+      ? `<SVFROMDATE>${fromDate}</SVFROMDATE><SVTODATE>${toDate}</SVTODATE>`
+      : '';
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>BSGroups</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+${dateVars}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="BSGroups" ISMODIFY="No">
+<TYPE>Group</TYPE>
+<FETCH>NAME,PARENT,CLOSINGBALANCE,OPENINGBALANCE</FETCH>
+<FILTER>IsBSGroup</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="IsBSGroup">NOT $$IsPL:$Name</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return this._emptyBS(fromDate, toDate);
+
+      let groups = collection.GROUP;
+      if (!groups) return this._emptyBS(fromDate, toDate);
+      groups = Array.isArray(groups) ? groups : [groups];
+
+      // Categorize groups
+      const assetGroups = ['current assets', 'fixed assets', 'investments', 'bank accounts', 'cash-in-hand',
+        'deposits (asset)', 'stock-in-hand', 'sundry debtors', 'loans and advances (asset)', 'bank od accounts',
+        'loans (liability)', 'secured loans', 'unsecured loans'];
+      const liabilityGroups = ['current liabilities', 'sundry creditors', 'duties & taxes',
+        'provisions', 'bank od accounts', 'secured loans', 'unsecured loans', 'loans (liability)'];
+      const equityGroups = ['capital account', 'reserves & surplus', 'retained earnings'];
+
+      const assets = { fixed: [], current: [], investments: [], other: [] };
+      const liabilities = { current: [], longTerm: [], other: [] };
+      const equity = [];
+
+      const fixedAssetNames = ['fixed assets'];
+      const currentAssetNames = ['current assets', 'bank accounts', 'cash-in-hand', 'sundry debtors',
+        'stock-in-hand', 'deposits (asset)', 'loans and advances (asset)'];
+      const investmentNames = ['investments'];
+      const currentLiabNames = ['current liabilities', 'sundry creditors', 'duties & taxes', 'provisions'];
+      const longTermLiabNames = ['secured loans', 'unsecured loans', 'loans (liability)', 'bank od accounts'];
+
+      for (const group of groups) {
+        const name = (group.$?.NAME || group.NAME?._ || group.NAME || '').trim();
+        const parent = (group.PARENT?._ || group.PARENT || '').trim();
+        const closing = parseFloat(String(group.CLOSINGBALANCE?._ || group.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+        const opening = parseFloat(String(group.OPENINGBALANCE?._ || group.OPENINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+
+        if (!name) continue;
+        const nameLower = name.toLowerCase();
+        const entry = { name, parent, closingBalance: closing, openingBalance: opening };
+
+        if (equityGroups.some(g => nameLower.includes(g))) {
+          equity.push(entry);
+        } else if (fixedAssetNames.some(g => nameLower.includes(g))) {
+          assets.fixed.push(entry);
+        } else if (investmentNames.some(g => nameLower.includes(g))) {
+          assets.investments.push(entry);
+        } else if (currentAssetNames.some(g => nameLower.includes(g))) {
+          assets.current.push(entry);
+        } else if (longTermLiabNames.some(g => nameLower.includes(g))) {
+          liabilities.longTerm.push(entry);
+        } else if (currentLiabNames.some(g => nameLower.includes(g))) {
+          liabilities.current.push(entry);
+        } else {
+          // Try to classify by Tally convention: positive = debit (asset), negative = credit (liability)
+          if (closing > 0) assets.other.push(entry);
+          else if (closing < 0) liabilities.other.push(entry);
+        }
+      }
+
+      const sum = (arr) => arr.reduce((s, g) => s + Math.abs(g.closingBalance), 0);
+
+      const totalFixedAssets = sum(assets.fixed);
+      const totalCurrentAssets = sum(assets.current);
+      const totalInvestments = sum(assets.investments);
+      const totalOtherAssets = sum(assets.other);
+      const totalAssets = totalFixedAssets + totalCurrentAssets + totalInvestments + totalOtherAssets;
+
+      const totalCurrentLiab = sum(liabilities.current);
+      const totalLongTermLiab = sum(liabilities.longTerm);
+      const totalOtherLiab = sum(liabilities.other);
+      const totalLiabilities = totalCurrentLiab + totalLongTermLiab + totalOtherLiab;
+
+      const totalEquity = sum(equity);
+
+      return {
+        assets: {
+          fixed: assets.fixed, current: assets.current, investments: assets.investments, other: assets.other,
+          totalFixed: totalFixedAssets, totalCurrent: totalCurrentAssets, totalInvestments, totalOther: totalOtherAssets, total: totalAssets
+        },
+        liabilities: {
+          current: liabilities.current, longTerm: liabilities.longTerm, other: liabilities.other,
+          totalCurrent: totalCurrentLiab, totalLongTerm: totalLongTermLiab, totalOther: totalOtherLiab, total: totalLiabilities
+        },
+        equity: { items: equity, total: totalEquity },
+        netWorth: totalAssets - totalLiabilities,
+        period: { from: fromDate, to: toDate }
+      };
+    } catch (error) {
+      console.error('Error fetching Balance Sheet:', error.message);
+      return this._emptyBS(fromDate, toDate);
+    }
+  }
+
+  _emptyBS(from, to) {
+    return {
+      assets: { fixed: [], current: [], investments: [], other: [], totalFixed: 0, totalCurrent: 0, totalInvestments: 0, totalOther: 0, total: 0 },
+      liabilities: { current: [], longTerm: [], other: [], totalCurrent: 0, totalLongTerm: 0, totalOther: 0, total: 0 },
+      equity: { items: [], total: 0 },
+      netWorth: 0,
+      period: { from, to }
+    };
+  }
+
+  /**
+   * Get Trial Balance from Tally
+   * Fetches ALL ledgers with opening/closing balances, classified as Dr/Cr
+   */
+  async getTrialBalance(fromDate = null, toDate = null, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const dateVars = fromDate && toDate
+      ? `<SVFROMDATE>${fromDate}</SVFROMDATE><SVTODATE>${toDate}</SVTODATE>`
+      : '';
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>TBLedgers</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+${dateVars}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="TBLedgers" ISMODIFY="No">
+<TYPE>Ledger</TYPE>
+<FETCH>NAME,PARENT,CLOSINGBALANCE,OPENINGBALANCE</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return this._emptyTB(fromDate, toDate);
+
+      let ledgers = collection.LEDGER;
+      if (!ledgers) return this._emptyTB(fromDate, toDate);
+      ledgers = Array.isArray(ledgers) ? ledgers : [ledgers];
+
+      const result = [];
+      let totalDebit = 0;
+      let totalCredit = 0;
+
+      for (const ledger of ledgers) {
+        const name = ledger.$?.NAME || ledger.NAME?._ || ledger.NAME || '';
+        const parent = ledger.PARENT?._ || ledger.PARENT || '';
+        const closing = parseFloat(String(ledger.CLOSINGBALANCE?._ || ledger.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+        const opening = parseFloat(String(ledger.OPENINGBALANCE?._ || ledger.OPENINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+
+        if (!name || closing === 0) continue;
+
+        // Tally convention: positive = Debit, negative = Credit
+        const debit = closing > 0 ? closing : 0;
+        const credit = closing < 0 ? Math.abs(closing) : 0;
+
+        totalDebit += debit;
+        totalCredit += credit;
+
+        result.push({ name, parent, openingBalance: opening, closingBalance: closing, debit, credit });
+      }
+
+      // Sort by parent group then name
+      result.sort((a, b) => a.parent.localeCompare(b.parent) || a.name.localeCompare(b.name));
+
+      return {
+        ledgers: result,
+        totalDebit,
+        totalCredit,
+        difference: Math.abs(totalDebit - totalCredit),
+        isBalanced: Math.abs(totalDebit - totalCredit) < 0.01,
+        count: result.length,
+        period: { from: fromDate, to: toDate }
+      };
+    } catch (error) {
+      console.error('Error fetching Trial Balance:', error.message);
+      return this._emptyTB(fromDate, toDate);
+    }
+  }
+
+  _emptyTB(from, to) {
+    return { ledgers: [], totalDebit: 0, totalCredit: 0, difference: 0, isBalanced: true, count: 0, period: { from, to } };
+  }
+
+  /**
+   * Get Cash Flow data from Tally
+   * Fetches vouchers involving Cash and Bank ledgers, categorized into Operating/Investing/Financing
+   */
+  async getCashFlow(fromDate, toDate, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const dateVars = fromDate && toDate
+      ? `<SVFROMDATE>${fromDate}</SVFROMDATE><SVTODATE>${toDate}</SVTODATE>`
+      : '';
+
+    // Fetch cash/bank ledger balances for opening/closing
+    const balanceXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CashBankLedgers</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+${dateVars}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="CashBankLedgers" ISMODIFY="No">
+<TYPE>Ledger</TYPE>
+<FETCH>NAME,PARENT,CLOSINGBALANCE,OPENINGBALANCE</FETCH>
+<FILTER>IsCashOrBank</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="IsCashOrBank">$$IsCash:$Parent OR $$IsBank:$Parent</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    // Fetch vouchers involving cash/bank
+    const voucherXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CashBankVch</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+${dateVars}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="CashBankVch" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,ALLLEDGERENTRIES.LIST</FETCH>
+<FILTER>NotCancelled</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="NotCancelled">$$IsEqual:$IsCancelled:No</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      // Fetch balances
+      const balanceResponse = await this.sendRequest(balanceXml);
+      const balanceCollection = balanceResponse?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      let openingCash = 0, closingCash = 0;
+
+      if (balanceCollection) {
+        let bLedgers = balanceCollection.LEDGER;
+        if (bLedgers) {
+          bLedgers = Array.isArray(bLedgers) ? bLedgers : [bLedgers];
+          for (const l of bLedgers) {
+            const opening = parseFloat(String(l.OPENINGBALANCE?._ || l.OPENINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+            const closing = parseFloat(String(l.CLOSINGBALANCE?._ || l.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+            openingCash += opening;
+            closingCash += closing;
+          }
+        }
+      }
+
+      // Fetch vouchers
+      const voucherResponse = await this.sendRequest(voucherXml);
+      const voucherCollection = voucherResponse?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+
+      const operating = { inflows: [], outflows: [] };
+      const investing = { inflows: [], outflows: [] };
+      const financing = { inflows: [], outflows: [] };
+
+      if (voucherCollection) {
+        let vouchers = voucherCollection.VOUCHER;
+        if (vouchers) {
+          vouchers = Array.isArray(vouchers) ? vouchers : [vouchers];
+
+          // Known group classifications
+          const investingKeywords = ['fixed assets', 'investments', 'capital goods'];
+          const financingKeywords = ['capital account', 'secured loans', 'unsecured loans', 'loans (liability)', 'bank od accounts', 'reserves & surplus'];
+
+          for (const v of vouchers) {
+            const date = v.DATE?._ || v.DATE || '';
+            const voucherType = (v.VOUCHERTYPENAME?._ || v.VOUCHERTYPENAME || '').toLowerCase();
+            const voucherNumber = v.VOUCHERNUMBER?._ || v.VOUCHERNUMBER || '';
+            const partyName = v.PARTYLEDGERNAME?._ || v.PARTYLEDGERNAME || '';
+            const amount = parseFloat(String(v.AMOUNT?._ || v.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0;
+            const narration = v.NARRATION?._ || v.NARRATION || '';
+
+            // Check ledger entries to classify
+            let entries = v['ALLLEDGERENTRIES.LIST'];
+            if (!entries) continue;
+            entries = Array.isArray(entries) ? entries : [entries];
+
+            let hasCashBank = false;
+            let cashBankAmount = 0;
+            let otherLedgerParent = '';
+
+            for (const entry of entries) {
+              const ledgerName = (entry.LEDGERNAME?._ || entry.LEDGERNAME || '').toLowerCase();
+              const entryAmount = parseFloat(String(entry.AMOUNT?._ || entry.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0;
+
+              // Check if this entry involves cash/bank
+              if (ledgerName.includes('cash') || ledgerName.includes('bank') || ledgerName.includes('petty cash')) {
+                hasCashBank = true;
+                cashBankAmount = entryAmount;
+              } else {
+                otherLedgerParent = (entry.LEDGERNAME?._ || entry.LEDGERNAME || '');
+              }
+            }
+
+            if (!hasCashBank) continue;
+
+            const entry = {
+              date, voucherType, voucherNumber, partyName, narration,
+              amount: Math.abs(cashBankAmount)
+            };
+
+            // Classify based on the other ledger involved
+            const otherLower = otherLedgerParent.toLowerCase();
+            let category = operating; // default
+
+            if (investingKeywords.some(k => otherLower.includes(k))) {
+              category = investing;
+            } else if (financingKeywords.some(k => otherLower.includes(k))) {
+              category = financing;
+            }
+
+            // Positive cashBankAmount = money going out (debit to cash/bank in Tally is positive)
+            // In Tally: negative amount on cash/bank = inflow (credit), positive = outflow (debit)
+            if (cashBankAmount < 0) {
+              category.inflows.push(entry);
+            } else {
+              category.outflows.push(entry);
+            }
+          }
+        }
+      }
+
+      const sumEntries = (entries) => entries.reduce((s, e) => s + e.amount, 0);
+      const operatingNet = sumEntries(operating.inflows) - sumEntries(operating.outflows);
+      const investingNet = sumEntries(investing.inflows) - sumEntries(investing.outflows);
+      const financingNet = sumEntries(financing.inflows) - sumEntries(financing.outflows);
+
+      return {
+        operating: { ...operating, totalInflow: sumEntries(operating.inflows), totalOutflow: sumEntries(operating.outflows), net: operatingNet },
+        investing: { ...investing, totalInflow: sumEntries(investing.inflows), totalOutflow: sumEntries(investing.outflows), net: investingNet },
+        financing: { ...financing, totalInflow: sumEntries(financing.inflows), totalOutflow: sumEntries(financing.outflows), net: financingNet },
+        netCashFlow: operatingNet + investingNet + financingNet,
+        openingCash: Math.abs(openingCash),
+        closingCash: Math.abs(closingCash),
+        period: { from: fromDate, to: toDate }
+      };
+    } catch (error) {
+      console.error('Error fetching Cash Flow:', error.message);
+      return {
+        operating: { inflows: [], outflows: [], totalInflow: 0, totalOutflow: 0, net: 0 },
+        investing: { inflows: [], outflows: [], totalInflow: 0, totalOutflow: 0, net: 0 },
+        financing: { inflows: [], outflows: [], totalInflow: 0, totalOutflow: 0, net: 0 },
+        netCashFlow: 0, openingCash: 0, closingCash: 0,
+        period: { from: fromDate, to: toDate }
+      };
+    }
+  }
+
+  /**
+   * Get Ratio Analysis — computed from Balance Sheet + P&L data
+   * No new Tally request — combines existing data
+   */
+  async getRatioAnalysis(fromDate = null, toDate = null, companyOverride = null) {
+    try {
+      const [bs, pl] = await Promise.all([
+        this.getBalanceSheet(fromDate, toDate, companyOverride),
+        this.getProfitAndLoss(fromDate, toDate, companyOverride)
+      ]);
+
+      const totalAssets = bs.assets.total || 1;
+      const totalCurrentAssets = bs.assets.totalCurrent || 0;
+      const totalCurrentLiab = bs.liabilities.totalCurrent || 1;
+      const totalLiabilities = bs.liabilities.total || 1;
+      const totalEquity = bs.equity.total || 1;
+      const stockInHand = bs.assets.current.filter(g => g.name.toLowerCase().includes('stock')).reduce((s, g) => s + Math.abs(g.closingBalance), 0);
+
+      const totalSales = pl.income.totalSales || 1;
+      const totalPurchases = pl.expenses.totalPurchases || 0;
+      const grossProfit = pl.grossProfit || 0;
+      const netProfit = pl.netProfit || 0;
+      const operatingExpenses = pl.expenses.totalDirectExp + pl.expenses.totalIndirectExp;
+
+      const safe = (n, d) => d === 0 ? 0 : n / d;
+
+      return {
+        liquidity: {
+          currentRatio: { value: safe(totalCurrentAssets, totalCurrentLiab), formula: 'Current Assets / Current Liabilities', good: '> 1.5' },
+          quickRatio: { value: safe(totalCurrentAssets - stockInHand, totalCurrentLiab), formula: '(Current Assets - Stock) / Current Liabilities', good: '> 1.0' }
+        },
+        leverage: {
+          debtEquityRatio: { value: safe(totalLiabilities, totalEquity), formula: 'Total Liabilities / Equity', good: '< 2.0' },
+          debtRatio: { value: safe(totalLiabilities, totalAssets), formula: 'Total Liabilities / Total Assets', good: '< 0.5' }
+        },
+        profitability: {
+          grossProfitMargin: { value: safe(grossProfit, totalSales) * 100, formula: 'Gross Profit / Sales x 100', good: '> 30%', unit: '%' },
+          netProfitMargin: { value: safe(netProfit, totalSales) * 100, formula: 'Net Profit / Sales x 100', good: '> 10%', unit: '%' },
+          operatingProfitMargin: { value: safe(totalSales - totalPurchases - operatingExpenses, totalSales) * 100, formula: '(Sales - COGS - OpEx) / Sales x 100', good: '> 15%', unit: '%' },
+          returnOnEquity: { value: safe(netProfit, totalEquity) * 100, formula: 'Net Profit / Equity x 100', good: '> 15%', unit: '%' },
+          returnOnAssets: { value: safe(netProfit, totalAssets) * 100, formula: 'Net Profit / Total Assets x 100', good: '> 5%', unit: '%' }
+        },
+        efficiency: {
+          inventoryTurnover: { value: safe(totalPurchases, stockInHand), formula: 'Purchases / Average Stock', good: '> 5' },
+          debtorsTurnover: { value: safe(totalSales, bs.assets.current.filter(g => g.name.toLowerCase().includes('debtor')).reduce((s, g) => s + Math.abs(g.closingBalance), 0) || 1), formula: 'Sales / Sundry Debtors', good: '> 8' },
+          creditorsTurnover: { value: safe(totalPurchases, bs.liabilities.current.filter(g => g.name.toLowerCase().includes('creditor')).reduce((s, g) => s + Math.abs(g.closingBalance), 0) || 1), formula: 'Purchases / Sundry Creditors', good: '> 6' }
+        },
+        period: { from: fromDate, to: toDate }
+      };
+    } catch (error) {
+      console.error('Error computing ratio analysis:', error.message);
+      return {
+        liquidity: {}, leverage: {}, profitability: {}, efficiency: {},
+        period: { from: fromDate, to: toDate }, error: error.message
+      };
+    }
+  }
+
+  /**
+   * Get voucher list from Tally for XML viewer (basic fields, date range)
+   */
+  async getVouchersXmlList(fromDate, toDate) {
+    const companyVar = this.companyName ? `<SVCURRENTCOMPANY>${this.escapeXml(this.companyName)}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>XmlViewList</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+<SVFROMDATE>${fromDate}</SVFROMDATE>
+<SVTODATE>${toDate}</SVTODATE>
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="XmlViewList" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      let vouchers = response?.ENVELOPE?.BODY?.DESC?.DATA?.COLLECTION?.VOUCHER
+                  || response?.ENVELOPE?.COLLECTION?.VOUCHER
+                  || response?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER
+                  || [];
+
+      if (!Array.isArray(vouchers)) vouchers = vouchers ? [vouchers] : [];
+
+      const safeStr = (val) => {
+        if (val == null) return '';
+        if (typeof val === 'string') return val;
+        if (typeof val === 'number') return String(val);
+        if (val._ != null) return String(val._);
+        return '';
+      };
+
+      return vouchers.map(v => ({
+        guid: v.GUID || v.$?.GUID || '',
+        masterId: safeStr(v.MASTERID),
+        alterId: safeStr(v.ALTERID),
+        date: safeStr(v.DATE),
+        voucherType: safeStr(v.VOUCHERTYPENAME),
+        voucherNumber: safeStr(v.VOUCHERNUMBER),
+        partyLedgerName: safeStr(v.PARTYLEDGERNAME),
+        partyName: safeStr(v.PARTYNAME),
+        amount: safeStr(v.AMOUNT),
+        narration: safeStr(v.NARRATION)
+      }));
+    } catch (error) {
+      console.error('Error fetching vouchers XML list:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get full raw XML for a single voucher by MasterID
+   */
+  async getVoucherRawXml(masterId) {
+    const companyVar = this.companyName ? `<SVCURRENTCOMPANY>${this.escapeXml(this.companyName)}</SVCURRENTCOMPANY>` : '';
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchXmlDetail</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+${companyVar}
+</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="VchXmlDetail" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>*,ALLLEDGERENTRIES.LIST,ALLINVENTORYENTRIES.LIST,LEDGERENTRIES.LIST,INVENTORYENTRIES.LIST</FETCH>
+<FILTER>MasterFilter</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="MasterFilter">$MASTERID = ${masterId}</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      // Get raw XML for display
+      const rawXml = await this.sendRawRequest(xml);
+      // Also parse it for structured JSON view
+      const parsed = await parseStringPromise(rawXml, {
+        explicitArray: true,
+        ignoreAttrs: false,
+        trim: true
+      });
+      return { rawXml, parsed };
+    } catch (error) {
+      console.error('Error fetching voucher raw XML:', error.message);
+      throw error;
     }
   }
 }

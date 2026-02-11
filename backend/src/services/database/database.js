@@ -123,6 +123,10 @@ class DatabaseService {
       try { this.db.exec(sql); } catch (e) { /* Column exists */ }
     }
 
+    // Add critical_reason column (migration) - tracks WHY voucher was marked critical
+    // Values: 'udf_change', 'audited_edit', 'post_dated', or comma-separated combo
+    try { this.db.exec("ALTER TABLE bills ADD COLUMN critical_reason TEXT DEFAULT NULL"); } catch (e) { /* exists */ }
+
     // Create index for critical pending bills
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_bills_critical ON bills(is_critical, voucher_type)`);
 
@@ -140,6 +144,16 @@ class DatabaseService {
 
     // Create index for conversion status
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_bills_conversion ON bills(conversion_status)`);
+
+    // Add audit_status column (migration)
+    // audit_status: null (unreviewed), 'audited', 'need_to_ask', 'non_audited'
+    try { this.db.exec("ALTER TABLE bills ADD COLUMN audit_status TEXT DEFAULT NULL"); } catch (e) { /* exists */ }
+
+    // Payment mode breakdown columns (extracted from receipt ledger entries)
+    const payModeCols = ['pay_cash', 'pay_qr', 'pay_cheque', 'pay_discount', 'pay_esewa', 'pay_bank_deposit'];
+    for (const col of payModeCols) {
+      try { this.db.exec(`ALTER TABLE bills ADD COLUMN ${col} REAL DEFAULT 0`); } catch (e) { /* exists */ }
+    }
 
     // ==================== BILL ITEMS TABLE ====================
     // Stores inventory line items for each bill (cached from Tally)
@@ -779,6 +793,109 @@ class DatabaseService {
     this.db.exec(`
       INSERT OR IGNORE INTO full_sync_state (id, status) VALUES (1, 'not_started')
     `);
+
+    // ==================== OUTSTANDING BILLS (Ageing) ====================
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS outstanding_bills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        party_name TEXT NOT NULL,
+        bill_name TEXT NOT NULL,
+        bill_date TEXT,
+        closing_balance REAL DEFAULT 0,
+        credit_period INTEGER DEFAULT 0,
+        ageing_days INTEGER DEFAULT 0,
+        ageing_bucket TEXT DEFAULT '0-30',
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(party_name, bill_name)
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_outstanding_party ON outstanding_bills(party_name);
+      CREATE INDEX IF NOT EXISTS idx_outstanding_bucket ON outstanding_bills(ageing_bucket);
+    `);
+
+    // ==================== STOCK GROUPS ====================
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS stock_groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        parent TEXT,
+        closing_balance REAL DEFAULT 0,
+        closing_value REAL DEFAULT 0,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_stock_groups_parent ON stock_groups(parent);
+    `);
+
+    // ==================== PRICE LISTS ====================
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS price_lists (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        stock_item TEXT NOT NULL,
+        price_level TEXT NOT NULL,
+        rate REAL DEFAULT 0,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(stock_item, price_level)
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_price_lists_item ON price_lists(stock_item);
+      CREATE INDEX IF NOT EXISTS idx_price_lists_level ON price_lists(price_level);
+    `);
+
+    // ==================== BANK / FONEPAY RECONCILIATION ====================
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS bank_reconciliation (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recon_type TEXT DEFAULT 'rbb_tally',
+        source_type TEXT NOT NULL,
+        source_id TEXT,
+        source_date TEXT,
+        source_amount REAL DEFAULT 0,
+        source_description TEXT,
+        target_type TEXT,
+        target_id TEXT,
+        target_date TEXT,
+        target_amount REAL DEFAULT 0,
+        target_description TEXT,
+        match_status TEXT DEFAULT 'unmatched',
+        match_confidence REAL DEFAULT 0,
+        matched_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_recon_status ON bank_reconciliation(match_status);
+      CREATE INDEX IF NOT EXISTS idx_recon_type ON bank_reconciliation(recon_type);
+      CREATE INDEX IF NOT EXISTS idx_recon_source ON bank_reconciliation(source_type, source_id);
+      CREATE INDEX IF NOT EXISTS idx_recon_target ON bank_reconciliation(target_type, target_id);
+    `);
+
+    // Cheque Post Audit Log
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS cheque_post_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        posted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        voucher_date TEXT NOT NULL,
+        total_amount REAL DEFAULT 0,
+        total_cheques INTEGER DEFAULT 0,
+        total_parties INTEGER DEFAULT 0,
+        journal_voucher_number TEXT,
+        journal_success INTEGER DEFAULT 0,
+        master_ids TEXT,
+        receipts_json TEXT,
+        results_json TEXT
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_post_log_date ON cheque_post_log(voucher_date);
+    `);
   }
 
   // ==================== BILLS ====================
@@ -803,19 +920,49 @@ class DatabaseService {
       }
     }
 
-    // Determine if this is a critical pending bill (has UDF payment values)
+    // Determine critical status and reason
     const udfPaymentTotal = bill.udfPaymentTotal || 0;
-    const isCritical = (bill.voucherType === 'Pending Sales Bill' && udfPaymentTotal > 0) ? 1 : 0;
+    const voucherAmount = Math.abs(bill.amount);
+    const oldUdf = existing ? (existing.udf_payment_total || 0) : 0;
+    const udfChanged = oldUdf > 0 && udfPaymentTotal > 0 && udfPaymentTotal !== oldUdf;
+    // UDF matches amount = entries are correct, no need to flag
+    const udfMatchesAmount = udfPaymentTotal > 0 && Math.abs(udfPaymentTotal - voucherAmount) < 1;
+    const auditedAndEdited = existing && existing.audit_status === 'audited' && bill.alterId && existing.alter_id !== bill.alterId;
+    // Post-dated: voucher date is after today
+    const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
+    const isPostDated = bill.date && bill.date > today;
+
+    // Build critical reasons array
+    const reasons = [];
+    if (udfChanged && !udfMatchesAmount) reasons.push('udf_change');
+    if (auditedAndEdited) reasons.push('audited_edit');
+    if (isPostDated) reasons.push('post_dated');
+
+    // Preserve existing reasons if still critical
+    const existingReasons = existing?.critical_reason ? existing.critical_reason.split(',') : [];
+    // Keep old reasons that are still valid, add new ones
+    // Remove udf_change if UDF now matches amount (resolved)
+    const filteredExisting = existingReasons.filter(r => r && r !== '' && !(r === 'udf_change' && udfMatchesAmount));
+    const allReasons = [...new Set([...filteredExisting, ...reasons])];
+
+    const hasNewCritical = reasons.length > 0;
+    const isCritical = hasNewCritical ? 1 : (existing ? existing.is_critical : 0);
+    const criticalReason = allReasons.length > 0 ? allReasons.join(',') : (existing?.critical_reason || null);
 
     const stmt = this.db.prepare(`
       INSERT INTO bills (
         tally_guid, tally_master_id, voucher_number, voucher_type,
         voucher_date, party_name, amount, narration, alter_id,
         tally_created_date, tally_altered_date, tally_entry_time,
-        udf_payment_total, is_critical, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        udf_payment_total, is_critical, critical_reason,
+        pay_cash, pay_qr, pay_cheque, pay_discount, pay_esewa, pay_bank_deposit,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(tally_guid) DO UPDATE SET
         voucher_number = excluded.voucher_number,
+        voucher_type = excluded.voucher_type,
+        voucher_date = excluded.voucher_date,
+        party_name = excluded.party_name,
         amount = excluded.amount,
         narration = excluded.narration,
         alter_id = excluded.alter_id,
@@ -823,6 +970,13 @@ class DatabaseService {
         tally_entry_time = excluded.tally_entry_time,
         udf_payment_total = excluded.udf_payment_total,
         is_critical = excluded.is_critical,
+        critical_reason = excluded.critical_reason,
+        pay_cash = excluded.pay_cash,
+        pay_qr = excluded.pay_qr,
+        pay_cheque = excluded.pay_cheque,
+        pay_discount = excluded.pay_discount,
+        pay_esewa = excluded.pay_esewa,
+        pay_bank_deposit = excluded.pay_bank_deposit,
         synced_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     `);
@@ -837,11 +991,18 @@ class DatabaseService {
       Math.abs(bill.amount),  // Store as positive
       bill.narration,
       bill.alterId || 0,
-      bill.createdDate || bill.date,  // Fall back to voucher date if no creation date
+      bill.createdDate || bill.date,
       bill.alteredDate || null,
       bill.entryTime || null,
       udfPaymentTotal,
-      isCritical
+      isCritical,
+      criticalReason,
+      bill.payCash || 0,
+      bill.payQr || 0,
+      bill.payCheque || 0,
+      bill.payDiscount || 0,
+      bill.payEsewa || 0,
+      bill.payBankDeposit || 0
     );
   }
 
@@ -898,7 +1059,8 @@ class DatabaseService {
       { db: 'voucher_date', new: 'date' },
       { db: 'party_name', new: 'partyName' },
       { db: 'amount', new: 'amount' },
-      { db: 'narration', new: 'narration' }
+      { db: 'narration', new: 'narration' },
+      { db: 'udf_payment_total', new: 'udfPaymentTotal' }
     ];
 
     const stmt = this.db.prepare(`
@@ -1030,7 +1192,7 @@ class DatabaseService {
   }
 
   /**
-   * Get CRITICAL pending bills only (Pending Sales Bill with UDF payment values)
+   * Get CRITICAL pending bills only (Pending Sales Bill with UDF payment values but NOT fully paid)
    * These are exceptional cases that need attention
    */
   getPendingBills() {
@@ -1038,35 +1200,53 @@ class DatabaseService {
       SELECT * FROM bills
       WHERE voucher_type = 'Pending Sales Bill'
       AND is_critical = 1
+      AND (udf_payment_total < amount)
       AND (is_deleted = 0 OR is_deleted IS NULL)
       ORDER BY voucher_date DESC, id DESC
     `).all();
   }
 
   /**
-   * Get ALL pending sales bills (both critical and normal)
+   * Get ALL pending sales bills (both critical and normal, excluding fully paid)
    * Use this for complete list view
    */
   getAllPendingSalesBills() {
     return this.db.prepare(`
       SELECT * FROM bills
       WHERE voucher_type = 'Pending Sales Bill'
+      AND (udf_payment_total < amount OR udf_payment_total = 0 OR udf_payment_total IS NULL)
       AND (is_deleted = 0 OR is_deleted IS NULL)
       ORDER BY is_critical DESC, voucher_date DESC, id DESC
     `).all();
   }
 
   /**
-   * Get count of critical vs normal pending bills
+   * Get cleared bills (fully paid Pending Sales Bills, or converted to Sales/Credit Sales with payment)
+   */
+  getClearedBills() {
+    return this.db.prepare(`
+      SELECT * FROM bills
+      WHERE (
+        (voucher_type = 'Pending Sales Bill' AND udf_payment_total >= amount AND udf_payment_total > 0)
+        OR (voucher_type IN ('Sales', 'Credit Sales') AND udf_payment_total > 0)
+      )
+      AND (is_deleted = 0 OR is_deleted IS NULL)
+      ORDER BY voucher_date DESC, id DESC
+    `).all();
+  }
+
+  /**
+   * Get count of critical vs normal pending bills (excluding fully paid)
    */
   getPendingBillsCounts() {
     const result = this.db.prepare(`
       SELECT
         COUNT(*) as total,
-        SUM(CASE WHEN is_critical = 1 THEN 1 ELSE 0 END) as critical,
-        SUM(CASE WHEN is_critical = 0 OR is_critical IS NULL THEN 1 ELSE 0 END) as normal
+        SUM(CASE WHEN is_critical = 1 AND udf_payment_total < amount THEN 1 ELSE 0 END) as critical,
+        SUM(CASE WHEN (is_critical = 0 OR is_critical IS NULL) THEN 1 ELSE 0 END) as normal
       FROM bills
       WHERE voucher_type = 'Pending Sales Bill'
+      AND (udf_payment_total < amount OR udf_payment_total = 0 OR udf_payment_total IS NULL)
       AND (is_deleted = 0 OR is_deleted IS NULL)
     `).get();
     return {
@@ -1081,35 +1261,63 @@ class DatabaseService {
    * Excludes deleted vouchers by default
    */
   getAllVouchers(options = {}) {
-    const { limit = 500, offset = 0, voucherType, dateFrom, dateTo, includeDeleted = false } = options;
+    const { limit = 500, offset = 0, voucherType, dateFrom, dateTo, search, auditStatus, isCritical, criticalReason, includeDeleted = false } = options;
 
-    let sql = 'SELECT * FROM bills WHERE 1=1';
+    let where = ' WHERE 1=1';
     const params = [];
 
     // Exclude deleted vouchers unless specifically requested
     if (!includeDeleted) {
-      sql += ' AND (is_deleted = 0 OR is_deleted IS NULL)';
+      where += ' AND (is_deleted = 0 OR is_deleted IS NULL)';
     }
 
     if (voucherType) {
-      sql += ' AND voucher_type = ?';
+      where += ' AND voucher_type = ?';
       params.push(voucherType);
     }
 
     if (dateFrom) {
-      sql += ' AND voucher_date >= ?';
+      where += ' AND voucher_date >= ?';
       params.push(dateFrom);
     }
 
     if (dateTo) {
-      sql += ' AND voucher_date <= ?';
+      where += ' AND voucher_date <= ?';
       params.push(dateTo);
     }
 
-    sql += ' ORDER BY voucher_date DESC, id DESC LIMIT ? OFFSET ?';
-    params.push(limit, offset);
+    if (search) {
+      where += ' AND (party_name LIKE ? OR voucher_number LIKE ? OR narration LIKE ?)';
+      const q = `%${search}%`;
+      params.push(q, q, q);
+    }
 
-    return this.db.prepare(sql).all(...params);
+    if (auditStatus) {
+      if (auditStatus === 'unset') {
+        where += ' AND (audit_status IS NULL OR audit_status = \'\')';
+      } else {
+        where += ' AND audit_status = ?';
+        params.push(auditStatus);
+      }
+    }
+
+    if (isCritical === '1') {
+      where += ' AND is_critical = 1';
+    }
+
+    // Filter by critical reason (searches within comma-separated critical_reason field)
+    // Also includes vouchers where is_critical was cleared by auditing but reason is still stored
+    if (criticalReason) {
+      where += " AND (critical_reason LIKE ? OR critical_reason LIKE ? OR critical_reason LIKE ? OR critical_reason = ?)";
+      params.push(`${criticalReason},%`, `%,${criticalReason},%`, `%,${criticalReason}`, criticalReason);
+    }
+
+    const total = this.db.prepare('SELECT COUNT(*) as cnt FROM bills' + where).get(...params).cnt;
+
+    const sql = 'SELECT * FROM bills' + where + ' ORDER BY alter_id DESC, id DESC LIMIT ? OFFSET ?';
+    const vouchers = this.db.prepare(sql).all(...params, limit, offset);
+
+    return { vouchers, total };
   }
 
   /**
@@ -1481,6 +1689,16 @@ class DatabaseService {
   }
 
   /**
+   * Update voucher type when Tally changes it (e.g., Pending Sales Bill → Sales)
+   */
+  updateBillVoucherType(guid, newType) {
+    return this.db.prepare(`
+      UPDATE bills SET voucher_type = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE tally_guid = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+    `).run(newType, guid);
+  }
+
+  /**
    * Mark a bill as deleted in Tally (truly deleted, not converted)
    * Saves to history before deletion
    * @param {string} guid - The Tally GUID of the bill
@@ -1641,63 +1859,227 @@ class DatabaseService {
     `).all(billId);
   }
 
+  // ==================== COLUMNAR DASHBOARD ====================
+
+  /**
+   * Get party-grouped columnar view:
+   * - Bill amount from Sales-type vouchers
+   * - Payment modes from receipt voucher ledger entries (pay_* columns)
+   */
+  getColumnarBills(date, search = '') {
+    let sql = `
+      SELECT
+        party_name,
+        SUM(CASE WHEN voucher_type IN ('Sales','Credit Sales','A Pto Bill','Debit Note') THEN ABS(amount) ELSE 0 END) as bill_amount,
+        SUM(CASE WHEN voucher_type = 'Pending Sales Bill' THEN ABS(amount) ELSE 0 END) as pending_amount,
+        SUM(COALESCE(pay_cash, 0)) as cash,
+        SUM(COALESCE(pay_qr, 0)) as qr,
+        SUM(COALESCE(pay_cheque, 0)) as cheque,
+        SUM(COALESCE(pay_discount, 0)) as discount,
+        SUM(COALESCE(pay_esewa, 0)) as esewa,
+        SUM(COALESCE(pay_bank_deposit, 0)) as bank_deposit,
+        GROUP_CONCAT(DISTINCT voucher_number) as voucher_numbers,
+        COUNT(CASE WHEN voucher_type IN ('Sales','Credit Sales','A Pto Bill','Debit Note') THEN 1 END) as bill_count,
+        COUNT(CASE WHEN voucher_type = 'Pending Sales Bill' THEN 1 END) as pending_count,
+        COUNT(CASE WHEN voucher_type IN ('Bank Receipt','Counter Receipt','Receipt','Dashboard Receipt','Credit Note') THEN 1 END) as receipt_count,
+        COUNT(CASE WHEN voucher_type = 'Sales' THEN 1 END) as sales_count,
+        COUNT(CASE WHEN voucher_type = 'Credit Sales' THEN 1 END) as credit_sales_count,
+        COUNT(CASE WHEN voucher_type = 'A Pto Bill' THEN 1 END) as apto_count,
+        COUNT(CASE WHEN voucher_type = 'Debit Note' THEN 1 END) as debit_note_count,
+        COUNT(CASE WHEN voucher_type IN ('Bank Receipt','Counter Receipt','Receipt','Dashboard Receipt') THEN 1 END) as receipt_only_count,
+        COUNT(CASE WHEN voucher_type = 'Credit Note' THEN 1 END) as credit_note_count
+      FROM bills
+      WHERE voucher_date = ?
+        AND (is_deleted = 0 OR is_deleted IS NULL)
+    `;
+    const params = [date];
+
+    if (search) {
+      sql += ` AND (party_name LIKE ? OR voucher_number LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    sql += ` GROUP BY party_name HAVING bill_amount > 0 OR pending_amount > 0 OR (cash + qr + cheque + discount + esewa + bank_deposit) > 0 ORDER BY party_name`;
+
+    const rows = this.db.prepare(sql).all(...params);
+
+    // Detect parties where receipt count exceeds bill count (duplicate receipts)
+    // e.g. 2 bills + 2 receipts = OK, 1 bill + 2 receipts = DUPLICATE
+    let dupFilter = `
+      SELECT party_name,
+        GROUP_CONCAT(CASE WHEN voucher_type IN ('Bank Receipt','Counter Receipt','Receipt','Dashboard Receipt','Credit Note') THEN voucher_type END) as receipt_types,
+        COUNT(CASE WHEN voucher_type IN ('Bank Receipt','Counter Receipt','Receipt','Dashboard Receipt','Credit Note') THEN 1 END) as rcpt_cnt,
+        COUNT(CASE WHEN voucher_type IN ('Sales','Credit Sales','Pending Sales Bill','A Pto Bill','Debit Note') THEN 1 END) as bill_cnt
+      FROM bills
+      WHERE voucher_date = ?
+        AND (is_deleted = 0 OR is_deleted IS NULL)
+    `;
+    const dupParams = [date];
+    if (search) {
+      dupFilter += ` AND (party_name LIKE ? OR voucher_number LIKE ?)`;
+      dupParams.push(`%${search}%`, `%${search}%`);
+    }
+    dupFilter += ` GROUP BY party_name HAVING rcpt_cnt > bill_cnt AND rcpt_cnt > 1`;
+    const dupRows = this.db.prepare(dupFilter).all(...dupParams);
+    const dupMap = {};
+    for (const d of dupRows) {
+      dupMap[d.party_name] = d.receipt_types;
+    }
+
+    return rows.map(r => {
+      const totalPaid = (r.cash || 0) + (r.qr || 0) + (r.cheque || 0) + (r.discount || 0) + (r.esewa || 0) + (r.bank_deposit || 0);
+      const dup = dupMap[r.party_name];
+      const balance = r.bill_amount - totalPaid;
+      // Entries mismatch: party has receipts but total paid != bill amount
+      const isMismatch = r.receipt_count > 0 && r.bill_count > 0 && Math.abs(balance) > 1;
+      const warnings = [];
+      if (dup) warnings.push(`DUPLICATE: ${dup}`);
+      if (isMismatch) warnings.push(`MISMATCH: Bill ${r.bill_amount} vs Paid ${totalPaid}`);
+      return {
+        party_name: r.party_name,
+        bill_amount: r.bill_amount,
+        pending_amount: r.pending_amount || 0,
+        voucher_numbers: r.voucher_numbers,
+        bill_count: r.bill_count,
+        pending_count: r.pending_count || 0,
+        receipt_count: r.receipt_count,
+        sales_count: r.sales_count || 0,
+        credit_sales_count: r.credit_sales_count || 0,
+        apto_count: r.apto_count || 0,
+        debit_note_count: r.debit_note_count || 0,
+        receipt_only_count: r.receipt_only_count || 0,
+        credit_note_count: r.credit_note_count || 0,
+        cash: r.cash || 0,
+        qr: r.qr || 0,
+        cheque: r.cheque || 0,
+        discount: r.discount || 0,
+        esewa: r.esewa || 0,
+        bank_deposit: r.bank_deposit || 0,
+        total_paid: totalPaid,
+        balance,
+        is_critical: !!dup,
+        is_mismatch: isMismatch,
+        critical_reason: dup || null,
+        warnings
+      };
+    });
+  }
+
+  /**
+   * Get alterations for columnar audit:
+   * 1. Changes to vouchers ON this date that happened later (post-date edits)
+   * 2. Changes that HAPPENED on this date to vouchers from any date (e.g. deletions)
+   */
+  getColumnarAlterations(date) {
+    const isoDate = date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
+
+    const rows = this.db.prepare(`
+      SELECT
+        b.party_name,
+        b.voucher_type,
+        b.voucher_number,
+        b.voucher_date,
+        b.amount,
+        b.tally_master_id as master_id,
+        vcl.field_name,
+        vcl.old_value,
+        vcl.new_value,
+        vcl.old_alter_id,
+        vcl.new_alter_id,
+        vcl.changed_at,
+        CASE
+          WHEN b.voucher_date = ? AND DATE(vcl.changed_at) > ? THEN 'post_date_edit'
+          WHEN DATE(vcl.changed_at) = ? AND b.voucher_date != ? THEN 'changed_today'
+          ELSE 'other'
+        END as alteration_type
+      FROM voucher_change_log vcl
+      JOIN bills b ON b.tally_master_id = vcl.master_id
+      WHERE (b.voucher_date = ? AND DATE(vcl.changed_at) > ?)
+         OR (DATE(vcl.changed_at) = ? AND b.voucher_date != ?)
+      ORDER BY vcl.changed_at DESC
+    `).all(date, isoDate, isoDate, date, date, isoDate, isoDate, date);
+
+    return rows;
+  }
+
   // ==================== DAYBOOK ====================
 
   /**
-   * Get columnar daybook data
+   * Get daybook data with proper debit/credit classification for ALL voucher types
+   * Supports date range (fromDate to toDate)
    */
-  getDaybook(date, voucherTypes = null) {
+  getDaybook(fromDate, toDate, voucherTypes = null) {
     let sql = `
       SELECT
-        voucher_date,
-        voucher_number,
-        voucher_type,
-        party_name,
+        id, voucher_date, voucher_number, voucher_type, party_name, amount, narration,
         CASE
-          WHEN voucher_type IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill')
-          THEN amount
+          WHEN voucher_type IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill', 'Debit Note')
+            THEN ABS(amount)
+          WHEN voucher_type IN ('Purchase', 'Payment')
+            THEN ABS(amount)
+          WHEN voucher_type IN ('Journal', 'Cheque Journal') AND amount > 0
+            THEN amount
+          WHEN voucher_type NOT IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt', 'Credit Note', 'Contra', 'Journal', 'Cheque Journal') AND amount > 0
+            THEN amount
           ELSE 0
         END as debit,
         CASE
-          WHEN voucher_type IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt')
-          THEN amount
+          WHEN voucher_type IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt', 'Credit Note')
+            THEN ABS(amount)
+          WHEN voucher_type IN ('Contra')
+            THEN ABS(amount)
+          WHEN voucher_type IN ('Journal', 'Cheque Journal') AND amount < 0
+            THEN ABS(amount)
+          WHEN voucher_type NOT IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill', 'Debit Note', 'Purchase', 'Payment', 'Journal', 'Cheque Journal') AND amount < 0
+            THEN ABS(amount)
           ELSE 0
         END as credit,
-        payment_status,
-        dispatch_status
+        payment_status, dispatch_status
       FROM bills
-      WHERE voucher_date = ?
+      WHERE voucher_date BETWEEN ? AND ?
+        AND (is_deleted = 0 OR is_deleted IS NULL)
     `;
 
-    const params = [date];
+    const params = [fromDate, toDate];
 
     if (voucherTypes && voucherTypes.length > 0) {
       sql += ` AND voucher_type IN (${voucherTypes.map(() => '?').join(',')})`;
       params.push(...voucherTypes);
     }
 
-    sql += ' ORDER BY id ASC';
+    sql += ' ORDER BY voucher_date ASC, id ASC';
 
     return this.db.prepare(sql).all(...params);
   }
 
   /**
-   * Get party-wise summary
+   * Get party-wise summary with proper debit/credit for all voucher types
    */
   getPartySummary(fromDate, toDate) {
     return this.db.prepare(`
       SELECT
         party_name,
         SUM(CASE
-          WHEN voucher_type IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill')
-          THEN amount ELSE 0
+          WHEN voucher_type IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill', 'Debit Note', 'Purchase', 'Payment')
+            THEN ABS(amount)
+          WHEN voucher_type IN ('Journal', 'Cheque Journal') AND amount > 0
+            THEN amount
+          WHEN voucher_type NOT IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt', 'Credit Note', 'Contra', 'Journal', 'Cheque Journal') AND amount > 0
+            THEN amount
+          ELSE 0
         END) as total_debit,
         SUM(CASE
-          WHEN voucher_type IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt')
-          THEN amount ELSE 0
+          WHEN voucher_type IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt', 'Credit Note', 'Contra')
+            THEN ABS(amount)
+          WHEN voucher_type IN ('Journal', 'Cheque Journal') AND amount < 0
+            THEN ABS(amount)
+          WHEN voucher_type NOT IN ('Sales', 'Credit Sales', 'Pending Sales Bill', 'A Pto Bill', 'Debit Note', 'Purchase', 'Payment', 'Journal', 'Cheque Journal') AND amount < 0
+            THEN ABS(amount)
+          ELSE 0
         END) as total_credit
       FROM bills
       WHERE voucher_date BETWEEN ? AND ?
+        AND (is_deleted = 0 OR is_deleted IS NULL)
       GROUP BY party_name
       ORDER BY party_name
     `).all(fromDate, toDate);
@@ -2247,11 +2629,21 @@ class DatabaseService {
 
   /**
    * Get next daily invoice number (resets each day)
-   * Format: DB-YYYYMMDD-NNN (e.g., DB-20260204-001)
+   * Format: DB-MMDD-NNN (e.g., DB-0210-001 for Feb 10)
    */
   getNextInvoiceNumber() {
     const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-    const dateStr = today.replace(/-/g, ''); // YYYYMMDD
+    const monthNum = parseInt(today.slice(5, 7)); // 1-12
+    const dayNum = parseInt(today.slice(8, 10)); // 1-31
+
+    // Month: A=Jan(1), B=Feb(2), C=Mar(3)... L=Dec(12)
+    const monthLetter = String.fromCharCode(64 + monthNum); // 65=A
+
+    // Day: tens digit encoded (0→0, 1→A, 2→B, 3→C), ones digit stays as number
+    const dayTens = Math.floor(dayNum / 10);
+    const dayOnes = dayNum % 10;
+    const tensCode = dayTens === 0 ? '0' : String.fromCharCode(64 + dayTens); // 1→A, 2→B, 3→C
+    const dateCode = `${monthLetter}${tensCode}${dayOnes}`;
 
     // Check if we need to reset the counter for a new day
     const currentState = this.db.prepare('SELECT * FROM daily_invoice_counter WHERE id = 1').get();
@@ -2270,9 +2662,9 @@ class DatabaseService {
     `).run();
 
     const updated = this.db.prepare('SELECT last_number FROM daily_invoice_counter WHERE id = 1').get();
-    const num = String(updated.last_number).padStart(3, '0');
+    const num = String(updated.last_number).padStart(2, '0');
 
-    return `DB-${dateStr}-${num}`;
+    return `DB-${dateCode}-${num}`;
   }
 
   /**
@@ -3376,6 +3768,250 @@ class DatabaseService {
     });
 
     return transaction(settings);
+  }
+
+  // ==================== OUTSTANDING BILLS ====================
+
+  upsertOutstandingBills(bills) {
+    const stmt = this.db.prepare(`
+      INSERT INTO outstanding_bills (party_name, bill_name, bill_date, closing_balance, credit_period, ageing_days, ageing_bucket, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(party_name, bill_name) DO UPDATE SET
+        bill_date = excluded.bill_date,
+        closing_balance = excluded.closing_balance,
+        credit_period = excluded.credit_period,
+        ageing_days = excluded.ageing_days,
+        ageing_bucket = excluded.ageing_bucket,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+
+    const tx = this.db.transaction((items) => {
+      for (const b of items) {
+        stmt.run(b.partyName, b.billName, b.billDate, b.closingBalance, b.creditPeriod || 0, b.ageingDays || 0, b.ageingBucket || '0-30');
+      }
+    });
+
+    tx(bills);
+    return bills.length;
+  }
+
+  clearOutstandingBills() {
+    return this.db.prepare('DELETE FROM outstanding_bills').run();
+  }
+
+  getOutstandingBills(party = null) {
+    if (party) {
+      return this.db.prepare('SELECT * FROM outstanding_bills WHERE party_name = ? ORDER BY closing_balance DESC').all(party);
+    }
+    return this.db.prepare('SELECT * FROM outstanding_bills ORDER BY closing_balance DESC').all();
+  }
+
+  getAgeingSummary() {
+    return this.db.prepare(`
+      SELECT ageing_bucket,
+        COUNT(*) as bill_count,
+        SUM(closing_balance) as total_amount,
+        COUNT(DISTINCT party_name) as party_count
+      FROM outstanding_bills
+      GROUP BY ageing_bucket
+      ORDER BY CASE ageing_bucket
+        WHEN '0-30' THEN 1
+        WHEN '30-60' THEN 2
+        WHEN '60-90' THEN 3
+        WHEN '90+' THEN 4
+      END
+    `).all();
+  }
+
+  getOutstandingParties() {
+    return this.db.prepare(`
+      SELECT party_name,
+        SUM(closing_balance) as total_outstanding,
+        COUNT(*) as bill_count,
+        MIN(bill_date) as oldest_bill_date
+      FROM outstanding_bills
+      GROUP BY party_name
+      ORDER BY total_outstanding DESC
+    `).all();
+  }
+
+  // ==================== STOCK GROUPS ====================
+
+  upsertStockGroups(groups) {
+    const stmt = this.db.prepare(`
+      INSERT INTO stock_groups (name, parent, closing_balance, closing_value, synced_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(name) DO UPDATE SET
+        parent = excluded.parent,
+        closing_balance = excluded.closing_balance,
+        closing_value = excluded.closing_value,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+
+    const tx = this.db.transaction((items) => {
+      for (const g of items) {
+        stmt.run(g.name, g.parent, g.closingBalance || 0, g.closingValue || 0);
+      }
+    });
+
+    tx(groups);
+    return groups.length;
+  }
+
+  getAllStockGroups() {
+    return this.db.prepare('SELECT * FROM stock_groups ORDER BY name').all();
+  }
+
+  getStockGroupSummary() {
+    return this.db.prepare(`
+      SELECT sg.name, sg.parent, sg.closing_balance, sg.closing_value,
+        (SELECT COUNT(*) FROM stock_items si WHERE si.parent = sg.name) as item_count
+      FROM stock_groups sg
+      ORDER BY sg.closing_value DESC
+    `).all();
+  }
+
+  // ==================== PRICE LISTS ====================
+
+  upsertPriceLists(prices) {
+    const stmt = this.db.prepare(`
+      INSERT INTO price_lists (stock_item, price_level, rate, synced_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(stock_item, price_level) DO UPDATE SET
+        rate = excluded.rate,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+
+    const tx = this.db.transaction((items) => {
+      for (const p of items) {
+        stmt.run(p.stockItem, p.priceLevel, p.rate || 0);
+      }
+    });
+
+    tx(prices);
+    return prices.length;
+  }
+
+  getPriceLists(level = null) {
+    if (level) {
+      return this.db.prepare('SELECT * FROM price_lists WHERE price_level = ? ORDER BY stock_item').all(level);
+    }
+    return this.db.prepare('SELECT * FROM price_lists ORDER BY stock_item, price_level').all();
+  }
+
+  getPriceLevels() {
+    return this.db.prepare('SELECT DISTINCT price_level FROM price_lists ORDER BY price_level').all().map(r => r.price_level);
+  }
+
+  getItemPrices(itemName) {
+    return this.db.prepare('SELECT * FROM price_lists WHERE stock_item = ? ORDER BY price_level').all(itemName);
+  }
+
+  // ==================== BANK / FONEPAY RECONCILIATION ====================
+
+  createReconMatch(match) {
+    return this.db.prepare(`
+      INSERT INTO bank_reconciliation (recon_type, source_type, source_id, source_date, source_amount, source_description, target_type, target_id, target_date, target_amount, target_description, match_status, match_confidence, matched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      match.reconType, match.sourceType, match.sourceId, match.sourceDate, match.sourceAmount, match.sourceDescription,
+      match.targetType, match.targetId, match.targetDate, match.targetAmount, match.targetDescription,
+      match.matchStatus || 'matched', match.matchConfidence || 1.0
+    );
+  }
+
+  getReconMatches(reconType = null) {
+    if (reconType) {
+      return this.db.prepare('SELECT * FROM bank_reconciliation WHERE recon_type = ? ORDER BY created_at DESC').all(reconType);
+    }
+    return this.db.prepare('SELECT * FROM bank_reconciliation ORDER BY created_at DESC').all();
+  }
+
+  getReconSummary(reconType = null) {
+    const where = reconType ? `WHERE recon_type = '${reconType}'` : '';
+    return this.db.prepare(`
+      SELECT recon_type, match_status,
+        COUNT(*) as count,
+        SUM(source_amount) as total_source_amount,
+        SUM(target_amount) as total_target_amount
+      FROM bank_reconciliation ${where}
+      GROUP BY recon_type, match_status
+    `).all();
+  }
+
+  clearReconByType(reconType) {
+    return this.db.prepare('DELETE FROM bank_reconciliation WHERE recon_type = ?').run(reconType);
+  }
+
+  getUnmatchedRBB() {
+    // RBB transactions not yet matched in bank_reconciliation
+    return this.db.prepare(`
+      SELECT r.* FROM rbb_transactions r
+      WHERE r.id NOT IN (
+        SELECT source_id FROM bank_reconciliation WHERE source_type = 'rbb' AND match_status = 'matched'
+      )
+      ORDER BY r.transaction_date DESC
+    `).all();
+  }
+
+  getUnmatchedTallyVouchers(reconType) {
+    return this.db.prepare(`
+      SELECT * FROM bank_reconciliation
+      WHERE recon_type = ? AND match_status = 'unmatched' AND target_type IS NULL
+      ORDER BY created_at DESC
+    `).all(reconType);
+  }
+
+  getUnmatchedFonepay() {
+    return this.db.prepare(`
+      SELECT f.* FROM fonepay_transactions f
+      WHERE f.id NOT IN (
+        SELECT source_id FROM bank_reconciliation WHERE source_type = 'fonepay' AND match_status = 'matched'
+      )
+      ORDER BY f.transaction_date DESC
+    `).all();
+  }
+
+  // ==================== CHEQUE POST AUDIT LOG ====================
+
+  savePostLog(data) {
+    const { voucherDate, totalAmount, totalCheques, totalParties, journalVoucherNumber, journalSuccess, masterIds, receipts, results } = data;
+    const stmt = this.db.prepare(`
+      INSERT INTO cheque_post_log (voucher_date, total_amount, total_cheques, total_parties, journal_voucher_number, journal_success, master_ids, receipts_json, results_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    return stmt.run(voucherDate, totalAmount, totalCheques, totalParties, journalVoucherNumber || '', journalSuccess ? 1 : 0, JSON.stringify(masterIds || []), JSON.stringify(receipts || []), JSON.stringify(results || {}));
+  }
+
+  getPostLogs(limit = 50, offset = 0) {
+    return this.db.prepare(`SELECT * FROM cheque_post_log ORDER BY posted_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
+  }
+
+  getPostedMasterIds(voucherDate) {
+    const rows = this.db.prepare(`SELECT master_ids FROM cheque_post_log WHERE voucher_date = ?`).all(voucherDate);
+    const ids = new Set();
+    for (const row of rows) {
+      try { const arr = JSON.parse(row.master_ids); arr.forEach(id => ids.add(String(id))); } catch (e) {}
+    }
+    return [...ids];
+  }
+
+  getPostLogCount() {
+    return this.db.prepare(`SELECT COUNT(*) as count FROM cheque_post_log`).get().count;
+  }
+
+  getPostLogStats() {
+    return this.db.prepare(`
+      SELECT
+        COUNT(*) as total_posts,
+        SUM(total_cheques) as total_cheques,
+        SUM(total_amount) as total_amount,
+        SUM(total_parties) as total_parties,
+        SUM(CASE WHEN journal_success = 1 THEN 1 ELSE 0 END) as successful_journals,
+        MIN(posted_at) as first_post,
+        MAX(posted_at) as last_post
+      FROM cheque_post_log
+    `).get();
   }
 
   /**

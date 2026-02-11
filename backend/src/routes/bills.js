@@ -92,6 +92,19 @@ router.get('/pending/all', (req, res) => {
 });
 
 /**
+ * GET /api/bills/cleared
+ * Get cleared bills (paid pending bills converted to Sales/Credit Sales)
+ */
+router.get('/cleared', (req, res) => {
+  try {
+    const bills = db.getClearedBills();
+    res.json({ bills, count: bills.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /api/bills/pending/counts
  * Get counts of critical vs normal pending bills
  */
@@ -137,18 +150,50 @@ router.get('/batch-items', (req, res) => {
  * GET /api/bills/:id/print-data
  * Get all data needed to print a bill (bill + items + party + business info)
  */
-router.get('/:id/print-data', (req, res) => {
+router.get('/:id/print-data', async (req, res) => {
   try {
     const bill = db.getBillById(req.params.id);
     if (!bill) return res.status(404).json({ error: 'Bill not found' });
 
-    // Get items from cache
-    const rawItems = db.getBillItems(bill.id);
+    // Get items from cache first
+    let rawItems = db.getBillItems(bill.id);
+
+    // If no cached items, fetch from Tally
+    if (rawItems.length === 0 && bill.tally_master_id) {
+      try {
+        const result = await tallyConnector.getCompleteVoucher(bill.tally_master_id);
+        if (result.success && result.voucher) {
+          const extractValue = (f) => { if (!f) return ''; if (typeof f === 'object' && f._) return f._; return String(f); };
+          const parseQty = (q) => { const m = extractValue(q).match(/[\d.]+/); return m ? parseFloat(m[0]) : 0; };
+          const parseRate = (r) => { const m = extractValue(r).match(/[\d.]+/); return m ? parseFloat(m[0]) : 0; };
+          const parseUnit = (q) => { const m = extractValue(q).match(/[\d.]+\s*(.+)/); return m ? m[1].trim() : 'Nos'; };
+
+          let entries = result.voucher?.['ALLINVENTORYENTRIES.LIST'] || [];
+          if (!Array.isArray(entries)) entries = [entries].filter(Boolean);
+
+          const tallyItems = entries.filter(e => e).map(entry => ({
+            stockItem: extractValue(entry.STOCKITEMNAME),
+            quantity: Math.abs(parseQty(entry.ACTUALQTY) || parseQty(entry.BILLEDQTY)),
+            rate: Math.abs(parseRate(entry.RATE)),
+            amount: Math.abs(parseFloat(extractValue(entry.AMOUNT)) || 0),
+            unit: parseUnit(entry.ACTUALQTY) || 'Nos'
+          })).filter(i => i.stockItem);
+
+          if (tallyItems.length > 0) {
+            db.saveBillItems(bill.id, tallyItems);
+            rawItems = db.getBillItems(bill.id);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fetch items from Tally for print:', e.message);
+      }
+    }
+
     const items = rawItems.map(i => ({
       stockItem: i.stock_item,
       quantity: i.quantity,
       rate: i.rate,
-      amount: i.amount,
+      amount: Math.abs(i.amount),
       unit: i.unit || 'Nos'
     }));
 
@@ -467,7 +512,7 @@ router.post('/:id/items', async (req, res) => {
       return res.status(400).json({ error: 'Can only add items to Pending Sales Bills' });
     }
 
-    const { stockItem, quantity, rate, godown } = req.body;
+    const { stockItem, quantity, rate, godown, unit } = req.body;
     if (!stockItem || !quantity || !rate) {
       return res.status(400).json({ error: 'stockItem, quantity, and rate are required' });
     }
@@ -484,7 +529,8 @@ router.post('/:id/items', async (req, res) => {
         quantity: parseFloat(quantity),
         rate: parseFloat(rate),
         amount: parseFloat(quantity) * parseFloat(rate),
-        godown: godown || ''
+        godown: godown || '',
+        unit: unit || 'Nos'
       }
     });
 

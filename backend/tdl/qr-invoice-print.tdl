@@ -1,0 +1,81 @@
+;;
+;; QR Code WhatsApp Invoice Print Add-on
+;; For Tally Prime 4.x+
+;;
+;; Adds a QR code to ALL voucher prints containing a WhatsApp link
+;; with bill details (Master ID, Voucher Number, Amount, Party Name).
+;;
+;; SETUP:
+;;   1. Change vWhatsAppNo below to your WhatsApp number (international format, no +)
+;;   2. Load via: F1 (Help) > TDL & Add-Ons > F4 (Manage Local TDLs)
+;;   3. Set Yes, enter path to this file, Accept, Restart Tally
+;;
+;; QR Content Format:
+;;   TALLY|PAY|{MasterID}|{VoucherNumber}|{Amount}|{PartyName}
+;;
+
+;; =============================================
+;; CONFIGURATION - Edit your WhatsApp number here
+;; =============================================
+
+[System: Variable]
+    Variable : vWhatsAppNo : String : "9779800000000"
+
+;; =============================================
+;; QR CODE PARTS, LINES & FIELDS
+;; =============================================
+
+;; Container part for QR section
+[Part: TC QR Print Section]
+    Lines       : TC QR Image Line, TC QR Label Line
+    Space Top   : 0.5 cm
+    Space Bottom: 0.3 cm
+
+;; Line holding the QR code image
+[Line: TC QR Image Line]
+    Fields : TC QR Spacer Left, TC QR Image Field, TC QR Spacer Right
+    Height : 4 cm
+
+;; Spacer fields to center the QR image
+[Field: TC QR Spacer Left]
+    Set As : ""
+    Width  : 35% Page
+
+[Field: TC QR Spacer Right]
+    Set As : ""
+    Width  : 35% Page
+
+;; QR Code image field - generates WhatsApp URL with bill details
+[Field: TC QR Image Field]
+    Type   : Image
+    Width  : 30% Page
+    Align  : Centre
+    Set As : $$QRImageVal:(+"https://wa.me/" + ##vWhatsAppNo + "?text=" + $$StringReplace:($$StringReplace:("TALLY%7CPAY%7C" + $$String:$MasterID + "%7C" + $VoucherNumber + "%7C" + $$String:$$Round:$Amount:0 + "%7C" + $PartyLedgerName):" ":"%20"):"/":"%2F")
+
+;; Line holding the label text below QR
+[Line: TC QR Label Line]
+    Fields : TC QR Label Field
+    Height : 0.5 cm
+
+;; Label text field
+[Field: TC QR Label Field]
+    Set As : "Scan to message on WhatsApp"
+    Width  : 100% Page
+    Align  : Centre
+    Style  : Small Bold
+
+;; =============================================
+;; HOOK INTO INVOICE-STYLE VOUCHER PRINTS
+;; (Sales, Purchase, Debit Note, Credit Note)
+;; =============================================
+
+[#Form: Invoice Printing]
+    Add : Print After : TC QR Print Section
+
+;; =============================================
+;; HOOK INTO SIMPLE VOUCHER PRINTS
+;; (Payment, Receipt, Journal, Contra)
+;; =============================================
+
+[#Form: Simple Voucher Printing]
+    Add : Print After : TC QR Print Section

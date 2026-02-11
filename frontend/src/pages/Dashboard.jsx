@@ -17,10 +17,16 @@ import {
 } from 'lucide-react';
 
 import socket from '../utils/socket';
-import { getDashboardSummary, getPendingBills, getBills } from '../utils/api';
+import {
+  getDashboardSummary,
+  getPendingBills,
+  getBills,
+  getTallyStatus,
+  getSyncStatus,
+  startSyncService as startSyncApi,
+  stopSyncService as stopSyncApi
+} from '../utils/api';
 import PaymentModal from '../components/PaymentModal';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 function Dashboard({ isSimpleMode }) {
   const { t } = useTranslation();
@@ -45,9 +51,8 @@ function Dashboard({ isSimpleMode }) {
   // Check Tally status
   const checkTallyStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/tally/status`, { signal: AbortSignal.timeout(5000) });
-      const data = await res.json();
-      setTallyStatus({ connected: data.connected, checking: false });
+      const res = await getTallyStatus();
+      setTallyStatus({ connected: res.data?.connected || false, checking: false });
     } catch {
       setTallyStatus({ connected: false, checking: false });
     }
@@ -56,9 +61,8 @@ function Dashboard({ isSimpleMode }) {
   // Check sync service status
   const checkSyncStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/sync/status`);
-      const data = await res.json();
-      setSyncServiceRunning(data.isRunning);
+      const res = await getSyncStatus();
+      setSyncServiceRunning(res.data?.isRunning || false);
     } catch {
       console.warn('Failed to check sync status');
     }
@@ -68,9 +72,8 @@ function Dashboard({ isSimpleMode }) {
   const stopSyncService = useCallback(async () => {
     setSyncServiceLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/sync/stop`, { method: 'POST' });
-      const data = await res.json();
-      setSyncServiceRunning(data.isRunning);
+      const res = await stopSyncApi();
+      setSyncServiceRunning(res.data?.isRunning || false);
     } catch (error) {
       console.error('Failed to stop sync:', error);
     } finally {
@@ -82,9 +85,8 @@ function Dashboard({ isSimpleMode }) {
   const startSyncService = useCallback(async () => {
     setSyncServiceLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/sync/start`, { method: 'POST' });
-      const data = await res.json();
-      setSyncServiceRunning(data.isRunning);
+      const res = await startSyncApi();
+      setSyncServiceRunning(res.data?.isRunning || false);
     } catch (error) {
       console.error('Failed to start sync:', error);
     } finally {

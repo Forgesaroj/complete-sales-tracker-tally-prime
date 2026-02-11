@@ -1,5 +1,5 @@
 /**
- * Invoice Creation Page
+ * Invoice Creation Page (Legacy UI)
  * Create Sales invoices and post to Tally
  * Supports offline mode with daily invoice numbering
  */
@@ -7,8 +7,14 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Plus, Trash2, Send, Package, User, FileText, Wifi, WifiOff, RefreshCw, Clock } from 'lucide-react';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+import {
+  getTallyStatus,
+  getDebtors,
+  getStockItems,
+  createInvoice,
+  syncPendingInvoices as syncPendingInvoicesApi,
+  getPendingInvoices
+} from '../utils/api';
 
 export default function Invoice() {
   const { t } = useTranslation();
@@ -24,7 +30,6 @@ export default function Invoice() {
   // Tally connection status
   const [tallyStatus, setTallyStatus] = useState({ connected: false, checking: true });
   const [pendingCount, setPendingCount] = useState(0);
-  const [todayCount, setTodayCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
 
   // Invoice form state
@@ -53,9 +58,8 @@ export default function Invoice() {
 
   const checkTallyStatus = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/tally/status`);
-      const data = await res.json();
-      setTallyStatus({ connected: data.connected, checking: false });
+      const res = await getTallyStatus();
+      setTallyStatus({ connected: res.data?.connected || false, checking: false });
     } catch (error) {
       setTallyStatus({ connected: false, checking: false });
     }
@@ -63,12 +67,9 @@ export default function Invoice() {
 
   const loadPendingCount = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/pending-invoices/count`);
-      const data = await res.json();
-      if (data.success) {
-        setPendingCount(data.pendingCount);
-        setTodayCount(data.todayInvoiceCount);
-      }
+      const res = await getPendingInvoices();
+      const invoices = res.data?.invoices || [];
+      setPendingCount(invoices.length);
     } catch (error) {
       console.error('Error loading pending count:', error);
     }
@@ -82,8 +83,8 @@ export default function Invoice() {
 
     setSyncing(true);
     try {
-      const res = await fetch(`${API_BASE}/api/pending-invoices/sync`, { method: 'POST' });
-      const data = await res.json();
+      const res = await syncPendingInvoicesApi();
+      const data = res.data;
       if (data.success) {
         setMessage({
           type: 'success',
@@ -102,10 +103,9 @@ export default function Invoice() {
 
   const loadParties = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/ledgers/debtors`);
-      const data = await res.json();
-      if (data.success) {
-        setParties(data.ledgers);
+      const res = await getDebtors();
+      if (res.data?.success) {
+        setParties(res.data.ledgers);
       }
     } catch (error) {
       console.error('Error loading parties:', error);
@@ -115,10 +115,9 @@ export default function Invoice() {
   const loadStockItems = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE}/api/stock`);
-      const data = await res.json();
-      if (data.success) {
-        setStockItems(data.items);
+      const res = await getStockItems();
+      if (res.data?.success) {
+        setStockItems(res.data.items);
       }
     } catch (error) {
       console.error('Error loading stock items:', error);
@@ -213,18 +212,14 @@ export default function Invoice() {
     setMessage(null);
 
     try {
-      const res = await fetch(`${API_BASE}/api/invoice`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          partyName: invoice.partyName,
-          voucherType: invoice.voucherType,
-          narration: invoice.narration,
-          items: validItems
-        })
+      const res = await createInvoice({
+        partyName: invoice.partyName,
+        voucherType: invoice.voucherType,
+        narration: invoice.narration,
+        items: validItems
       });
 
-      const data = await res.json();
+      const data = res.data;
 
       if (data.success) {
         // Different message based on online/offline mode
@@ -253,7 +248,7 @@ export default function Invoice() {
         setMessage({ type: 'error', text: data.error || 'Failed to create invoice' });
       }
     } catch (error) {
-      setMessage({ type: 'error', text: error.message });
+      setMessage({ type: 'error', text: error.response?.data?.error || error.message });
     } finally {
       setSubmitting(false);
     }
@@ -270,13 +265,6 @@ export default function Invoice() {
 
         {/* Tally Connection Status */}
         <div className="flex items-center gap-4">
-          {/* Today's Invoice Count */}
-          {todayCount > 0 && (
-            <div className="text-sm text-gray-600">
-              Today: <strong>{todayCount}</strong> invoices
-            </div>
-          )}
-
           {/* Pending Invoices Badge */}
           {pendingCount > 0 && (
             <div className="flex items-center gap-2">
@@ -383,7 +371,7 @@ export default function Invoice() {
                   >
                     <div className="font-medium">{party.name}</div>
                     <div className="text-sm text-gray-500">
-                      Balance: Rs {party.balance?.toLocaleString() || 0}
+                      Balance: Rs {party.balance?.toLocaleString() || party.closing_balance?.toLocaleString() || 0}
                     </div>
                   </div>
                 ))}

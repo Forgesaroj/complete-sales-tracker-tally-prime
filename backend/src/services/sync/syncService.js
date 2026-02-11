@@ -114,11 +114,9 @@ class SyncService {
       db.updateSyncState({ status: 'syncing' });
 
       const lastAlterId = db.getLastAlterId();
-      console.log(`Incremental sync: fetching vouchers with ALTERID > ${lastAlterId}`);
 
-      // Fetch only new/modified vouchers
-      const allTypes = [...config.voucherTypes.sales, ...config.voucherTypes.receipt];
-      const vouchers = await tallyConnector.getVouchersIncremental(lastAlterId, allTypes);
+      // Fetch only new/modified vouchers (all types, no filter)
+      const vouchers = await tallyConnector.getVouchersIncremental(lastAlterId, null);
 
       let newVouchers = [];
       let maxAlterId = lastAlterId;
@@ -160,7 +158,9 @@ class SyncService {
         }
       }
 
-      console.log(`Incremental sync complete: ${vouchers.length} vouchers, ${newVouchers.length} new, maxAlterId=${maxAlterId}`);
+      if (vouchers.length > 0) {
+        console.log(`Incremental sync: ${vouchers.length} vouchers, ${newVouchers.length} new, maxAlterId=${maxAlterId}`);
+      }
 
       return {
         success: true,
@@ -199,9 +199,8 @@ class SyncService {
 
       console.log(`Syncing vouchers from ${fromDate} to ${toDate}`);
 
-      // Fetch all vouchers (sales + receipts) from Tally
-      const allTypes = [...config.voucherTypes.sales, ...config.voucherTypes.receipt];
-      const vouchers = await tallyConnector.getVouchers(fromDate, toDate, allTypes);
+      // Fetch all vouchers (all types) from Tally
+      const vouchers = await tallyConnector.getVouchers(fromDate, toDate, null);
 
       let newVouchers = [];
       let updatedCount = 0;
@@ -281,19 +280,34 @@ class SyncService {
       console.log('STARTING DELETED VOUCHER SYNC');
       console.log('='.repeat(60));
 
-      // Default to all configured voucher types
-      const typesToCheck = voucherTypes || [...config.voucherTypes.sales, ...config.voucherTypes.receipt];
-      console.log(`Checking voucher types: ${typesToCheck.join(', ')}`);
+      // Default to all voucher types (null = no filter)
+      const typesToCheck = voucherTypes || null;
+      console.log(`Checking voucher types: ${typesToCheck ? typesToCheck.join(', ') : 'ALL'}`);
 
       // Step 1: Get all voucher GUIDs from Tally
       console.log('Fetching voucher GUIDs from Tally...');
       const tallyVouchers = await tallyConnector.getAllVoucherGuids(typesToCheck);
       const tallyGuids = new Set(tallyVouchers.map(v => v.guid));
+      const tallyByGuid = new Map(tallyVouchers.map(v => [v.guid, v]));
       console.log(`Found ${tallyGuids.size} vouchers in Tally`);
 
       // Step 2: Get all local voucher GUIDs
       const localVouchers = db.getAllBillGuids(typesToCheck);
       console.log(`Found ${localVouchers.length} vouchers in local database`);
+
+      // Step 2.5: Detect voucher type changes (e.g., Pending Sales Bill → Sales)
+      let typeChanges = 0;
+      for (const local of localVouchers) {
+        const tallyV = tallyByGuid.get(local.guid);
+        if (tallyV && tallyV.voucherType && tallyV.voucherType !== local.voucher_type) {
+          console.log(`  ⟳ Type changed: ${local.voucher_number || local.guid} "${local.voucher_type}" → "${tallyV.voucherType}"`);
+          db.updateBillVoucherType(local.guid, tallyV.voucherType);
+          typeChanges++;
+        }
+      }
+      if (typeChanges > 0) {
+        console.log(`Updated ${typeChanges} voucher type changes`);
+      }
 
       // Step 3: Find vouchers that exist locally but not in Tally
       // Separate into truly deleted vs converted
@@ -571,12 +585,10 @@ class SyncService {
         console.log('Performing full stock items sync...');
         items = await tallyConnector.getStockItems();
       } else {
-        console.log(`Syncing stock items with ALTERID > ${lastAlterId}`);
         items = await tallyConnector.getStockItemsIncremental(lastAlterId);
       }
 
       if (!items || items.length === 0) {
-        console.log('No new stock items to sync');
         return { success: true, count: 0 };
       }
 
@@ -611,7 +623,6 @@ class SyncService {
   async syncParties() {
     try {
       const lastAlterId = db.getLastPartyAlterId();
-      console.log(`Syncing parties with ALTERID > ${lastAlterId}`);
 
       // Fetch ledgers from Tally (Sundry Debtors and Sundry Creditors)
       const debtors = await tallyConnector.getLedgers('Sundry Debtors');
@@ -644,7 +655,7 @@ class SyncService {
         db.updatePartySyncState(maxAlterId);
       }
 
-      console.log(`Party sync complete: ${count} parties synced (${debtors.length} debtors, ${creditors.length} creditors)`);
+      if (count > 0) console.log(`Party sync: ${count} parties (${debtors.length} debtors, ${creditors.length} creditors)`);
       return { success: true, count, debtors: debtors.length, creditors: creditors.length };
     } catch (error) {
       console.error('Party sync error:', error.message);
@@ -656,8 +667,6 @@ class SyncService {
    * Sync all master data (stock items + parties)
    */
   async syncMasters() {
-    console.log('Starting master data sync...');
-
     const stockResult = await this.syncStockItems();
     const partyResult = await this.syncParties();
 
@@ -798,15 +807,14 @@ class SyncService {
       let totalVouchers = 0;
       let maxAlterId = 0;
       let batchesCompleted = 0;
-      const allTypes = [...config.voucherTypes.sales, ...config.voucherTypes.receipt];
 
       // Process each batch
       for (const batch of batches) {
         try {
           console.log(`\nBatch ${batchesCompleted + 1}/${batches.length}: ${batch.from} to ${batch.to}`);
 
-          // Fetch vouchers for this date range
-          const vouchers = await tallyConnector.getVouchers(batch.from, batch.to, allTypes);
+          // Fetch vouchers for this date range (all types)
+          const vouchers = await tallyConnector.getVouchers(batch.from, batch.to, null);
           console.log(`  Fetched ${vouchers.length} vouchers`);
 
           // Save to database
@@ -1043,8 +1051,6 @@ class SyncService {
 
       // Step 2: Fetch all vouchers with complete details
       console.log('\nStep 2: Fetching vouchers from Tally...');
-      const allTypes = [...config.voucherTypes.sales, ...config.voucherTypes.receipt];
-
       // Generate monthly batches for large date ranges
       const batches = this.generateMonthlyBatches(fromDate, todayStr);
       console.log(`Processing ${batches.length} monthly batches`);
@@ -1058,8 +1064,8 @@ class SyncService {
         console.log(`\nBatch ${i + 1}/${batches.length}: ${batch.from} to ${batch.to}`);
 
         try {
-          // Fetch vouchers for this month
-          const vouchers = await tallyConnector.getVouchers(batch.from, batch.to, allTypes);
+          // Fetch vouchers for this month (all types)
+          const vouchers = await tallyConnector.getVouchers(batch.from, batch.to, null);
           console.log(`  Fetched ${vouchers.length} vouchers`);
 
           for (const voucher of vouchers) {
