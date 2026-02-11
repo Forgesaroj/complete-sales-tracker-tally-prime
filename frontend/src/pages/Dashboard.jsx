@@ -121,8 +121,10 @@ function Dashboard({ isSimpleMode }) {
       ]);
 
       setSummary(summaryRes.data);
-      setPendingBills(pendingRes.data);
-      setRecentBills(billsRes.data.slice(0, 10));
+      const pending = pendingRes.data;
+      setPendingBills(Array.isArray(pending) ? pending : (pending.bills || []));
+      const bills = billsRes.data;
+      setRecentBills(Array.isArray(bills) ? bills.slice(0, 10) : (bills.bills || []).slice(0, 10));
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
     } finally {

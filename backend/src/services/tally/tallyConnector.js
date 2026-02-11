@@ -1570,6 +1570,35 @@ ${companyVar}
    *
    * The voucher remains "Pending Sales Bill" but SFLTot > 0 indicates payment received
    */
+  async _createDashboardReceipt(partyName, voucherNumber, paymentModes, totalAmount) {
+    try {
+      console.log(`Creating Dashboard Receipt for ${partyName}, amount: ${totalAmount}`);
+      const receiptResult = await this.createReceiptWithPaymentModes({
+        partyName,
+        voucherType: 'Dashboard Receipt',
+        narration: `Payment for ${voucherNumber}`,
+        paymentModes: {
+          cashTeller1: parseFloat(paymentModes.cashTeller1) || 0,
+          cashTeller2: parseFloat(paymentModes.cashTeller2) || 0,
+          chequeReceipt: parseFloat(paymentModes.chequeReceipt) || 0,
+          qrCode: parseFloat(paymentModes.qrCode) || 0,
+          discount: parseFloat(paymentModes.discount) || 0,
+          bankDeposit: parseFloat(paymentModes.bankDeposit) || 0,
+          esewa: parseFloat(paymentModes.esewa) || 0
+        }
+      });
+      if (receiptResult.success) {
+        console.log('Dashboard Receipt created successfully');
+      } else {
+        console.error('Dashboard Receipt creation failed:', receiptResult.error);
+      }
+      return receiptResult;
+    } catch (err) {
+      console.error('Dashboard Receipt creation error:', err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
   async completePaymentOnBill(data) {
     const {
       masterId,
@@ -1672,7 +1701,9 @@ ${companyVar ? `<STATICVARIABLES>${companyVar}</STATICVARIABLES>` : ''}
 
       if (result1.success && (result1.altered > 0 || result1.created > 0)) {
         console.log('SUCCESS: Voucher altered using Import Data format');
-        return { success: true, altered: result1.altered || 1, method: 'IMPORT_DATA' };
+        // Also create Dashboard Receipt to record the payment
+        await this._createDashboardReceipt(partyName, voucherNumber, paymentModes, sflTot);
+        return { success: true, altered: result1.altered || 1, created: 1, method: 'IMPORT_DATA' };
       }
     } catch (err) {
       console.error('Import Data method failed:', err.message);
@@ -1721,7 +1752,8 @@ ${companyVar ? `<STATICVARIABLES>${companyVar}</STATICVARIABLES>` : ''}
 
         if (result2.success && (result2.altered > 0 || result2.created > 0)) {
           console.log('SUCCESS: Voucher altered using GUID');
-          return { success: true, altered: result2.altered || 1, method: 'GUID' };
+          await this._createDashboardReceipt(partyName, voucherNumber, paymentModes, sflTot);
+          return { success: true, altered: result2.altered || 1, created: 1, method: 'GUID' };
         }
       } catch (err) {
         console.error('GUID method failed:', err.message);
@@ -1762,7 +1794,8 @@ ${companyVar ? `<STATICVARIABLES>${companyVar}</STATICVARIABLES>` : ''}
 
       if (result3.success && (result3.altered > 0 || result3.created > 0)) {
         console.log('SUCCESS: Voucher altered using MASTERID attribute');
-        return { success: true, altered: result3.altered || 1, method: 'MASTERID_ATTR' };
+        await this._createDashboardReceipt(partyName, voucherNumber, paymentModes, sflTot);
+        return { success: true, altered: result3.altered || 1, created: 1, method: 'MASTERID_ATTR' };
       }
     } catch (err) {
       console.error('MASTERID attribute method failed:', err.message);
