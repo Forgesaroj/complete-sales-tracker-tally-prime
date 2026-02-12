@@ -22,6 +22,9 @@ import { syncService } from './services/sync/syncService.js';
 import { fonepayService } from './services/payment/fonepayService.js';
 import { rbbService } from './services/payment/rbbService.js';
 import apiRoutes from './routes/index.js';
+import { tallyConnector } from './services/tally/tallyConnector.js';
+import { createMcpServer } from './services/mcp/mcpServer.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -84,6 +87,31 @@ io.on('connection', (socket) => {
   });
 });
 
+// MCP Server (Model Context Protocol) — Streamable HTTP transport
+const mcpServer = createMcpServer(tallyConnector, db);
+
+app.post('/mcp', async (req, res) => {
+  try {
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => transport.close());
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('[MCP] Error handling request:', error.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'MCP request failed' });
+    }
+  }
+});
+
+app.get('/mcp', (req, res) => {
+  res.status(405).json({ error: 'Method not allowed. Use POST for MCP requests.' });
+});
+
+app.delete('/mcp', (req, res) => {
+  res.status(405).json({ error: 'Method not allowed.' });
+});
+
 // Direct TDL file download
 app.get('/voucher-lock.tdl', (req, res) => {
   res.download(join(__dirname, '../tdl/voucher-lock.tdl'), 'voucher-lock.tdl');
@@ -122,6 +150,7 @@ async function start() {
   httpServer.listen(config.server.port, config.server.host, () => {
     console.log(`✓ Server running at http://${config.server.host}:${config.server.port}`);
     console.log(`✓ API available at http://${config.server.host}:${config.server.port}/api`);
+    console.log(`✓ MCP endpoint at http://${config.server.host}:${config.server.port}/mcp`);
 
     // Get local IP for LAN access
     const interfaces = os.networkInterfaces();
