@@ -214,4 +214,12 @@ export const syncAllChequePosts = (data) => api.post('/cheques/cheque-post/sync-
 export const getPostedMasterIds = (date) => api.get('/cheques/cheque-post/posted', { params: { date } });
 export const getChequePostLog = (params) => api.get('/cheques/cheque-post/log', { params });
 
+// Voucher Lock
+export const getVoucherLockStatus = () => api.get('/voucher-lock/status', { timeout: 30000 });
+export const lockVouchers = (data) => api.post('/voucher-lock/lock', data, { timeout: 600000 });
+export const unlockVouchers = (data) => api.post('/voucher-lock/unlock', data, { timeout: 600000 });
+export const setVoucherLockSchedule = (data) => api.put('/voucher-lock/schedule', data);
+export const getVoucherLockLog = () => api.get('/voucher-lock/log');
+export const toggleVoucherLock = (data) => api.post('/voucher-lock/toggle', data, { timeout: 30000 });
+
 export default api;

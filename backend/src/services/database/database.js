@@ -513,7 +513,10 @@ class DatabaseService {
         ('smtp_user', '', 'SMTP username/email'),
         ('smtp_pass', '', 'SMTP password'),
         ('smtp_from_name', '', 'Email from name'),
-        ('smtp_from_email', '', 'Email from address')
+        ('smtp_from_email', '', 'Email from address'),
+        ('voucher_lock_auto_enabled', 'false', 'Auto-lock vouchers at EOD'),
+        ('voucher_lock_auto_time', '18:00', 'Time to auto-lock vouchers'),
+        ('voucher_lock_last_action', '[]', 'Log of lock/unlock actions')
     `);
 
     // Update existing setting if it was the old default

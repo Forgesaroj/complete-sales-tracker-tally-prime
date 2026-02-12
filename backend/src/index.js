@@ -48,6 +48,9 @@ app.use(express.json());
 // Serve static files (for production build)
 app.use(express.static(join(__dirname, '../../frontend/dist')));
 
+// Serve TDL files for download
+app.use('/tdl', express.static(join(__dirname, '../tdl')));
+
 // API Routes
 app.use('/api', apiRoutes);
 
@@ -79,6 +82,11 @@ io.on('connection', (socket) => {
     const result = await syncService.syncNow();
     socket.emit('sync:complete', result);
   });
+});
+
+// Direct TDL file download
+app.get('/voucher-lock.tdl', (req, res) => {
+  res.download(join(__dirname, '../tdl/voucher-lock.tdl'), 'voucher-lock.tdl');
 });
 
 // Catch-all for SPA routing (production only - dev uses proxy)

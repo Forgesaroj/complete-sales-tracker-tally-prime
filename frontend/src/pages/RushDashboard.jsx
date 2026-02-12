@@ -94,7 +94,12 @@ import {
   getPostedMasterIds,
   getChequePostLog,
   getChequeSummary,
-  getCheques
+  getCheques,
+  getVoucherLockStatus,
+  lockVouchers,
+  unlockVouchers,
+  setVoucherLockSchedule,
+  toggleVoucherLock
 } from '../utils/api';
 
 
@@ -281,6 +286,12 @@ export default function RushDashboard() {
     smtp_from_name: '',
     smtp_from_email: ''
   });
+  const [voucherLock, setVoucherLock] = useState(null);
+  const [voucherLockLoading, setVoucherLockLoading] = useState(false);
+  const [voucherLockDate, setVoucherLockDate] = useState(new Date().toISOString().split('T')[0]);
+  const [unlockFromDate, setUnlockFromDate] = useState('');
+  const [unlockToDate, setUnlockToDate] = useState('');
+  const [lockCompany, setLockCompany] = useState('For DB');
   const [pendingInvoices, setPendingInvoices] = useState([]);
   const [pendingInvoicesLoading, setPendingInvoicesLoading] = useState(false);
   const [syncingPendingInvoices, setSyncingPendingInvoices] = useState(false);
@@ -964,6 +975,20 @@ export default function RushDashboard() {
     } catch (error) {
       console.error('Failed to fetch app settings:', error);
     }
+  }, []);
+
+  // Fetch voucher lock status
+  const fetchVoucherLockStatus = useCallback(async () => {
+    setVoucherLockLoading(true);
+    try {
+      const res = await getVoucherLockStatus();
+      setVoucherLock(res.data);
+      // Set company selector to match the configured company
+      if (res.data.defaultCompany) setLockCompany(res.data.defaultCompany);
+    } catch (error) {
+      console.error('Failed to fetch voucher lock status:', error);
+    }
+    setVoucherLockLoading(false);
   }, []);
 
   // Save app settings
@@ -1736,6 +1761,7 @@ export default function RushDashboard() {
     if (page === 'columnar') fetchColumnar();
     if (page === 'cheques') { fetchChequeRecon(); fetchChequeManagement(); }
     if (page === 'cheque-post') fetchChequePost();
+    if (page === 'settings') fetchVoucherLockStatus();
   };
 
   // Open payment modal
@@ -3641,6 +3667,58 @@ export default function RushDashboard() {
                   <button className="btn btn-p" onClick={fetchAllVouchers} disabled={vouchersLoading} style={{ padding: '6px 12px', fontSize: '12px' }}>
                     {vouchersLoading ? '⟳ Loading...' : '🔄 Refresh'}
                   </button>
+                  <div style={{ width: '1px', height: '24px', background: 'var(--border)' }} />
+                  <select
+                    value={lockCompany}
+                    onChange={(e) => setLockCompany(e.target.value)}
+                    style={{ padding: '6px 8px', fontSize: '11px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--t1)' }}
+                  >
+                    <option value={voucherLock?.defaultCompany || 'FOR DB'}>{voucherLock?.defaultCompany || 'FOR DB'}</option>
+                    <option value="ODBC CHq Mgmt">ODBC CHq Mgmt</option>
+                    <option value="both">Both Companies</option>
+                  </select>
+                  <button
+                    onClick={async () => {
+                      const lockTo = voucherDateTo || voucherDateFrom || new Date().toISOString().split('T')[0];
+                      if (!confirm(`Lock all vouchers up to ${lockTo} in "${lockCompany}"?`)) return;
+                      setVoucherLockLoading(true);
+                      try {
+                        const res = await lockVouchers({ date: lockTo, company: lockCompany });
+                        if (res.data.success) {
+                          addToast('success', 'Locked', `${res.data.totalLocked} vouchers locked in "${lockCompany}"`);
+                        } else {
+                          addToast('error', 'Lock Failed', res.data.errors?.join(', ') || res.data.message || `0 vouchers locked`);
+                        }
+                      } catch (e) { addToast('error', 'Lock Failed', e.response?.data?.error || e.message); }
+                      setVoucherLockLoading(false);
+                    }}
+                    disabled={voucherLockLoading}
+                    style={{ padding: '6px 12px', fontSize: '12px', background: voucherLockLoading ? 'var(--bg4)' : 'var(--red)', color: 'white', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: voucherLockLoading ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}
+                  >
+                    {voucherLockLoading ? '⟳ ...' : '🔒 Lock'}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const from = voucherDateFrom;
+                      const to = voucherDateTo;
+                      if (!from || !to) { addToast('error', 'Error', 'Set From/To dates first'); return; }
+                      if (!confirm(`Unlock vouchers from ${from} to ${to} in "${lockCompany}"?`)) return;
+                      setVoucherLockLoading(true);
+                      try {
+                        const res = await unlockVouchers({ fromDate: from, toDate: to, company: lockCompany });
+                        if (res.data.success) {
+                          addToast('success', 'Unlocked', `${res.data.totalUnlocked} vouchers unlocked in "${lockCompany}"`);
+                        } else {
+                          addToast('error', 'Unlock Failed', res.data.errors?.join(', ') || res.data.message || `0 vouchers unlocked`);
+                        }
+                      } catch (e) { addToast('error', 'Unlock Failed', e.response?.data?.error || e.message); }
+                      setVoucherLockLoading(false);
+                    }}
+                    disabled={voucherLockLoading}
+                    style={{ padding: '6px 12px', fontSize: '12px', background: voucherLockLoading ? 'var(--bg4)' : 'var(--green)', color: 'white', border: 'none', borderRadius: '6px', fontWeight: '600', cursor: voucherLockLoading ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}
+                  >
+                    {voucherLockLoading ? '⟳ ...' : '🔓 Unlock'}
+                  </button>
                 </div>
               </div>
 
@@ -3815,6 +3893,7 @@ export default function RushDashboard() {
                       <th>Nepali Date</th>
                       <th>Age</th>
                       <th>Audit</th>
+                      <th style={{ width: '50px', textAlign: 'center' }}>Lock</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3943,10 +4022,34 @@ export default function RushDashboard() {
                             <option value="non_audited">Non Audited</option>
                           </select>
                         </td>
+                        <td onClick={(e) => e.stopPropagation()} style={{ padding: '4px', textAlign: 'center' }}>
+                          <button
+                            onClick={async () => {
+                              const isLocked = voucher._locked;
+                              try {
+                                const res = await toggleVoucherLock({ billId: voucher.id, lockValue: isLocked ? 'No' : 'Yes', company: lockCompany });
+                                if (res.data.success) {
+                                  setAllVouchers(prev => prev.map(v => v.id === voucher.id ? { ...v, _locked: !isLocked } : v));
+                                  addToast('success', isLocked ? 'Unlocked' : 'Locked', `Voucher ${voucher.voucher_number || voucher.id} ${isLocked ? 'unlocked' : 'locked'}`);
+                                } else {
+                                  addToast('error', 'Failed', res.data.error || 'Could not toggle lock');
+                                }
+                              } catch (e) { addToast('error', 'Error', e.message); }
+                            }}
+                            title={voucher._locked ? 'Click to unlock' : 'Click to lock'}
+                            style={{
+                              padding: '3px 8px', fontSize: '14px', border: 'none', borderRadius: '4px', cursor: 'pointer',
+                              background: voucher._locked ? 'var(--red-g)' : 'var(--bg)',
+                              color: voucher._locked ? 'var(--red)' : 'var(--t3)',
+                            }}
+                          >
+                            {voucher._locked ? '🔒' : '🔓'}
+                          </button>
+                        </td>
                       </tr>
                       {isExpanded && (
                         <tr className="change-log-row">
-                          <td colSpan="12" style={{ padding: 0, border: 'none' }}>
+                          <td colSpan="13" style={{ padding: 0, border: 'none' }}>
                             <div style={{ background: 'var(--bg)', borderLeft: '3px solid var(--blue)', padding: '12px 16px', margin: '0 8px 8px 8px', borderRadius: '0 8px 8px 0' }}>
                               <div style={{ fontSize: '12px', fontWeight: '700', color: 'var(--blue)', marginBottom: '8px' }}>
                                 Alteration History — Master ID: {mid}
@@ -7537,6 +7640,216 @@ export default function RushDashboard() {
                         </div>
                       )}
                     </div>
+                  </div>
+                </div>
+
+                <div className="s-card">
+                  <div className="s-card-h">🔒 Voucher Lock (EOD)</div>
+                  <div className="s-card-b">
+                    {voucherLockLoading ? (
+                      <div style={{ textAlign: 'center', padding: '20px', color: 'var(--t3)' }}>Loading lock status...</div>
+                    ) : voucherLock ? (
+                      <>
+                        <div className="s-row">
+                          <div>
+                            <div className="s-name">For DB</div>
+                            <div className="s-desc">{voucherLock.forDB?.locked || 0} / {voucherLock.forDB?.totalVouchers || 0} vouchers locked</div>
+                          </div>
+                          <span style={{
+                            padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '700',
+                            background: voucherLock.forDB?.locked > 0 ? 'var(--green-g, rgba(76,175,80,0.15))' : 'var(--bg3)',
+                            color: voucherLock.forDB?.locked > 0 ? 'var(--green)' : 'var(--t3)'
+                          }}>
+                            {voucherLock.forDB?.locked > 0 ? '🔒 Locked' : '🔓 Open'}
+                          </span>
+                        </div>
+                        <div className="s-row">
+                          <div>
+                            <div className="s-name">ODBC CHq Mgmt</div>
+                            <div className="s-desc">{voucherLock.odbc?.locked || 0} / {voucherLock.odbc?.totalVouchers || 0} vouchers locked</div>
+                          </div>
+                          <span style={{
+                            padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '700',
+                            background: voucherLock.odbc?.locked > 0 ? 'var(--green-g, rgba(76,175,80,0.15))' : 'var(--bg3)',
+                            color: voucherLock.odbc?.locked > 0 ? 'var(--green)' : 'var(--t3)'
+                          }}>
+                            {voucherLock.odbc?.locked > 0 ? '🔒 Locked' : '🔓 Open'}
+                          </span>
+                        </div>
+
+                        <div style={{ borderTop: '1px solid var(--border)', margin: '12px 0', paddingTop: '12px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--t2)' }}>Company:</div>
+                            <select
+                              value={lockCompany}
+                              onChange={(e) => setLockCompany(e.target.value)}
+                              style={{ padding: '6px 10px', fontSize: '12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--t1)' }}
+                            >
+                              <option value={voucherLock?.defaultCompany || 'FOR DB'}>{voucherLock?.defaultCompany || 'FOR DB'}</option>
+                              <option value="ODBC CHq Mgmt">ODBC CHq Mgmt</option>
+                              <option value="both">Both Companies</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div style={{ borderTop: '1px solid var(--border)', margin: '12px 0', paddingTop: '12px' }}>
+                          <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--t2)', marginBottom: '8px' }}>Lock Vouchers</div>
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--t3)', whiteSpace: 'nowrap' }}>Up to:</span>
+                            <input
+                              type="date"
+                              value={voucherLockDate}
+                              onChange={(e) => setVoucherLockDate(e.target.value)}
+                              style={{ flex: 1, padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                            />
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Lock all vouchers up to ${voucherLockDate} in "${lockCompany}"? This will prevent editing/deleting in Tally.`)) return;
+                                setVoucherLockLoading(true);
+                                try {
+                                  const res = await lockVouchers({ date: voucherLockDate, company: lockCompany });
+                                  if (res.data.success) {
+                                    addToast('success', 'Vouchers Locked', `Locked ${res.data.totalLocked} vouchers in "${lockCompany}"`);
+                                  } else {
+                                    addToast('error', 'Lock Failed', res.data.errors?.join(', ') || res.data.message || '0 vouchers locked');
+                                  }
+                                  fetchVoucherLockStatus();
+                                } catch (e) {
+                                  addToast('error', 'Lock Failed', e.response?.data?.error || e.message);
+                                  setVoucherLockLoading(false);
+                                }
+                              }}
+                              disabled={voucherLockLoading}
+                              style={{
+                                padding: '8px 16px', background: voucherLockLoading ? 'var(--bg4)' : 'var(--red)',
+                                color: 'white', border: 'none', borderRadius: '8px', fontWeight: '600', cursor: voucherLockLoading ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap', fontSize: '13px'
+                              }}
+                            >
+                              🔒 Lock
+                            </button>
+                          </div>
+                        </div>
+
+                        <div style={{ borderTop: '1px solid var(--border)', margin: '12px 0', paddingTop: '12px' }}>
+                          <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--t2)', marginBottom: '8px' }}>Unlock Vouchers</div>
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <input
+                              type="date"
+                              value={unlockFromDate}
+                              onChange={(e) => setUnlockFromDate(e.target.value)}
+                              placeholder="From"
+                              style={{ flex: 1, minWidth: '120px', padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                            />
+                            <span style={{ fontSize: '12px', color: 'var(--t3)' }}>to</span>
+                            <input
+                              type="date"
+                              value={unlockToDate}
+                              onChange={(e) => setUnlockToDate(e.target.value)}
+                              placeholder="To"
+                              style={{ flex: 1, minWidth: '120px', padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                            />
+                            <button
+                              onClick={async () => {
+                                if (!unlockFromDate || !unlockToDate) { addToast('error', 'Error', 'Select both from and to dates'); return; }
+                                if (!confirm(`Unlock vouchers from ${unlockFromDate} to ${unlockToDate} in "${lockCompany}"?`)) return;
+                                setVoucherLockLoading(true);
+                                try {
+                                  const res = await unlockVouchers({ fromDate: unlockFromDate, toDate: unlockToDate, company: lockCompany });
+                                  if (res.data.success) {
+                                    addToast('success', 'Vouchers Unlocked', `Unlocked ${res.data.totalUnlocked} vouchers in "${lockCompany}"`);
+                                  } else {
+                                    addToast('error', 'Unlock Failed', res.data.errors?.join(', ') || res.data.message || '0 vouchers unlocked');
+                                  }
+                                  fetchVoucherLockStatus();
+                                } catch (e) {
+                                  addToast('error', 'Unlock Failed', e.response?.data?.error || e.message);
+                                  setVoucherLockLoading(false);
+                                }
+                              }}
+                              disabled={voucherLockLoading || !unlockFromDate || !unlockToDate}
+                              style={{
+                                padding: '8px 16px', background: (voucherLockLoading || !unlockFromDate || !unlockToDate) ? 'var(--bg4)' : 'var(--green)',
+                                color: 'white', border: 'none', borderRadius: '8px', fontWeight: '600', cursor: (voucherLockLoading || !unlockFromDate || !unlockToDate) ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap', fontSize: '13px'
+                              }}
+                            >
+                              🔓 Unlock
+                            </button>
+                          </div>
+                        </div>
+
+                        <div style={{ borderTop: '1px solid var(--border)', margin: '12px 0', paddingTop: '12px' }}>
+                          <div className="s-row">
+                            <div>
+                              <div className="s-name">Auto-Lock (EOD)</div>
+                              <div className="s-desc">Automatically lock vouchers daily</div>
+                            </div>
+                            <label style={{ position: 'relative', width: '44px', height: '24px', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={voucherLock.autoEnabled}
+                                onChange={async (e) => {
+                                  try {
+                                    await setVoucherLockSchedule({ enabled: e.target.checked, time: voucherLock.autoTime || '18:00' });
+                                    fetchVoucherLockStatus();
+                                    addToast('success', 'Auto-Lock', e.target.checked ? 'Enabled' : 'Disabled');
+                                  } catch (err) {
+                                    addToast('error', 'Error', err.message);
+                                  }
+                                }}
+                                style={{ opacity: 0, width: 0, height: 0 }}
+                              />
+                              <span style={{
+                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+                                background: voucherLock.autoEnabled ? 'var(--blue)' : 'var(--bg4)',
+                                borderRadius: '12px', transition: '0.3s'
+                              }}>
+                                <span style={{
+                                  position: 'absolute', top: '2px', left: voucherLock.autoEnabled ? '22px' : '2px',
+                                  width: '20px', height: '20px', background: 'white', borderRadius: '50%', transition: '0.3s'
+                                }} />
+                              </span>
+                            </label>
+                          </div>
+                          {voucherLock.autoEnabled && (
+                            <div className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '6px' }}>
+                              <div className="s-name">Lock Time</div>
+                              <input
+                                type="time"
+                                value={voucherLock.autoTime || '18:00'}
+                                onChange={async (e) => {
+                                  try {
+                                    await setVoucherLockSchedule({ enabled: true, time: e.target.value });
+                                    fetchVoucherLockStatus();
+                                  } catch (err) {
+                                    addToast('error', 'Error', err.message);
+                                  }
+                                }}
+                                style={{ padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {voucherLock.lastAction && (
+                          <div style={{ borderTop: '1px solid var(--border)', margin: '12px 0', paddingTop: '12px' }}>
+                            <div style={{ fontSize: '11px', color: 'var(--t3)' }}>
+                              Last: {voucherLock.lastAction.action === 'lock' ? '🔒 Locked' : voucherLock.lastAction.action === 'unlock' ? '🔓 Unlocked' : '⏰ Auto-locked'}{' '}
+                              {voucherLock.lastAction.totalLocked || voucherLock.lastAction.totalUnlocked || 0} vouchers{' '}
+                              on {new Date(voucherLock.lastAction.timestamp).toLocaleString()}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{ textAlign: 'center', padding: '20px' }}>
+                        <button
+                          onClick={fetchVoucherLockStatus}
+                          style={{ padding: '10px 20px', background: 'var(--blue)', color: 'white', border: 'none', borderRadius: '8px', fontWeight: '600', cursor: 'pointer' }}
+                        >
+                          Load Lock Status
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 

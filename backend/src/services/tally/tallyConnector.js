@@ -38,7 +38,7 @@ class TallyConnector {
   /**
    * Send XML request to Tally and get response
    */
-  async sendRequest(xmlData) {
+  async sendRequest(xmlData, timeoutMs = 60000) {
     // Throttle requests to prevent overwhelming Tally
     await this.throttle();
 
@@ -47,7 +47,7 @@ class TallyConnector {
         headers: {
           'Content-Type': 'text/xml;charset=UTF-8'
         },
-        timeout: 60000 // Increased timeout to 60 seconds
+        timeout: timeoutMs
       });
 
       return await parseStringPromise(response.data, {
@@ -2286,6 +2286,154 @@ ${companyVar}
       console.error('Error fetching cheque recon balances:', error.message);
       return null;
     }
+  }
+
+  // =============================================
+  // VOUCHER LOCK METHODS
+  // =============================================
+
+  /**
+   * Fetch voucher IDs from Tally (lightweight — only MASTERID + VOUCHERTYPENAME)
+   * Used as fallback when local DB has no data
+   */
+  async fetchVoucherIds(toDate, fromDate, companyName) {
+    const company = companyName || this.companyName || 'FOR DB';
+    const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(company)}</SVCURRENTCOMPANY>`;
+    const svTo = toDate.replace(/-/g, '');
+    const svFrom = fromDate ? fromDate.replace(/-/g, '') : '20200401';
+
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchIdsForLock</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES>
+${companyVar}
+<SVFROMDATE>${svFrom}</SVFROMDATE>
+<SVTODATE>${svTo}</SVTODATE>
+</STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="VchIdsForLock" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>MASTERID,VOUCHERTYPENAME,GUID</FETCH>
+</COLLECTION>
+</TDLMESSAGE></TDL>
+</DESC>
+<DATA><COLLECTION>VchIdsForLock</COLLECTION></DATA>
+</BODY>
+</ENVELOPE>`;
+
+    console.log(`[VoucherLock] Fetching voucher IDs from Tally (${svFrom} to ${svTo}) in "${company}"...`);
+    const result = await this.sendRequest(xml, 120000);
+
+    const collection = result?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+    if (!collection?.VOUCHER) return [];
+
+    const vouchers = Array.isArray(collection.VOUCHER) ? collection.VOUCHER : [collection.VOUCHER];
+    const mapped = vouchers.map(v => {
+      // MASTERID comes as object { _: " 69551", $: {TYPE: "Number"} } — extract and trim
+      const masterId = (typeof v.MASTERID === 'object' ? v.MASTERID?._ : v.MASTERID);
+      const guid = (typeof v.GUID === 'object' ? v.GUID?._ : v.GUID) || v.$?.REMOTEID;
+      return {
+        tally_master_id: String(masterId || '').trim(),
+        tally_guid: guid,
+        voucher_type: (typeof v.VOUCHERTYPENAME === 'object' ? v.VOUCHERTYPENAME?._ : v.VOUCHERTYPENAME)
+      };
+    }).filter(v => v.tally_master_id && v.voucher_type);
+
+    console.log(`[VoucherLock] Fetched ${mapped.length} voucher IDs. Sample: masterId=${mapped[0]?.tally_master_id}, guid=${mapped[0]?.tally_guid}, type=${mapped[0]?.voucher_type}`);
+    return mapped;
+  }
+
+  /**
+   * Lock/unlock vouchers by setting LockVoucher UDF
+   * Uses voucher list from local DB or Tally fetch
+   * @param {Array} vouchers - [{tally_master_id, tally_guid?, voucher_type}]
+   * @param {string} lockValue - 'Yes' or 'No'
+   * @param {string} companyName
+   */
+  async setVoucherLockUDF(vouchers, lockValue = 'Yes', companyName) {
+    const company = companyName || this.companyName || 'FOR DB';
+    const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(company)}</SVCURRENTCOMPANY>`;
+    const BATCH_SIZE = 200;
+
+    const voucherXmlParts = vouchers
+      .filter(v => v.tally_master_id && v.voucher_type)
+      .map(v => {
+        const remoteId = v.tally_guid || v.tally_master_id;
+        return `<VOUCHER REMOTEID="${remoteId}" VCHTYPE="${this.escapeXml(v.voucher_type)}" ACTION="Alter">
+<MASTERID>${String(v.tally_master_id).trim()}</MASTERID>
+<UDF:LOCKVOUCHER.LIST><UDF:LOCKVOUCHER>${lockValue}</UDF:LOCKVOUCHER></UDF:LOCKVOUCHER.LIST>
+</VOUCHER>`;
+      });
+
+    if (voucherXmlParts.length === 0) {
+      console.log(`[VoucherLock] No vouchers to ${lockValue === 'Yes' ? 'lock' : 'unlock'}`);
+      return { count: 0, total: 0, errors: [] };
+    }
+
+    const action = lockValue === 'Yes' ? 'lock' : 'unlock';
+    const totalBatches = Math.ceil(voucherXmlParts.length / BATCH_SIZE);
+    console.log(`[VoucherLock] ${action} ${voucherXmlParts.length} vouchers in ${totalBatches} batches of ${BATCH_SIZE} in "${company}"...`);
+
+    let totalAltered = 0;
+    const errors = [];
+
+    for (let i = 0; i < voucherXmlParts.length; i += BATCH_SIZE) {
+      const batch = voucherXmlParts.slice(i, i + BATCH_SIZE);
+      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+
+      const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST><TYPE>Data</TYPE><ID>Vouchers</ID></HEADER>
+<BODY>
+<DESC><STATICVARIABLES>${companyVar}</STATICVARIABLES></DESC>
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+${batch.join('\n')}
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>`;
+
+      try {
+        const result = await this.sendRequest(xml, 120000);
+        const altered = parseInt(result?.ENVELOPE?.BODY?.DATA?.IMPORTRESULT?.ALTERED || '0');
+        const errCount = parseInt(result?.ENVELOPE?.BODY?.DATA?.IMPORTRESULT?.ERRORS || '0');
+        totalAltered += altered;
+        if (errCount > 0) errors.push(`Batch ${batchNum}: ${errCount} errors`);
+        console.log(`[VoucherLock] Batch ${batchNum}/${totalBatches}: altered=${altered}, errors=${errCount}`);
+      } catch (err) {
+        errors.push(`Batch ${batchNum}: ${err.message}`);
+        console.error(`[VoucherLock] Batch ${batchNum} failed: ${err.message}`);
+      }
+    }
+
+    console.log(`[VoucherLock] Done: ${totalAltered}/${voucherXmlParts.length} ${action}ed in "${company}"`);
+    return { count: totalAltered, total: voucherXmlParts.length, errors };
+  }
+
+
+  /**
+   * Lock/unlock a single voucher — direct lightweight XML, no batching
+   */
+  async toggleSingleVoucherLock(guid, masterId, voucherType, lockValue = 'Yes', companyName) {
+    const company = companyName || this.companyName || 'FOR DB';
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Import</TALLYREQUEST><TYPE>Data</TYPE><ID>Vouchers</ID></HEADER>
+<BODY>
+<DESC><STATICVARIABLES><SVCURRENTCOMPANY>${this.escapeXml(company)}</SVCURRENTCOMPANY></STATICVARIABLES></DESC>
+<DATA>
+<TALLYMESSAGE xmlns:UDF="TallyUDF">
+<VOUCHER REMOTEID="${guid}" VCHTYPE="${this.escapeXml(voucherType)}" ACTION="Alter">
+<MASTERID>${String(masterId).trim()}</MASTERID>
+<UDF:LOCKVOUCHER.LIST><UDF:LOCKVOUCHER>${lockValue}</UDF:LOCKVOUCHER></UDF:LOCKVOUCHER.LIST>
+</VOUCHER>
+</TALLYMESSAGE>
+</DATA>
+</BODY>
+</ENVELOPE>`;
+    const result = await this.sendRequest(xml, 15000);
+    const altered = parseInt(result?.ENVELOPE?.BODY?.DATA?.IMPORTRESULT?.ALTERED || '0');
+    return { success: altered > 0, altered };
   }
 
   /**

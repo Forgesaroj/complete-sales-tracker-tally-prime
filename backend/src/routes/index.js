@@ -50,6 +50,7 @@ import cashFlowRoutes from './cash-flow.js';
 import ratioAnalysisRoutes from './ratio-analysis.js';
 import tallyXmlRoutes from './tally-xml.js';
 import columnarRoutes from './columnar.js';
+import voucherLockRoutes from './voucher-lock.js';
 
 const router = Router();
 
@@ -86,6 +87,7 @@ router.use('/cash-flow', cashFlowRoutes);
 router.use('/ratios', ratioAnalysisRoutes);
 router.use('/tally-xml', tallyXmlRoutes);
 router.use('/columnar', columnarRoutes);
+router.use('/voucher-lock', voucherLockRoutes);
 
 // Frontend error logging endpoint
 import fs from 'fs';
