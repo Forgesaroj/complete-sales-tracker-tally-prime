@@ -55,6 +55,7 @@ import {
   getAgeingSummary,
   getOutstandingParties,
   getCustomerOutstanding,
+  getReceivableSummary,
   syncOutstanding,
   getProfitAndLoss,
   getStockGroupList,
@@ -99,8 +100,35 @@ import {
   lockVouchers,
   unlockVouchers,
   setVoucherLockSchedule,
-  toggleVoucherLock
+  toggleVoucherLock,
+  getCompanies,
+  getODBCCheques,
+  syncODBCVouchers,
+  getCollectionStaff,
+  createCollectionStaff,
+  updateCollectionStaff,
+  deleteCollectionStaff,
+  getCollectionBatches,
+  createCollectionBatch,
+  getCollectionBatch,
+  getBatchPrintData,
+  updateBatchItem,
+  bulkUpdateBatchItems,
+  createCollectionReceipt,
+  getAssignableCheques,
+  getCollectionStats,
+  getChequeReceivableLocal,
+  getODBCVoucherDetail,
+  getBankNames,
+  createBankName,
+  updateBankName,
+  deleteBankName,
+  getLedgerMappings,
+  upsertLedgerMapping,
+  updateLedgerMappingApi,
+  deleteLedgerMapping
 } from '../utils/api';
+import ChatPanel from '../components/ChatPanel';
 
 
 // Page titles with icons
@@ -131,6 +159,9 @@ const PAGE_TITLES = {
   'columnar': '📋 Columnar Dashboard',
   'cheques': '📝 Cheque Management',
   'cheque-post': '📝 Cheque Post',
+  'cheque-vouchers': '📋 Cheque Voucher List',
+  collection: '📦 Cheque Collection',
+  'bank-names': '🏦 Bank Names',
   settings: '⚙️ Settings'
 };
 
@@ -246,6 +277,7 @@ export default function RushDashboard() {
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifPanelOpen, setNotifPanelOpen] = useState(false);
+  const [chatPanelOpen, setChatPanelOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
@@ -306,6 +338,7 @@ export default function RushDashboard() {
 
   // Connection status
   const [tallyConnected, setTallyConnected] = useState(false);
+  const [tallyCompanies, setTallyCompanies] = useState([]);
   const [syncRunning, setSyncRunning] = useState(false);
   const [syncLoading, setSyncLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -369,6 +402,28 @@ export default function RushDashboard() {
   const [outstandingLoading, setOutstandingLoading] = useState(false);
   const [outstandingSyncing, setOutstandingSyncing] = useState(false);
   const [outstandingSearch, setOutstandingSearch] = useState('');
+  const [receivableSummary, setReceivableSummary] = useState(null);
+  const [outstandingOverdue, setOutstandingOverdue] = useState(false);
+
+  // Bank Names state
+  const [bankNamesList, setBankNamesList] = useState([]);
+  const [bankNamesLoading, setBankNamesLoading] = useState(false);
+  const [bnEditId, setBnEditId] = useState(null);
+  const [bnEditShort, setBnEditShort] = useState('');
+  const [bnEditFull, setBnEditFull] = useState('');
+  const [bnNewShort, setBnNewShort] = useState('');
+  const [bnNewFull, setBnNewFull] = useState('');
+  // Ledger Mapping state
+  const [ledgerMappings, setLedgerMappings] = useState([]);
+  const [lmEditId, setLmEditId] = useState(null);
+  const [lmEditBilling, setLmEditBilling] = useState('');
+  const [lmEditOdbc, setLmEditOdbc] = useState('');
+  const [lmNewBilling, setLmNewBilling] = useState('');
+  const [lmNewOdbc, setLmNewOdbc] = useState('');
+  const [lmSearch, setLmSearch] = useState('');
+  const [lmBillingParties, setLmBillingParties] = useState([]);
+  const [lmOdbcParties, setLmOdbcParties] = useState([]);
+  const [lmDropdown, setLmDropdown] = useState(null); // 'new-billing', 'new-odbc', 'edit-billing', 'edit-odbc'
 
   // Profit & Loss state
   const [profitLoss, setProfitLoss] = useState(null);
@@ -483,6 +538,39 @@ export default function RushDashboard() {
   const [chequeStatusFilter, setChequeStatusFilter] = useState('');
   const [chequeExpandedParty, setChequeExpandedParty] = useState(null);
 
+  // Cheque Voucher List state (all vouchers from cheque company)
+  const [chqVouchers, setChqVouchers] = useState([]);
+  const [chqVouchersLoading, setChqVouchersLoading] = useState(false);
+  const [chqSyncing, setChqSyncing] = useState(false);
+  const [chqStats, setChqStats] = useState(null);
+  const [chqSearch, setChqSearch] = useState('');
+  const [chqTypeFilter, setChqTypeFilter] = useState('');
+  const [chqSortField, setChqSortField] = useState('voucherDate');
+  const [chqSortDir, setChqSortDir] = useState('desc');
+
+  // Cheque Collection state
+  const [collTab, setCollTab] = useState('assign');
+  const [collStaff, setCollStaff] = useState([]);
+  const [collBatches, setCollBatches] = useState([]);
+  const [collAssignable, setCollAssignable] = useState([]);
+  const [collSelected, setCollSelected] = useState(new Set());
+  const [collSelectedStaff, setCollSelectedStaff] = useState('');
+  const [collActiveBatch, setCollActiveBatch] = useState(null);
+  const [collActiveBatchItems, setCollActiveBatchItems] = useState([]);
+  const [collStats, setCollStats] = useState(null);
+  const [collLoading, setCollLoading] = useState(false);
+  const [collSyncing, setCollSyncing] = useState(false);
+  const [collSearch, setCollSearch] = useState('');
+  const [collShowStaffForm, setCollShowStaffForm] = useState(false);
+  const [collNewStaff, setCollNewStaff] = useState({ name: '', phone: '', tallyLedgerName: '' });
+  const [collPrintData, setCollPrintData] = useState(null);
+  const [collItemStatuses, setCollItemStatuses] = useState({});
+  const [collReceivable, setCollReceivable] = useState([]);
+  const [collRecvLoading, setCollRecvLoading] = useState(false);
+  const [collRecvSearch, setCollRecvSearch] = useState('');
+  const [collRecvSyncing, setCollRecvSyncing] = useState(false);
+  const [collRecvFilter, setCollRecvFilter] = useState('pending');
+
   // Cheque Post state
   const [cpReceipts, setCpReceipts] = useState([]);
   const [cpOdbcParties, setCpOdbcParties] = useState([]);
@@ -494,20 +582,8 @@ export default function RushDashboard() {
   });
   const [cpPartyFilter, setCpPartyFilter] = useState({});
   const [cpPartyDropdown, setCpPartyDropdown] = useState(null);
-  const [cpBankDropdown, setCpBankDropdown] = useState(null);
   const [cpExpanded, setCpExpanded] = useState({});  // { [masterId]: true/false }
   const [cpBsDate, setCpBsDate] = useState({});  // { 'masterId-lineIdx': 'dd-mm' or 'dd-mm-yyyy' }
-
-  // Common Nepal bank names for autocomplete
-  const BANK_NAMES = [
-    'Global IME', 'NIC Asia', 'Nabil', 'Nepal Investment Mega', 'Himalayan',
-    'Everest', 'Kumari', 'Laxmi Sunrise', 'Machhapuchhre', 'Sanima',
-    'Citizens', 'Prime Commercial', 'Siddhartha', 'Nepal SBI', 'Standard Chartered',
-    'NMB', 'Prabhu', 'Nepal Bangladesh', 'Agriculture Dev Bank', 'Rastriya Banijya',
-    'Nepal Bank', 'Garima Bikas', 'Muktinath Bikas', 'Shangrila Dev Bank',
-    'Lumbini Bikas', 'Jyoti Bikas', 'Kamana Sewa Bikas', 'Excel Dev Bank',
-    'Century Commercial', 'Civil', 'Janata', 'Mega', 'Nepal Credit & Commerce'
-  ];
 
   // Bikram Sambat calendar data: days per month for each BS year
   const BS_DATA = {
@@ -570,7 +646,7 @@ export default function RushDashboard() {
     if (bsD > 0 && bsM > 0) {
       const adDate = bsToAd(bsY, bsM, bsD);
       if (adDate) {
-        const iso = adDate.toISOString().split('T')[0];
+        const iso = `${adDate.getFullYear()}-${String(adDate.getMonth() + 1).padStart(2, '0')}-${String(adDate.getDate()).padStart(2, '0')}`;
         cpUpdateLine(masterId, li, 'chequeDate', iso);
       }
     }
@@ -589,6 +665,9 @@ export default function RushDashboard() {
   const [cpSyncAllLoading, setCpSyncAllLoading] = useState(false);
   const [cpSyncResults, setCpSyncResults] = useState(null);
   const [cpPostedCount, setCpPostedCount] = useState(0);
+  const [cpPostedData, setCpPostedData] = useState(null); // posted log entries for current date
+  const [cpShowPosted, setCpShowPosted] = useState(false); // toggle posted view
+  const [cpFetchedDetails, setCpFetchedDetails] = useState({}); // { voucherId: { loading, lines } }
 
   // Cheque Management page state
   const [cmPostLog, setCmPostLog] = useState([]);
@@ -1077,9 +1156,19 @@ export default function RushDashboard() {
   const checkTallyStatus = useCallback(async () => {
     try {
       const res = await getTallyStatus();
-      setTallyConnected(res.data?.connected || false);
+      const connected = res.data?.connected || false;
+      setTallyConnected(connected);
+      if (connected) {
+        try {
+          const cRes = await getCompanies();
+          setTallyCompanies(cRes.data?.companies || []);
+        } catch { /* ignore */ }
+      } else {
+        setTallyCompanies([]);
+      }
     } catch {
       setTallyConnected(false);
+      setTallyCompanies([]);
     }
   }, []);
 
@@ -1234,15 +1323,16 @@ export default function RushDashboard() {
 
   // Navigate to page
   // Fetch Outstanding & Ageing
-  const fetchOutstanding = useCallback(async () => {
+  const fetchOutstanding = useCallback(async (overdue = false) => {
     setOutstandingLoading(true);
     try {
-      const [billsRes, ageingRes, partiesRes] = await Promise.all([
-        getOutstandingBills(), getAgeingSummary(), getOutstandingParties()
+      const [billsRes, ageingRes, partiesRes, summaryRes] = await Promise.all([
+        getOutstandingBills('', overdue), getAgeingSummary(overdue), getOutstandingParties(overdue), getReceivableSummary()
       ]);
       setOutstandingBills(billsRes.data.bills || []);
       setAgeingSummary(ageingRes.data.summary || []);
       setOutstandingParties(partiesRes.data.parties || []);
+      setReceivableSummary(summaryRes.data);
     } catch (e) { console.error('Outstanding fetch error:', e); }
     setOutstandingLoading(false);
   }, []);
@@ -1251,9 +1341,91 @@ export default function RushDashboard() {
     setOutstandingSyncing(true);
     try {
       await syncOutstanding();
-      await fetchOutstanding();
+      await fetchOutstanding(outstandingOverdue);
     } catch (e) { console.error('Outstanding sync error:', e); }
     setOutstandingSyncing(false);
+  };
+
+  // Bank Names
+  const fetchBankNames = useCallback(async () => {
+    setBankNamesLoading(true);
+    try {
+      const res = await getBankNames();
+      setBankNamesList(res.data.banks || []);
+    } catch (e) { console.error('Bank names fetch error:', e); }
+    setBankNamesLoading(false);
+  }, []);
+
+  const handleAddBankName = async () => {
+    if (!bnNewShort.trim() || !bnNewFull.trim()) return;
+    try {
+      await createBankName({ shortName: bnNewShort, fullName: bnNewFull });
+      setBnNewShort(''); setBnNewFull('');
+      fetchBankNames();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  const handleUpdateBankName = async (id) => {
+    if (!bnEditShort.trim() || !bnEditFull.trim()) return;
+    try {
+      await updateBankName(id, { shortName: bnEditShort, fullName: bnEditFull });
+      setBnEditId(null);
+      fetchBankNames();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  const handleDeleteBankName = async (id, name) => {
+    if (!confirm(`Delete "${name}"?`)) return;
+    try {
+      await deleteBankName(id);
+      fetchBankNames();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  // Ledger Mapping
+  const fetchLedgerMappings = useCallback(async () => {
+    try {
+      const res = await getLedgerMappings();
+      setLedgerMappings(res.data.mappings || []);
+    } catch (e) { console.error('Ledger mappings fetch error:', e); }
+  }, []);
+
+  const handleAddLedgerMapping = async () => {
+    if (!lmNewBilling.trim() || !lmNewOdbc.trim()) return;
+    try {
+      await upsertLedgerMapping({ billingParty: lmNewBilling, odbcParty: lmNewOdbc });
+      setLmNewBilling(''); setLmNewOdbc('');
+      fetchLedgerMappings();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  const handleUpdateLedgerMapping = async (id) => {
+    if (!lmEditBilling.trim() || !lmEditOdbc.trim()) return;
+    try {
+      await updateLedgerMappingApi(id, { billingParty: lmEditBilling, odbcParty: lmEditOdbc });
+      setLmEditId(null);
+      fetchLedgerMappings();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  const handleDeleteLedgerMapping = async (id, name) => {
+    if (!confirm(`Delete mapping for "${name}"?`)) return;
+    try {
+      await deleteLedgerMapping(id);
+      fetchLedgerMappings();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
   };
 
   // Fetch Profit & Loss
@@ -1473,6 +1645,32 @@ export default function RushDashboard() {
     setChequeLoading(false);
   };
 
+  const fetchChequeVouchers = async () => {
+    setChqVouchersLoading(true);
+    try {
+      const res = await getODBCCheques({});
+      setChqVouchers(res.data?.cheques || []);
+      setChqStats(res.data?.stats || null);
+    } catch (e) { console.error('Cheque vouchers fetch error:', e); }
+    setChqVouchersLoading(false);
+  };
+
+  const handleSyncODBCVouchers = async () => {
+    setChqSyncing(true);
+    try {
+      const res = await syncODBCVouchers();
+      if (res.data?.success) {
+        addToast('success', 'Synced', `${res.data.synced} vouchers synced from Tally`);
+        await fetchChequeVouchers();
+      } else {
+        addToast('error', 'Sync Failed', res.data?.error || 'Unknown error');
+      }
+    } catch (e) {
+      addToast('error', 'Sync Failed', e.response?.data?.error || e.message);
+    }
+    setChqSyncing(false);
+  };
+
   const fetchChequeManagement = async () => {
     setCmLoading(true);
     try {
@@ -1481,6 +1679,137 @@ export default function RushDashboard() {
       setCmStats(res.data.stats || null);
     } catch (e) { console.error('Cheque management fetch error:', e); }
     setCmLoading(false);
+  };
+
+  // ==================== CHEQUE COLLECTION ====================
+  const fetchCollectionData = async () => {
+    setCollLoading(true);
+    try {
+      const [staffRes, batchesRes, chequesRes, statsRes] = await Promise.all([
+        getCollectionStaff(),
+        getCollectionBatches(),
+        getAssignableCheques(),
+        getCollectionStats()
+      ]);
+      setCollStaff(staffRes.data.staff || []);
+      setCollBatches(batchesRes.data.batches || []);
+      setCollAssignable(chequesRes.data.cheques || []);
+      setCollStats(statsRes.data.stats || null);
+    } catch (e) { console.error('Collection fetch error:', e); }
+    setCollLoading(false);
+  };
+
+  const fetchChequeReceivable = async () => {
+    setCollRecvLoading(true);
+    try {
+      const res = await getChequeReceivableLocal();
+      setCollReceivable(res.data.cheques || []);
+    } catch (e) { console.error('Cheque receivable fetch error:', e); }
+    setCollRecvLoading(false);
+  };
+
+  const handleSyncAndFetchReceivable = async () => {
+    setCollRecvSyncing(true);
+    try {
+      await syncODBCVouchers();
+      addToast('success', 'ODBC Synced', 'Vouchers re-synced from Tally');
+      await fetchChequeReceivable();
+    } catch (e) {
+      addToast('error', 'Sync Failed', e.response?.data?.error || e.message);
+    }
+    setCollRecvSyncing(false);
+  };
+
+  const handleCreateBatch = async () => {
+    if (!collSelectedStaff || collSelected.size === 0) return;
+    setCollSyncing(true);
+    try {
+      await createCollectionBatch({ staffId: parseInt(collSelectedStaff), chequeIds: Array.from(collSelected) });
+      setCollSelected(new Set());
+      addToast('success', 'Batch Created', `${collSelected.size} cheques assigned`);
+      await fetchCollectionData();
+      // Auto-show print for latest batch
+      const bRes = await getCollectionBatches({ status: 'assigned' });
+      const latest = (bRes.data.batches || [])[0];
+      if (latest) {
+        const pRes = await getBatchPrintData(latest.id);
+        setCollPrintData(pRes.data);
+      }
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+    setCollSyncing(false);
+  };
+
+  const handleOpenBatch = async (batchId) => {
+    try {
+      const res = await getCollectionBatch(batchId);
+      setCollActiveBatch(res.data.batch);
+      setCollActiveBatchItems(res.data.items || []);
+      const statuses = {};
+      (res.data.items || []).forEach(i => { statuses[i.id] = i.status; });
+      setCollItemStatuses(statuses);
+    } catch (e) { console.error(e); }
+  };
+
+  const handleSaveBatchResults = async () => {
+    if (!collActiveBatch) return;
+    setCollSyncing(true);
+    try {
+      const updates = Object.entries(collItemStatuses).map(([itemId, status]) => ({ itemId: parseInt(itemId), status, notes: '' }));
+      await bulkUpdateBatchItems(collActiveBatch.id, { updates });
+      addToast('success', 'Saved', 'Batch items updated');
+      await handleOpenBatch(collActiveBatch.id);
+      await fetchCollectionData();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+    setCollSyncing(false);
+  };
+
+  const handleCreateReceipt = async () => {
+    if (!collActiveBatch) return;
+    setCollSyncing(true);
+    try {
+      // First save statuses
+      const updates = Object.entries(collItemStatuses).map(([itemId, status]) => ({ itemId: parseInt(itemId), status, notes: '' }));
+      await bulkUpdateBatchItems(collActiveBatch.id, { updates });
+      // Then create receipt
+      const res = await createCollectionReceipt(collActiveBatch.id);
+      if (res.data.success) {
+        addToast('success', 'Receipt Created', 'Tally receipt created successfully');
+      } else {
+        addToast('error', 'Tally Error', res.data.error || 'Failed to create receipt');
+      }
+      setCollActiveBatch(null);
+      await fetchCollectionData();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+    setCollSyncing(false);
+  };
+
+  const handleAddStaff = async () => {
+    if (!collNewStaff.name || !collNewStaff.tallyLedgerName) return;
+    try {
+      await createCollectionStaff(collNewStaff);
+      setCollNewStaff({ name: '', phone: '', tallyLedgerName: '' });
+      setCollShowStaffForm(false);
+      addToast('success', 'Staff Added', `${collNewStaff.name} added`);
+      const res = await getCollectionStaff();
+      setCollStaff(res.data.staff || []);
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  const handleDeleteStaff = async (id) => {
+    if (!confirm('Deactivate this staff?')) return;
+    try {
+      await deleteCollectionStaff(id);
+      const res = await getCollectionStaff();
+      setCollStaff(res.data.staff || []);
+    } catch (e) { addToast('error', 'Error', e.message); }
   };
 
   const handleChequeStatusChange = async (id, newStatus) => {
@@ -1506,6 +1835,13 @@ export default function RushDashboard() {
   // Auto-match ODBC party by name similarity
   const cpAutoMatchParty = (receiptPartyName, odbcParties) => {
     if (!receiptPartyName || !odbcParties.length) return '';
+    // Check saved ledger mapping first
+    const saved = ledgerMappings.find(m => m.billing_party.toLowerCase() === receiptPartyName.toLowerCase().trim());
+    if (saved) {
+      // Verify the mapped ODBC party still exists
+      const exists = odbcParties.find(p => p.name.toLowerCase() === saved.odbc_party.toLowerCase());
+      if (exists) return exists.name;
+    }
     const rName = receiptPartyName.toLowerCase().trim();
     // Exact match first
     const exact = odbcParties.find(p => p.name.toLowerCase().trim() === rName);
@@ -1524,10 +1860,11 @@ export default function RushDashboard() {
     setCpLoading(true);
     try {
       const dateParam = (d || cpDate).replace(/-/g, '');
-      const [rcptRes, partyRes, postedRes] = await Promise.all([
+      const [rcptRes, partyRes, postedRes, logRes] = await Promise.all([
         getChequePostReceipts(dateParam),
         getODBCParties(),
-        getPostedMasterIds(dateParam)
+        getPostedMasterIds(dateParam),
+        getChequePostLog({ limit: 100 })
       ]);
       const allVouchers = rcptRes.data.vouchers || [];
       const postedIds = new Set((postedRes.data.masterIds || []).map(String));
@@ -1536,8 +1873,11 @@ export default function RushDashboard() {
       const parties = partyRes.data.parties || [];
       setCpReceipts(vouchers);
       setCpOdbcParties(parties);
-      if (postedIds.size > 0) setCpPostedCount(postedIds.size);
-      else setCpPostedCount(0);
+      // Get posted logs for current date
+      const allLogs = logRes.data.logs || [];
+      const dateLogs = allLogs.filter(l => l.voucher_date === dateParam);
+      if (postedIds.size > 0) { setCpPostedCount(postedIds.size); setCpPostedData(dateLogs); }
+      else { setCpPostedCount(0); setCpPostedData(null); }
       // Initialize forms with auto-matched party, auto-filled amount & A/C holder
       const forms = {};
       for (const r of vouchers) {
@@ -1568,20 +1908,30 @@ export default function RushDashboard() {
     });
   };
 
+  const cpUpdateLineMulti = (masterId, lineIdx, updates) => {
+    setCpForms(prev => {
+      const form = { ...prev[masterId] };
+      const lines = [...form.chequeLines];
+      lines[lineIdx] = { ...lines[lineIdx], ...updates };
+      return { ...prev, [masterId]: { ...form, chequeLines: lines } };
+    });
+  };
+
   const cpAddLine = (masterId, prefillAmount) => {
     setCpForms(prev => {
       const form = { ...prev[masterId] };
       const lines = form.chequeLines || [];
-      const firstLine = lines[0] || {};
       const lastLine = lines[lines.length - 1] || {};
       const lastNum = parseInt(lastLine.chequeNumber);
       const nextNum = lastNum && !isNaN(lastNum) ? String(lastNum + 1) : '';
+      const lastBank = lastLine.bankName || '';
       return { ...prev, [masterId]: { ...form, chequeLines: [...lines, {
-        bankName: firstLine.bankName || '',
+        bankName: lastBank,
         chequeNumber: nextNum,
         chequeDate: '',
         amount: prefillAmount != null ? String(prefillAmount) : '',
-        accountHolderName: firstLine.accountHolderName || ''
+        accountHolderName: lastLine.accountHolderName || '',
+        _hasSlash: !!lastBank
       }] } };
     });
   };
@@ -1595,16 +1945,17 @@ export default function RushDashboard() {
       const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
       const remaining = receiptAmount - total;
       if (lineIdx === lines.length - 1 && remaining > 0.01) {
-        const firstLine = lines[0] || {};
         const lastLine = lines[lines.length - 1] || {};
         const lastNum = parseInt(lastLine.chequeNumber);
         const nextNum = lastNum && !isNaN(lastNum) ? String(lastNum + 1) : '';
+        const lastBank = lastLine.bankName || '';
         return { ...prev, [masterId]: { ...form, chequeLines: [...lines, {
-          bankName: firstLine.bankName || '',
+          bankName: lastBank,
           chequeNumber: nextNum,
           chequeDate: '',
           amount: String(Math.round(remaining * 100) / 100),
-          accountHolderName: firstLine.accountHolderName || ''
+          accountHolderName: lastLine.accountHolderName || '',
+          _hasSlash: !!lastBank
         }] } };
       }
       return prev;
@@ -1645,6 +1996,10 @@ export default function RushDashboard() {
       });
       if (res.data.success) {
         alert(`Synced ${form.chequeLines.length} cheques for ${receipt.partyName} to ODBC`);
+        // Save ledger mapping for future auto-fill
+        if (receipt.partyName && form.odbcParty && receipt.partyName.toLowerCase() !== form.odbcParty.toLowerCase()) {
+          try { await upsertLedgerMapping({ billingParty: receipt.partyName, odbcParty: form.odbcParty }); } catch {}
+        }
         // Remove from forms
         setCpForms(prev => { const n = { ...prev }; delete n[receipt.masterId]; return n; });
         fetchChequePost(cpDate);
@@ -1724,6 +2079,13 @@ export default function RushDashboard() {
       setCpSyncResults(res.data);
 
       if (res.data.summary?.journalCreated) {
+        // Save ledger mappings for all posted parties
+        for (const r of selectedReceipts) {
+          const form = cpForms[r.masterId];
+          if (r.partyName && form?.odbcParty && r.partyName.toLowerCase() !== form.odbcParty.toLowerCase()) {
+            try { await upsertLedgerMapping({ billingParty: r.partyName, odbcParty: form.odbcParty }); } catch {}
+          }
+        }
         // Clear synced forms
         setCpForms(prev => {
           const n = { ...prev };
@@ -1747,7 +2109,12 @@ export default function RushDashboard() {
     if (page === 'rbb') { fetchRBB(); fetchRBBStatus(); }
     if (page === 'bill-history') fetchBillHistory();
     if (page === 'create-bill') fetchCreateBillData();
-    if (page === 'outstanding') fetchOutstanding();
+    if (page === 'outstanding') fetchOutstanding(outstandingOverdue);
+    if (page === 'bank-names') {
+      fetchBankNames(); fetchLedgerMappings();
+      getDebtors().then(r => setLmBillingParties((r.data.ledgers || []).map(l => l.name))).catch(() => {});
+      getODBCParties().then(r => setLmOdbcParties((r.data.parties || []).map(p => p.name))).catch(() => {});
+    }
     if (page === 'profit-loss') fetchProfitLoss();
     if (page === 'stock-groups') fetchStockGroups();
     if (page === 'price-lists') fetchPriceLists();
@@ -1760,7 +2127,9 @@ export default function RushDashboard() {
     if (page === 'xml-viewer') fetchXmlVouchers();
     if (page === 'columnar') fetchColumnar();
     if (page === 'cheques') { fetchChequeRecon(); fetchChequeManagement(); }
-    if (page === 'cheque-post') fetchChequePost();
+    if (page === 'cheque-post') { fetchChequePost(); fetchLedgerMappings(); }
+    if (page === 'cheque-vouchers') fetchChequeVouchers();
+    if (page === 'collection') fetchCollectionData();
     if (page === 'settings') fetchVoucherLockStatus();
   };
 
@@ -2419,6 +2788,15 @@ export default function RushDashboard() {
           <div className={`nav-item ${currentPage === 'cheque-post' ? 'active' : ''}`} onClick={() => goToPage('cheque-post')}>
             <span className="nav-icon">📮</span> Cheque Post
           </div>
+          <div className={`nav-item ${currentPage === 'cheque-vouchers' ? 'active' : ''}`} onClick={() => goToPage('cheque-vouchers')}>
+            <span className="nav-icon">📋</span> Cheque Vouchers
+          </div>
+          <div className={`nav-item ${currentPage === 'collection' ? 'active' : ''}`} onClick={() => goToPage('collection')}>
+            <span className="nav-icon">📦</span> Collection
+          </div>
+          <div className={`nav-item ${currentPage === 'bank-names' ? 'active' : ''}`} onClick={() => goToPage('bank-names')}>
+            <span className="nav-icon">🏦</span> Bank Names
+          </div>
 
           <div className="nav-label adv">Reports</div>
           <div className={`nav-item adv ${currentPage === 'outstanding' ? 'active' : ''}`} onClick={() => goToPage('outstanding')}>
@@ -2514,6 +2892,14 @@ export default function RushDashboard() {
           <span className="live"><span className="live-dot"></span>LIVE</span>
         </div>
 
+        {tallyCompanies.length > 0 && (
+          <div className="tally-companies-badge">
+            <span className="tcb-dot"></span>
+            <span className="tcb-count">{tallyCompanies.length} {tallyCompanies.length === 1 ? 'Company' : 'Companies'}</span>
+            <span className="tcb-names">{tallyCompanies.join(' | ')}</span>
+          </div>
+        )}
+
         <input
           className="search-box"
           placeholder="🔍 Search bills, parties..."
@@ -2555,7 +2941,11 @@ export default function RushDashboard() {
           {refreshing ? '⟳' : '🔄'}
         </button>
 
-        <div className="top-btn" onClick={() => setNotifPanelOpen(!notifPanelOpen)}>
+        <div className="top-btn" onClick={() => { setChatPanelOpen(!chatPanelOpen); if (!chatPanelOpen) setNotifPanelOpen(false); }} title="Tally Assistant">
+          🤖
+        </div>
+
+        <div className="top-btn" onClick={() => { setNotifPanelOpen(!notifPanelOpen); if (!notifPanelOpen) setChatPanelOpen(false); }}>
           🔔
           {notifications.filter(n => !n.read).length > 0 && <span className="notif-dot"></span>}
         </div>
@@ -2594,6 +2984,9 @@ export default function RushDashboard() {
           ))}
         </div>
       </div>
+
+      {/* CHAT PANEL */}
+      <ChatPanel open={chatPanelOpen} onClose={() => setChatPanelOpen(false)} />
 
       {/* MAIN CONTENT */}
       <main className="main-content">
@@ -5048,17 +5441,46 @@ export default function RushDashboard() {
             {/* OUTSTANDING & AGEING PAGE */}
             <div className={`page ${currentPage === 'outstanding' ? 'active' : ''}`}>
               <div className="sec-head" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div className="sec-title" style={{ fontSize: '18px' }}>💰 Outstanding & Ageing</div>
+                <div className="sec-title" style={{ fontSize: '18px' }}>Outstanding & Ageing</div>
                 <button className="btn btn-p" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={handleSyncOutstanding} disabled={outstandingSyncing}>
-                  {outstandingSyncing ? '⟳ Syncing...' : '🔄 Sync from Tally'}
+                  {outstandingSyncing ? 'Syncing...' : 'Sync from Tally'}
                 </button>
               </div>
 
-              {/* Tabs */}
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-                {['bills', 'ageing', 'parties'].map(t => (
-                  <button key={t} className={`btn ${outstandingTab === t ? 'btn-p' : 'btn-o'}`} style={{ padding: '6px 14px', fontSize: '12px', textTransform: 'capitalize' }} onClick={() => setOutstandingTab(t)}>{t}</button>
-                ))}
+              {/* Summary Cards */}
+              {receivableSummary && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ padding: '16px', background: outstandingOverdue ? 'var(--card)' : 'var(--blue-g, rgba(59,130,246,0.1))', borderRadius: '12px', border: outstandingOverdue ? '1px solid var(--border)' : '2px solid var(--blue)', cursor: 'pointer', transition: 'all 0.2s' }} onClick={() => { setOutstandingOverdue(false); fetchOutstanding(false); }}>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '4px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Total Receivable</div>
+                    <div style={{ fontSize: '24px', fontWeight: '700', color: 'var(--blue)', fontFamily: 'var(--mono)' }}>{formatCurrency(receivableSummary.total?.amount || 0)}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>{receivableSummary.total?.parties || 0} parties | {receivableSummary.total?.bills || 0} bills</div>
+                  </div>
+                  <div style={{ padding: '16px', background: outstandingOverdue ? 'var(--red-g, rgba(239,68,68,0.1))' : 'var(--card)', borderRadius: '12px', border: outstandingOverdue ? '2px solid var(--red)' : '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.2s' }} onClick={() => { setOutstandingOverdue(true); fetchOutstanding(true); }}>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '4px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Overdue Receivable</div>
+                    <div style={{ fontSize: '24px', fontWeight: '700', color: 'var(--red)', fontFamily: 'var(--mono)' }}>{formatCurrency(receivableSummary.overdue?.amount || 0)}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>{receivableSummary.overdue?.parties || 0} parties | {receivableSummary.overdue?.bills || 0} bills</div>
+                  </div>
+                  <div style={{ padding: '16px', background: 'var(--card)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '4px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Current (0-30 days)</div>
+                    <div style={{ fontSize: '24px', fontWeight: '700', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{formatCurrency((receivableSummary.total?.amount || 0) - (receivableSummary.overdue?.amount || 0))}</div>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>{(receivableSummary.total?.bills || 0) - (receivableSummary.overdue?.bills || 0)} bills within terms</div>
+                  </div>
+                  <div style={{ padding: '16px', background: 'var(--card)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '4px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Overdue %</div>
+                    <div style={{ fontSize: '24px', fontWeight: '700', color: (receivableSummary.overdue?.amount || 0) / (receivableSummary.total?.amount || 1) > 0.5 ? 'var(--red)' : 'var(--orange)', fontFamily: 'var(--mono)' }}>{receivableSummary.total?.amount ? ((receivableSummary.overdue?.amount || 0) / receivableSummary.total.amount * 100).toFixed(1) : '0.0'}%</div>
+                    <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>of total receivable</div>
+                  </div>
+                </div>
+              )}
+
+              {/* View indicator + Tabs */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {['bills', 'ageing', 'parties'].map(t => (
+                    <button key={t} className={`btn ${outstandingTab === t ? 'btn-p' : 'btn-o'}`} style={{ padding: '6px 14px', fontSize: '12px', textTransform: 'capitalize' }} onClick={() => setOutstandingTab(t)}>{t}</button>
+                  ))}
+                </div>
+                {outstandingOverdue && <span style={{ fontSize: '12px', color: 'var(--red)', fontWeight: '600', padding: '4px 10px', background: 'var(--red-g, rgba(239,68,68,0.1))', borderRadius: '6px' }}>Showing Overdue Only (30+ days)</span>}
               </div>
 
               {outstandingLoading ? <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading...</div> : (
@@ -6261,7 +6683,7 @@ export default function RushDashboard() {
 
               {/* Tab Bar */}
               <div style={{ display: 'flex', gap: '2px', marginBottom: '16px', background: 'var(--bg)', borderRadius: '8px', padding: '3px', border: '1px solid var(--border)' }}>
-                {[{k:'dashboard',l:'Dashboard'},{k:'recon',l:'Recon'},{k:'all',l:'All Cheques'},{k:'pending',l:'Pending'},{k:'party',l:'By Party'},{k:'audit',l:'Audit Log'}].map(t => (
+                {[{k:'dashboard',l:'Dashboard'},{k:'recon',l:'Recon'},{k:'odbc',l:'Tally ODBC'},{k:'all',l:'All Cheques'},{k:'pending',l:'Pending'},{k:'party',l:'By Party'},{k:'audit',l:'Audit Log'}].map(t => (
                   <button key={t.k} onClick={() => { if (t.k === 'dashboard' || t.k === 'audit') setCmTab(t.k); setChequeTab(t.k); }} style={{ flex: 1, padding: '8px 12px', fontSize: '12px', fontWeight: chequeTab === t.k ? '600' : '400', background: chequeTab === t.k ? 'var(--card)' : 'transparent', color: chequeTab === t.k ? 'var(--accent)' : 'var(--t3)', border: 'none', borderRadius: '6px', cursor: 'pointer', transition: 'all 0.2s' }}>
                     {t.l}
                   </button>
@@ -6424,7 +6846,7 @@ export default function RushDashboard() {
                   )}
 
                   {/* Search bar for recon and all tabs */}
-                  {(chequeTab === 'recon' || chequeTab === 'all') && (
+                  {(chequeTab === 'recon' || chequeTab === 'all' || chequeTab === 'odbc') && (
                     <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
                       <input type="text" placeholder="Search party, bank, cheque #..." value={chequeSearch} onChange={e => setChequeSearch(e.target.value)} style={{ flex: 1, minWidth: '200px', padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', fontSize: '12px' }} />
                       {chequeTab === 'all' && (
@@ -6493,6 +6915,62 @@ export default function RushDashboard() {
                       </table>
                     </div>
                   )}
+
+                  {/* Tab: Tally ODBC (ODBC CHq Mgmt vouchers) */}
+                  {chequeTab === 'odbc' && (() => {
+                    const odbcFiltered = chequeODBC.filter(c => {
+                      if (!chequeSearch) return true;
+                      const s = chequeSearch.toLowerCase();
+                      return (c.partyName || '').toLowerCase().includes(s) || (c.bankName || '').toLowerCase().includes(s) || (c.chequeNumber || '').toLowerCase().includes(s) || (c.voucherNumber || '').toLowerCase().includes(s);
+                    });
+                    const odbcTotal = odbcFiltered.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+                    return (
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                          <div style={{ fontSize: '12px', color: 'var(--t3)' }}>
+                            {odbcFiltered.length} vouchers from <strong style={{ color: 'var(--t1)' }}>ODBC CHq Mgmt</strong> &mdash; Total: <strong style={{ color: 'var(--green)', fontFamily: 'var(--mono)' }}>{formatCurrency(odbcTotal)}</strong>
+                          </div>
+                        </div>
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                            <thead>
+                              <tr style={{ background: 'var(--bg)', borderBottom: '2px solid var(--border)' }}>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>#</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Voucher #</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Date</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Party</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Bank</th>
+                                <th style={{ padding: '8px', textAlign: 'right', color: 'var(--t3)', fontWeight: '600' }}>Amount</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Cheque #</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Cheque Date</th>
+                                <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Narration</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {odbcFiltered.map((c, i) => (
+                                <tr key={c.masterId || i} style={{ borderBottom: '1px solid var(--border)', background: i % 2 ? 'var(--bg)' : 'transparent' }}>
+                                  <td style={{ padding: '8px', color: 'var(--t3)' }}>{i + 1}</td>
+                                  <td style={{ padding: '8px', color: 'var(--blue)', fontFamily: 'var(--mono)', fontWeight: '500' }}>{c.voucherNumber || '-'}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.voucherDate ? String(c.voucherDate).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '-'}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{c.partyName || '-'}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.bankName || '-'}</td>
+                                  <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(c.amount)}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t2)', fontFamily: 'var(--mono)' }}>{c.chequeNumber || '-'}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.chequeDate ? String(c.chequeDate).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '-'}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '11px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.narration || '-'}</td>
+                                </tr>
+                              ))}
+                              {odbcFiltered.length === 0 && (
+                                <tr><td colSpan={9} style={{ padding: '24px', textAlign: 'center', color: 'var(--t3)' }}>
+                                  {chequeODBC.length === 0 ? 'No vouchers from ODBC CHq Mgmt (Tally may be offline)' : 'No matching vouchers'}
+                                </td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Tab 2: All Cheques (local DB) */}
                   {chequeTab === 'all' && (() => {
@@ -6712,13 +7190,162 @@ export default function RushDashboard() {
                   {cpStep === 'entry' && !cpSyncResults && <>
                     <input type="date" value={cpDate} onChange={e => { setCpDate(e.target.value); fetchChequePost(e.target.value); }} style={{ padding: '6px 10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', fontSize: '12px' }} />
                     <span style={{ fontSize: '11px', color: 'var(--green)' }}>Auto-saved</span>
-                    {cpPostedCount > 0 && <span style={{ fontSize: '11px', color: 'var(--t3)', padding: '2px 8px', background: 'rgba(34,197,94,0.1)', borderRadius: '8px' }}>{cpPostedCount} already posted</span>}
+                    {cpPostedCount > 0 && <button onClick={() => setCpShowPosted(!cpShowPosted)} style={{ fontSize: '11px', color: cpShowPosted ? 'var(--accent)' : 'var(--green)', padding: '2px 8px', background: cpShowPosted ? 'rgba(99,102,241,0.15)' : 'rgba(34,197,94,0.1)', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: '600' }}>{cpPostedCount} posted {cpShowPosted ? '(hide)' : '(view)'}</button>}
                     <button className="btn btn-p" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={() => fetchChequePost(cpDate)} disabled={cpLoading}>
                       {cpLoading ? 'Loading...' : 'Refresh'}
                     </button>
                   </>}
                 </div>
               </div>
+
+              {/* Posted cheques view */}
+              {cpShowPosted && cpPostedData && cpPostedData.length > 0 && (
+                <div style={{ margin: '0 0 16px 0' }}>
+                  {cpPostedData.map((log, logIdx) => {
+                    const receipts = log.receipts || [];
+                    const results = log.results || {};
+                    const odbcResults = results.odbcResults || [];
+                    const journalResult = results.journalResult;
+                    const summary = results.summary || {};
+                    // Build per-party data merging receipts + odbcResults
+                    const partyEntries = receipts.map((r, ri) => {
+                      const odbc = odbcResults[ri] || odbcResults.find(o => o.partyName === r.partyName) || {};
+                      const lines = (r.chequeLines && r.chequeLines.length > 0) ? r.chequeLines : null;
+                      const partyAmt = lines ? lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0) : (parseFloat(r.amount) || 0);
+                      return { party: r.odbcParty || r.partyName, lines, chequeCount: r.chequeCount || (lines ? lines.length : 0), amount: partyAmt, odbcSuccess: odbc.success, odbcVoucherId: odbc.voucherId, odbcError: odbc.error };
+                    });
+                    const totalCheques = partyEntries.reduce((s, p) => s + p.chequeCount, 0);
+                    const totalAmt = partyEntries.reduce((s, p) => s + p.amount, 0);
+                    let lineNum = 0;
+                    return (
+                      <div key={logIdx} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '10px', overflow: 'hidden', marginBottom: '8px' }}>
+                        <div style={{ padding: '10px 16px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                            <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--green)' }}>Posted</span>
+                            <span style={{ fontSize: '11px', color: 'var(--t3)' }}>{new Date(log.posted_at).toLocaleString()}</span>
+                          </div>
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <span style={{ fontSize: '13px', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>{totalCheques} cheques | Rs {totalAmt.toLocaleString('en-IN')}</span>
+                            <button onClick={() => { const el = document.getElementById(`cp-posted-${logIdx}`); if (el) { const w = window.open('', '_blank', 'width=900,height=700'); w.document.write('<html><head><title>Cheque Post - ' + cpDate + '</title><style>body{font-family:Arial,sans-serif;padding:20px;font-size:12px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f5f5f5;font-weight:700}.r{text-align:right}.party-hdr{background:#e8f0fe;font-weight:700}.jrnl-box{background:#f0faf0;border:1px solid #c0e0c0;padding:10px 14px;border-radius:6px;margin-bottom:14px}.section-title{font-size:14px;font-weight:700;margin:12px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}@media print{body{padding:10px}}</style></head><body>' + el.innerHTML + '</body></html>'); w.document.close(); w.print(); } }}
+                              style={{ padding: '4px 10px', fontSize: '11px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t2)', cursor: 'pointer' }}>Print</button>
+                          </div>
+                        </div>
+                        <div id={`cp-posted-${logIdx}`} style={{ padding: '12px 16px' }}>
+                          <div style={{ textAlign: 'center', marginBottom: '14px' }}>
+                            <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)' }}>Cheque Post Details</div>
+                            <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Date: {cpDate} | {totalCheques} cheques | {partyEntries.length} parties | Rs {totalAmt.toLocaleString('en-IN')}</div>
+                          </div>
+
+                          {/* Billing Company Journal Voucher */}
+                          {(log.journal_voucher_number || journalResult) && (
+                            <div className="jrnl-box" style={{ background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)', padding: '10px 14px', borderRadius: '8px', marginBottom: '14px' }}>
+                              <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t1)', marginBottom: '6px' }}>Billing Company — Journal Voucher</div>
+                              <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '12px' }}>
+                                {log.journal_voucher_number && <span style={{ fontFamily: 'var(--mono)', color: 'var(--accent)' }}>Vch#: {log.journal_voucher_number}</span>}
+                                <span style={{ color: journalResult?.success ? 'var(--green)' : 'var(--red)' }}>{journalResult?.success ? 'Created' : 'Failed'}</span>
+                              </div>
+                              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', marginTop: '8px' }}>
+                                <thead>
+                                  <tr style={{ background: 'rgba(34,197,94,0.08)' }}>
+                                    <th style={{ padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid rgba(34,197,94,0.2)', color: 'var(--t3)' }}>Ledger</th>
+                                    <th style={{ padding: '4px 8px', textAlign: 'right', borderBottom: '1px solid rgba(34,197,94,0.2)', color: 'var(--t3)' }}>Debit</th>
+                                    <th style={{ padding: '4px 8px', textAlign: 'right', borderBottom: '1px solid rgba(34,197,94,0.2)', color: 'var(--t3)' }}>Credit</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  <tr>
+                                    <td style={{ padding: '4px 8px', color: 'var(--t1)' }}>Cheque Management</td>
+                                    <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>Rs {totalAmt.toLocaleString('en-IN')}</td>
+                                    <td style={{ padding: '4px 8px' }}></td>
+                                  </tr>
+                                  <tr>
+                                    <td style={{ padding: '4px 8px', color: 'var(--t1)' }}>Cheque Receipt</td>
+                                    <td style={{ padding: '4px 8px' }}></td>
+                                    <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>Rs {totalAmt.toLocaleString('en-IN')}</td>
+                                  </tr>
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* ODBC Entries by Party */}
+                          <div className="section-title" style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t1)', marginBottom: '8px', borderBottom: '1px solid var(--border)', paddingBottom: '4px' }}>ODBC Cheque Entries</div>
+                          {partyEntries.map((pe, pi) => (
+                            <div key={pi} style={{ marginBottom: '10px', border: '1px solid var(--border)', borderRadius: '6px', overflow: 'hidden' }}>
+                              <div className="party-hdr" style={{ padding: '6px 10px', background: 'rgba(99,102,241,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)' }}>
+                                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--t1)' }}>{pe.party}</span>
+                                  <span style={{ fontSize: '11px', color: 'var(--t3)' }}>{pe.chequeCount} chq{pe.chequeCount > 1 ? 's' : ''}</span>
+                                  {pe.odbcSuccess !== undefined && (
+                                    <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', background: pe.odbcSuccess ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)', color: pe.odbcSuccess ? 'var(--green)' : 'var(--red)' }}>
+                                      {pe.odbcSuccess ? 'Synced' : pe.odbcError || 'Failed'}
+                                    </span>
+                                  )}
+                                  {pe.odbcVoucherId && <span style={{ fontSize: '10px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>ID: {pe.odbcVoucherId}</span>}
+                                </div>
+                                <span style={{ fontSize: '12px', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>Rs {pe.amount.toLocaleString('en-IN')}</span>
+                              </div>
+                              {(() => {
+                                const displayLines = pe.lines || (pe.odbcVoucherId && cpFetchedDetails[pe.odbcVoucherId]?.lines) || null;
+                                if (displayLines) return (
+                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
+                                  <thead>
+                                    <tr style={{ background: 'var(--bg)' }}>
+                                      <th style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--t3)', width: '30px' }}>#</th>
+                                      <th style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--t3)' }}>Bill Name</th>
+                                      <th style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--t3)' }}>A/C Holder</th>
+                                      <th style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--t3)' }}>BS Date</th>
+                                      <th style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--t3)' }}>AD Date</th>
+                                      <th style={{ padding: '4px 8px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {displayLines.map((cl, ci) => { lineNum++; const adDate = cl.chequeDate || ''; return (
+                                      <tr key={ci} style={{ borderTop: ci > 0 ? '1px solid var(--border)' : 'none' }}>
+                                        <td style={{ padding: '4px 8px', color: 'var(--t3)' }}>{lineNum}</td>
+                                        <td style={{ padding: '4px 8px', color: 'var(--accent)', fontFamily: 'var(--mono)' }}>{cl.billName || [cl.chequeNumber, cl.bankName].filter(Boolean).join('/')}</td>
+                                        <td style={{ padding: '4px 8px', color: 'var(--t2)' }}>{cl.accountHolderName || ''}</td>
+                                        <td style={{ padding: '4px 8px', color: 'var(--accent)', fontFamily: 'var(--mono)', fontSize: '10px' }}>{adToBsDisplay(adDate)}</td>
+                                        <td style={{ padding: '4px 8px', color: 'var(--t2)', fontSize: '10px' }}>{adDate}</td>
+                                        <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>Rs {(parseFloat(cl.amount) || 0).toLocaleString('en-IN')}</td>
+                                      </tr>
+                                    ); })}
+                                  </tbody>
+                                </table>
+                                );
+                                // No lines available — show summary with Load Details button
+                                const fetching = pe.odbcVoucherId && cpFetchedDetails[pe.odbcVoucherId]?.loading;
+                                return (
+                                  <div style={{ padding: '6px 10px', fontSize: '11px', color: 'var(--t3)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span>{pe.chequeCount} cheque(s) — Rs {pe.amount.toLocaleString('en-IN')}</span>
+                                    {pe.odbcVoucherId && (
+                                      <button disabled={fetching} onClick={async () => {
+                                        setCpFetchedDetails(prev => ({ ...prev, [pe.odbcVoucherId]: { loading: true, lines: null } }));
+                                        try {
+                                          const res = await getODBCVoucherDetail(pe.odbcVoucherId);
+                                          setCpFetchedDetails(prev => ({ ...prev, [pe.odbcVoucherId]: { loading: false, lines: res.data.chequeLines || [] } }));
+                                        } catch { setCpFetchedDetails(prev => ({ ...prev, [pe.odbcVoucherId]: { loading: false, lines: null } })); }
+                                      }} style={{ padding: '2px 8px', fontSize: '10px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: '4px', cursor: fetching ? 'wait' : 'pointer' }}>
+                                        {fetching ? 'Loading...' : 'Load Details'}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          ))}
+
+                          {/* Grand Total */}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', borderTop: '2px solid var(--border)', marginTop: '4px', fontWeight: '700', fontSize: '13px' }}>
+                            <span style={{ color: 'var(--t1)' }}>Grand Total — {totalCheques} cheques, {partyEntries.length} parties</span>
+                            <span style={{ fontFamily: 'var(--mono)', color: 'var(--t1)' }}>Rs {totalAmt.toLocaleString('en-IN')}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               {cpStep === 'entry' && (cpLoading ? (
                 <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Fetching cheque receipts from Tally...</div>
@@ -6806,8 +7433,7 @@ export default function RushDashboard() {
                             <thead>
                               <tr style={{ background: 'var(--bg)' }}>
                                 <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', width: '30px' }}>#</th>
-                                <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Cheque #</th>
-                                <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Bank</th>
+                                <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Bill Name (chq#/bank)</th>
                                 <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>A/C Holder</th>
                                 <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', width: '90px' }}>BS Date</th>
                                 <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', width: '120px' }}>AD Date</th>
@@ -6817,40 +7443,50 @@ export default function RushDashboard() {
                             </thead>
                             <tbody>
                               {form.chequeLines.map((line, li) => {
-                                const bankKey = `${r.masterId}-${li}`;
                                 const bsKey = `${r.masterId}-${li}`;
-                                const bankFilter = line.bankName || '';
-                                const bankMatches = bankFilter ? BANK_NAMES.filter(b => b.toLowerCase().includes(bankFilter.toLowerCase()) && b.toLowerCase() !== bankFilter.toLowerCase()) : [];
+                                const hasSlash = line._hasSlash || !!line.bankName;
+                                const combinedVal = hasSlash ? `${line.chequeNumber}/${line.bankName}` : line.chequeNumber;
                                 return (
                                 <tr key={li} style={{ borderTop: '1px solid var(--border)' }}>
                                   <td style={{ padding: '4px 6px', color: 'var(--t3)' }}>{li + 1}</td>
                                   <td style={{ padding: '3px 4px' }}>
-                                    <input type="text" value={line.chequeNumber} onChange={e => cpUpdateLine(r.masterId, li, 'chequeNumber', e.target.value)}
-                                      placeholder="Chq #"
-                                      onKeyDown={e => { if (e.key === 'Enter') e.target.closest('tr').querySelector('input[data-field="bank"]')?.focus(); }}
-                                      style={{ width: '100%', padding: '5px 6px', background: 'var(--bg)', border: `1px solid ${line.chequeNumber ? 'var(--border)' : 'var(--orange)'}`, borderRadius: '4px', color: 'var(--t1)', fontSize: '12px' }} />
-                                  </td>
-                                  <td style={{ padding: '3px 4px', position: 'relative' }} onClick={e => e.stopPropagation()}>
-                                    <input type="text" data-field="bank" value={line.bankName}
-                                      onChange={e => { cpUpdateLine(r.masterId, li, 'bankName', e.target.value); setCpBankDropdown(bankKey); }}
-                                      onFocus={() => setCpBankDropdown(bankKey)}
-                                      onKeyDown={e => {
-                                        if (e.key === 'Enter' && bankMatches.length > 0) { cpUpdateLine(r.masterId, li, 'bankName', bankMatches[0]); setCpBankDropdown(null); e.target.closest('tr').querySelector('input[data-field="holder"]')?.focus(); }
-                                        else if (e.key === 'Enter') { setCpBankDropdown(null); e.target.closest('tr').querySelector('input[data-field="holder"]')?.focus(); }
-                                        else if (e.key === 'Escape') setCpBankDropdown(null);
+                                    <input type="text" data-field="chqbank" value={combinedVal}
+                                      onChange={e => {
+                                        const val = e.target.value;
+                                        if (val.includes('/')) {
+                                          const slashIdx = val.indexOf('/');
+                                          cpUpdateLineMulti(r.masterId, li, { chequeNumber: val.substring(0, slashIdx), bankName: val.substring(slashIdx + 1), _hasSlash: true });
+                                        } else {
+                                          cpUpdateLineMulti(r.masterId, li, { chequeNumber: val, bankName: '', _hasSlash: false });
+                                        }
                                       }}
-                                      placeholder="Bank" style={{ width: '100%', padding: '5px 6px', background: 'var(--bg)', border: `1px solid ${line.bankName ? 'var(--border)' : 'var(--orange)'}`, borderRadius: '4px', color: 'var(--t1)', fontSize: '12px' }} />
-                                    {cpBankDropdown === bankKey && bankMatches.length > 0 && (
-                                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, maxHeight: '180px', overflow: 'auto', background: 'var(--card)', border: '2px solid var(--accent)', borderTop: 'none', borderRadius: '0 0 6px 6px', zIndex: 200, boxShadow: '0 8px 24px rgba(0,0,0,0.35)' }}>
-                                        {bankMatches.slice(0, 8).map((b, bi) => (
-                                          <div key={b} onClick={() => { cpUpdateLine(r.masterId, li, 'bankName', b); setCpBankDropdown(null); }}
-                                            style={{ padding: '7px 10px', fontSize: '12px', color: bi === 0 ? 'var(--accent)' : 'var(--t1)', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontWeight: bi === 0 ? '700' : '400', background: bi === 0 ? 'rgba(99,102,241,0.1)' : 'transparent' }}
-                                            onMouseEnter={e => { e.target.style.background = 'rgba(99,102,241,0.18)'; e.target.style.color = 'var(--accent)'; }} onMouseLeave={e => { e.target.style.background = bi === 0 ? 'rgba(99,102,241,0.1)' : 'transparent'; e.target.style.color = bi === 0 ? 'var(--accent)' : 'var(--t1)'; }}>
-                                            {b}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    )}
+                                      onBlur={() => {
+                                        if (line.chequeNumber && !line.bankName && li > 0) {
+                                          const prevBank = form.chequeLines[li - 1]?.bankName || '';
+                                          const prevHolder = form.chequeLines[li - 1]?.accountHolderName || '';
+                                          if (prevBank) cpUpdateLineMulti(r.masterId, li, { bankName: prevBank, _hasSlash: true, accountHolderName: line.accountHolderName || prevHolder });
+                                        }
+                                      }}
+                                      onKeyDown={e => {
+                                        if (e.key === 'Enter') {
+                                          const prevLine = li > 0 ? form.chequeLines[li - 1] : null;
+                                          const prevBank = prevLine?.bankName || '';
+                                          const prevHolder = prevLine?.accountHolderName || '';
+                                          if (line.chequeNumber && !line.bankName && prevBank) {
+                                            cpUpdateLineMulti(r.masterId, li, { bankName: prevBank, _hasSlash: true, accountHolderName: line.accountHolderName || prevHolder });
+                                          }
+                                          const currentBank = line.bankName || prevBank;
+                                          const bankChanged = !prevLine || currentBank !== prevBank;
+                                          if (bankChanged || li === 0) {
+                                            e.target.closest('tr').querySelector('input[data-field="holder"]')?.focus();
+                                          } else {
+                                            if (!line.accountHolderName && prevHolder) cpUpdateLine(r.masterId, li, 'accountHolderName', prevHolder);
+                                            e.target.closest('tr').querySelector('input[data-field="bsdate"]')?.focus();
+                                          }
+                                        }
+                                      }}
+                                      placeholder="Chq# / Bank"
+                                      style={{ width: '100%', padding: '5px 6px', background: 'var(--bg)', border: `1px solid ${line.chequeNumber && line.bankName ? 'var(--border)' : 'var(--orange)'}`, borderRadius: '4px', color: 'var(--t1)', fontSize: '12px' }} />
                                   </td>
                                   <td style={{ padding: '3px 4px' }}>
                                     <input type="text" data-field="holder" value={line.accountHolderName} onChange={e => cpUpdateLine(r.masterId, li, 'accountHolderName', e.target.value)}
@@ -6997,7 +7633,7 @@ export default function RushDashboard() {
                             <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
                               <td style={{ padding: '6px 10px', color: 'var(--t3)' }}>{i + 1}</td>
                               <td style={{ padding: '6px 10px', color: 'var(--t1)', fontWeight: '600' }}>{c.party}</td>
-                              <td style={{ padding: '6px 10px', color: 'var(--t2)', fontSize: '11px' }}>{[c.chequeNumber, c.bankName, c.accountHolderName].filter(Boolean).join(', ')}</td>
+                              <td style={{ padding: '6px 10px', color: 'var(--t2)', fontSize: '11px' }}>{[c.chequeNumber, c.bankName].filter(Boolean).join('/')}</td>
                               <td style={{ padding: '6px 10px', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{c.chequeNumber}</td>
                               <td style={{ padding: '6px 10px', color: 'var(--t2)' }}>{c.bankName}</td>
                               <td style={{ padding: '6px 10px', color: 'var(--accent)', fontFamily: 'var(--mono)' }}>{adToBsDisplay(c.chequeDate)}</td>
@@ -7357,6 +7993,901 @@ export default function RushDashboard() {
               )}
             </div>
 
+            {/* CHEQUE VOUCHER LIST PAGE */}
+            <div className={`page ${currentPage === 'cheque-vouchers' ? 'active' : ''}`}>
+              <div className="sec-head" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div className="sec-title" style={{ fontSize: '18px' }}>📋 Cheque Company Vouchers</div>
+                  {chqStats?.lastSyncedAt && (
+                    <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>
+                      Last synced: {new Date(chqStats.lastSyncedAt).toLocaleString()}
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button className="rush-btn" onClick={handleSyncODBCVouchers} disabled={chqSyncing} style={{ padding: '8px 16px', fontSize: '12px', background: chqSyncing ? 'var(--bg2)' : 'var(--accent)', color: chqSyncing ? 'var(--t3)' : '#fff', border: 'none', borderRadius: 'var(--r)', cursor: chqSyncing ? 'wait' : 'pointer' }}>
+                    {chqSyncing ? '⟳ Syncing from Tally...' : '🔄 Sync from Tally'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Filters */}
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '14px', flexWrap: 'wrap', alignItems: 'center' }}>
+                <input
+                  className="search-box"
+                  placeholder="🔍 Search party, voucher#, bank, narration..."
+                  value={chqSearch}
+                  onChange={(e) => setChqSearch(e.target.value)}
+                  style={{ width: '300px' }}
+                />
+                <select
+                  value={chqTypeFilter}
+                  onChange={(e) => setChqTypeFilter(e.target.value)}
+                  style={{ padding: '7px 12px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--r)', color: 'var(--t1)', fontSize: '12px', fontFamily: 'var(--font)' }}
+                >
+                  <option value="">All Voucher Types</option>
+                  {[...new Set(chqVouchers.map(v => v.voucherType).filter(Boolean))].sort().map(t => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+
+              {chqVouchersLoading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: '40px' }}>
+                  <div className="loading-spinner"></div>
+                </div>
+              ) : (() => {
+                const filtered = chqVouchers
+                  .filter(v => {
+                    if (chqTypeFilter && v.voucherType !== chqTypeFilter) return false;
+                    if (!chqSearch) return true;
+                    const s = chqSearch.toLowerCase();
+                    return (v.partyName || '').toLowerCase().includes(s)
+                      || (v.voucherNumber || '').toLowerCase().includes(s)
+                      || (v.bankName || '').toLowerCase().includes(s)
+                      || (v.chequeNumber || '').toLowerCase().includes(s)
+                      || (v.narration || '').toLowerCase().includes(s);
+                  })
+                  .sort((a, b) => {
+                    const av = a[chqSortField] || '';
+                    const bv = b[chqSortField] || '';
+                    if (['amount', 'masterId', 'alterId'].includes(chqSortField)) return chqSortDir === 'asc' ? (parseFloat(av) || 0) - (parseFloat(bv) || 0) : (parseFloat(bv) || 0) - (parseFloat(av) || 0);
+                    return chqSortDir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+                  });
+
+                const totalAmt = filtered.reduce((s, v) => s + (parseFloat(v.amount) || 0), 0);
+                const typeCounts = {};
+                filtered.forEach(v => { typeCounts[v.voucherType || 'Unknown'] = (typeCounts[v.voucherType || 'Unknown'] || 0) + 1; });
+
+                const sortIcon = (field) => chqSortField === field ? (chqSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+                const toggleSort = (field) => {
+                  if (chqSortField === field) setChqSortDir(d => d === 'asc' ? 'desc' : 'asc');
+                  else { setChqSortField(field); setChqSortDir('asc'); }
+                };
+
+                return (
+                  <div>
+                    {/* Summary cards */}
+                    <div style={{ display: 'flex', gap: '12px', marginBottom: '14px', flexWrap: 'wrap' }}>
+                      <div style={{ padding: '10px 16px', background: 'var(--blue-g)', borderRadius: 'var(--r)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '18px' }}>📄</span>
+                        <div>
+                          <div style={{ fontSize: '10px', color: 'var(--t3)', textTransform: 'uppercase' }}>Total Vouchers</div>
+                          <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--blue)', fontFamily: 'var(--mono)' }}>{filtered.length}</div>
+                        </div>
+                      </div>
+                      <div style={{ padding: '10px 16px', background: 'rgba(34,197,94,0.1)', borderRadius: 'var(--r)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '18px' }}>💰</span>
+                        <div>
+                          <div style={{ fontSize: '10px', color: 'var(--t3)', textTransform: 'uppercase' }}>Total Amount</div>
+                          <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{formatCurrency(totalAmt)}</div>
+                        </div>
+                      </div>
+                      {Object.entries(typeCounts).map(([type, count]) => (
+                        <div key={type} style={{ padding: '10px 16px', background: 'var(--bg2)', borderRadius: 'var(--r)', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', border: chqTypeFilter === type ? '1px solid var(--blue)' : '1px solid var(--border)' }}
+                          onClick={() => setChqTypeFilter(chqTypeFilter === type ? '' : type)}>
+                          <div>
+                            <div style={{ fontSize: '10px', color: 'var(--t3)', textTransform: 'uppercase' }}>{type}</div>
+                            <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{count}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Table */}
+                    <div style={{ overflowX: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--r)' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                        <thead>
+                          <tr style={{ background: 'var(--bg)', borderBottom: '2px solid var(--border)' }}>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>#</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('voucherNumber')}>Voucher #{sortIcon('voucherNumber')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('voucherType')}>Type{sortIcon('voucherType')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('voucherDate')}>Date{sortIcon('voucherDate')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('partyName')}>Party{sortIcon('partyName')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('amount')}>Amount{sortIcon('amount')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Receipt Mode</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Cheque #</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Cheque Date</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('masterId')}>Master ID{sortIcon('masterId')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>GUID</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', cursor: 'pointer' }} onClick={() => toggleSort('alterId')}>Alter ID{sortIcon('alterId')}</th>
+                            <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600' }}>Narration</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filtered.map((v, i) => {
+                            const modes = (v.ledgerEntries || []).map(e => e.ledger).filter(Boolean);
+                            return (
+                            <tr key={v.masterId || i} style={{ borderBottom: '1px solid var(--border)', background: i % 2 ? 'var(--bg)' : 'transparent' }}>
+                              <td style={{ padding: '8px', color: 'var(--t3)' }}>{i + 1}</td>
+                              <td style={{ padding: '8px', color: 'var(--blue)', fontFamily: 'var(--mono)', fontWeight: '500' }}>{v.voucherNumber || '-'}</td>
+                              <td style={{ padding: '8px' }}>
+                                <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '600', background: 'var(--bg2)', color: 'var(--t2)', border: '1px solid var(--border)' }}>
+                                  {v.voucherType || '-'}
+                                </span>
+                              </td>
+                              <td style={{ padding: '8px', color: 'var(--t2)' }}>{v.voucherDate ? String(v.voucherDate).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{v.partyName || '-'}</td>
+                              <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(v.amount)}</td>
+                              <td style={{ padding: '8px', fontSize: '10px' }}>
+                                {modes.length > 0 ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                    {modes.map((m, j) => (
+                                      <span key={j} style={{ padding: '1px 6px', borderRadius: '8px', background: m === 'Cash' ? 'rgba(34,197,94,0.15)' : 'rgba(59,130,246,0.1)', color: m === 'Cash' ? 'var(--green)' : 'var(--blue)', fontWeight: '500', whiteSpace: 'nowrap' }}>
+                                        {m}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : '-'}
+                              </td>
+                              <td style={{ padding: '8px', color: 'var(--t2)', fontFamily: 'var(--mono)' }}>{v.chequeNumber || '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t2)' }}>{v.chequeDate ? String(v.chequeDate).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t3)', fontFamily: 'var(--mono)', fontSize: '11px' }}>{v.masterId || '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t3)', fontFamily: 'var(--mono)', fontSize: '10px', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={v.guid || ''}>{v.guid ? v.guid.substring(0, 12) + '...' : '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t3)', fontFamily: 'var(--mono)', fontSize: '11px' }}>{v.alterId || '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '11px', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={v.narration || ''}>{v.narration || '-'}</td>
+                            </tr>
+                            );
+                          })}
+                          {filtered.length === 0 && (
+                            <tr><td colSpan={12} style={{ padding: '30px', textAlign: 'center', color: 'var(--t3)' }}>
+                              {chqVouchers.length === 0 ? 'No vouchers in DB. Click "Sync from Tally" to fetch.' : 'No matching vouchers'}
+                            </td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* CHEQUE COLLECTION PAGE */}
+            <div className={`page ${currentPage === 'collection' ? 'active' : ''}`}>
+              {/* Tabs */}
+              <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                {[['assign', 'Assign'], ['collect', 'Collect'], ['receivable', 'Receivable'], ['staff', 'Staff'], ['history', 'History']].map(([key, label]) => (
+                  <button key={key} onClick={() => { setCollTab(key); if (key === 'assign' || key === 'collect' || key === 'history') fetchCollectionData(); if (key === 'receivable') fetchChequeReceivable(); }}
+                    style={{ padding: '8px 18px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: collTab === key ? '700' : '500',
+                      background: collTab === key ? 'var(--accent)' : 'var(--card)', color: collTab === key ? '#fff' : 'var(--t2)', fontSize: '13px' }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* ASSIGN TAB */}
+              {collTab === 'assign' && (
+                <div>
+                  {/* Staff selector + Create Batch */}
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap' }}>
+                    <select value={collSelectedStaff} onChange={e => setCollSelectedStaff(e.target.value)}
+                      style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--t1)', fontSize: '13px', minWidth: '180px' }}>
+                      <option value="">-- Select Staff --</option>
+                      {collStaff.map(s => <option key={s.id} value={s.id}>{s.name} ({s.tally_ledger_name})</option>)}
+                    </select>
+                    <button onClick={() => { setCollShowStaffForm(true); setCollTab('staff'); }}
+                      style={{ padding: '8px 14px', borderRadius: '8px', border: '1px dashed var(--border)', background: 'transparent', color: 'var(--accent)', cursor: 'pointer', fontSize: '12px' }}>
+                      + Add Staff
+                    </button>
+                    <div style={{ flex: 1 }} />
+                    <input placeholder="Search cheques..." value={collSearch} onChange={e => setCollSearch(e.target.value)}
+                      style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--t1)', fontSize: '13px', width: '200px' }} />
+                  </div>
+
+                  {/* Stats bar */}
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', fontSize: '12px', color: 'var(--t3)' }}>
+                    <span>Available: <b style={{ color: 'var(--t1)' }}>{collAssignable.length}</b> cheques</span>
+                    <span>|</span>
+                    <span>Selected: <b style={{ color: 'var(--accent)' }}>{collSelected.size}</b></span>
+                    <span>|</span>
+                    <span>Amount: <b style={{ color: 'var(--accent)' }}>{formatCurrency(collAssignable.filter(c => collSelected.has(c.id)).reduce((s, c) => s + (c.amount || 0), 0))}</b></span>
+                  </div>
+
+                  {/* Cheques table */}
+                  {collLoading ? <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading...</div> : (
+                    <div style={{ overflowX: 'auto', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                      <table className="table" style={{ fontSize: '12px' }}>
+                        <thead>
+                          <tr style={{ background: 'var(--card)' }}>
+                            <th style={{ padding: '8px', width: '30px' }}>
+                              <input type="checkbox" checked={collAssignable.length > 0 && collSelected.size === collAssignable.filter(c => {
+                                const s = collSearch.toLowerCase();
+                                return !s || (c.party_name || '').toLowerCase().includes(s) || (c.cheque_number || '').includes(s);
+                              }).length}
+                                onChange={e => {
+                                  const s = collSearch.toLowerCase();
+                                  const filtered = collAssignable.filter(c => !s || (c.party_name || '').toLowerCase().includes(s) || (c.cheque_number || '').includes(s));
+                                  setCollSelected(e.target.checked ? new Set(filtered.map(c => c.id)) : new Set());
+                                }} />
+                            </th>
+                            <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Party Name</th>
+                            <th style={{ padding: '8px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                            <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Cheque #</th>
+                            <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Date</th>
+                            <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Bank</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const s = collSearch.toLowerCase();
+                            const filtered = collAssignable.filter(c => !s || (c.party_name || '').toLowerCase().includes(s) || (c.cheque_number || '').includes(s));
+                            if (filtered.length === 0) return <tr><td colSpan="6" style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No assignable cheques</td></tr>;
+                            return filtered.map(c => (
+                              <tr key={c.id} style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer', background: collSelected.has(c.id) ? 'rgba(99,102,241,0.08)' : 'transparent' }}
+                                onClick={() => { const s = new Set(collSelected); s.has(c.id) ? s.delete(c.id) : s.add(c.id); setCollSelected(s); }}>
+                                <td style={{ padding: '8px' }}><input type="checkbox" checked={collSelected.has(c.id)} readOnly /></td>
+                                <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{c.party_name}</td>
+                                <td style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(c.amount)}</td>
+                                <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.cheque_number || '-'}</td>
+                                <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.cheque_date || '-'}</td>
+                                <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.bank_name || '-'}</td>
+                              </tr>
+                            ));
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Create batch button */}
+                  <div style={{ marginTop: '14px', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <button onClick={handleCreateBatch} disabled={!collSelectedStaff || collSelected.size === 0 || collSyncing}
+                      style={{ padding: '10px 24px', borderRadius: '8px', border: 'none', background: (!collSelectedStaff || collSelected.size === 0) ? 'var(--border)' : 'var(--accent)',
+                        color: '#fff', cursor: (!collSelectedStaff || collSelected.size === 0) ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '14px' }}>
+                      {collSyncing ? 'Creating...' : `Create Batch & Print (${collSelected.size} cheques)`}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* COLLECT TAB */}
+              {collTab === 'collect' && (
+                <div>
+                  {!collActiveBatch ? (
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', color: 'var(--t1)' }}>Active Batches</div>
+                      {collBatches.filter(b => b.status === 'assigned' || b.status === 'in_progress').length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>No active batches. Assign cheques first.</div>
+                      ) : (
+                        collBatches.filter(b => b.status === 'assigned' || b.status === 'in_progress').map(b => (
+                          <div key={b.id} onClick={() => handleOpenBatch(b.id)}
+                            style={{ padding: '14px', marginBottom: '8px', borderRadius: '10px', border: '1px solid var(--border)', background: 'var(--card)', cursor: 'pointer',
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                              <div style={{ fontWeight: '600', color: 'var(--t1)', fontSize: '14px' }}>Batch #{b.id} - {b.staff_name}</div>
+                              <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>{b.assigned_date} | {b.total_cheques} cheques | {formatCurrency(b.total_amount)}</div>
+                            </div>
+                            <div style={{ padding: '4px 10px', borderRadius: '6px', background: 'rgba(99,102,241,0.1)', color: 'var(--accent)', fontSize: '12px', fontWeight: '600' }}>
+                              {b.status}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      {/* Batch header */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                        <div>
+                          <div style={{ fontWeight: '700', fontSize: '16px', color: 'var(--t1)' }}>Batch #{collActiveBatch.id} - {collActiveBatch.staff_name}</div>
+                          <div style={{ fontSize: '12px', color: 'var(--t3)' }}>{collActiveBatch.assigned_date} | {collActiveBatch.total_cheques} cheques | {formatCurrency(collActiveBatch.total_amount)}</div>
+                        </div>
+                        <button onClick={() => setCollActiveBatch(null)} style={{ padding: '6px 14px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--t2)', cursor: 'pointer', fontSize: '12px' }}>
+                          Back
+                        </button>
+                      </div>
+
+                      {/* Quick action buttons */}
+                      <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                        <button onClick={() => { const s = {}; collActiveBatchItems.forEach(i => { s[i.id] = 'collected'; }); setCollItemStatuses(s); }}
+                          style={{ padding: '6px 14px', borderRadius: '8px', border: 'none', background: '#22c55e', color: '#fff', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
+                          Mark All Collected
+                        </button>
+                        <button onClick={() => { const s = { ...collItemStatuses }; collActiveBatchItems.forEach(i => { if (s[i.id] === 'pending') s[i.id] = 'returned'; }); setCollItemStatuses(s); }}
+                          style={{ padding: '6px 14px', borderRadius: '8px', border: 'none', background: '#f59e0b', color: '#fff', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
+                          Mark Remaining Returned
+                        </button>
+                      </div>
+
+                      {/* Items table */}
+                      <div style={{ overflowX: 'auto', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                        <table className="table" style={{ fontSize: '12px' }}>
+                          <thead>
+                            <tr style={{ background: 'var(--card)' }}>
+                              <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>#</th>
+                              <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Party Name</th>
+                              <th style={{ padding: '8px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                              <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Cheque #</th>
+                              <th style={{ padding: '8px', textAlign: 'left', color: 'var(--t3)' }}>Date</th>
+                              <th style={{ padding: '8px', textAlign: 'center', color: 'var(--t3)', minWidth: '120px' }}>Status</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {collActiveBatchItems.map((item, idx) => {
+                              const st = collItemStatuses[item.id] || 'pending';
+                              const stColor = st === 'collected' ? '#22c55e' : st === 'returned' ? '#f59e0b' : st === 'bounced' ? '#ef4444' : 'var(--t3)';
+                              return (
+                                <tr key={item.id} style={{ borderBottom: '1px solid var(--border)', background: st === 'collected' ? 'rgba(34,197,94,0.05)' : st === 'returned' ? 'rgba(245,158,11,0.05)' : st === 'bounced' ? 'rgba(239,68,68,0.05)' : 'transparent' }}>
+                                  <td style={{ padding: '8px', color: 'var(--t3)' }}>{idx + 1}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{item.party_name}</td>
+                                  <td style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(item.amount)}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t2)' }}>{item.cheque_number || '-'}</td>
+                                  <td style={{ padding: '8px', color: 'var(--t2)' }}>{item.cheque_date || '-'}</td>
+                                  <td style={{ padding: '8px', textAlign: 'center' }}>
+                                    <select value={st} onChange={e => setCollItemStatuses(prev => ({ ...prev, [item.id]: e.target.value }))}
+                                      style={{ padding: '4px 8px', borderRadius: '6px', border: `1px solid ${stColor}`, background: 'transparent', color: stColor, fontWeight: '600', fontSize: '12px', cursor: 'pointer' }}>
+                                      <option value="pending">Pending</option>
+                                      <option value="collected">Collected</option>
+                                      <option value="returned">Returned</option>
+                                      <option value="bounced">Bounced</option>
+                                    </select>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Summary + action buttons */}
+                      {(() => {
+                        const collected = collActiveBatchItems.filter(i => collItemStatuses[i.id] === 'collected');
+                        const returned = collActiveBatchItems.filter(i => collItemStatuses[i.id] === 'returned');
+                        const bounced = collActiveBatchItems.filter(i => collItemStatuses[i.id] === 'bounced');
+                        const collectedAmt = collected.reduce((s, i) => s + (i.amount || 0), 0);
+                        return (
+                          <div style={{ marginTop: '14px' }}>
+                            <div style={{ display: 'flex', gap: '16px', fontSize: '13px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                              <span style={{ color: '#22c55e', fontWeight: '600' }}>Collected: {collected.length} ({formatCurrency(collectedAmt)})</span>
+                              <span style={{ color: '#f59e0b', fontWeight: '600' }}>Returned: {returned.length}</span>
+                              <span style={{ color: '#ef4444', fontWeight: '600' }}>Bounced: {bounced.length}</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '10px' }}>
+                              <button onClick={handleSaveBatchResults} disabled={collSyncing}
+                                style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--t1)', cursor: 'pointer', fontWeight: '600', fontSize: '13px' }}>
+                                {collSyncing ? 'Saving...' : 'Save Only'}
+                              </button>
+                              <button onClick={handleCreateReceipt} disabled={collSyncing || collected.length === 0}
+                                style={{ padding: '10px 20px', borderRadius: '8px', border: 'none', background: collected.length === 0 ? 'var(--border)' : '#22c55e',
+                                  color: '#fff', cursor: collected.length === 0 ? 'not-allowed' : 'pointer', fontWeight: '600', fontSize: '13px' }}>
+                                {collSyncing ? 'Creating...' : `Save & Create Receipt (${collected.length} cheques, ${formatCurrency(collectedAmt)})`}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* STAFF TAB */}
+              {collTab === 'staff' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+                    <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--t1)' }}>Collection Staff</div>
+                    <button onClick={() => setCollShowStaffForm(!collShowStaffForm)}
+                      style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
+                      {collShowStaffForm ? 'Cancel' : '+ Add Staff'}
+                    </button>
+                  </div>
+
+                  {collShowStaffForm && (
+                    <div style={{ padding: '16px', borderRadius: '10px', border: '1px solid var(--border)', background: 'var(--card)', marginBottom: '14px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                      <div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Name *</div>
+                        <input value={collNewStaff.name} onChange={e => setCollNewStaff(p => ({ ...p, name: e.target.value }))} placeholder="Mini Gurung"
+                          style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--t1)', fontSize: '13px', width: '160px' }} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Phone</div>
+                        <input value={collNewStaff.phone} onChange={e => setCollNewStaff(p => ({ ...p, phone: e.target.value }))} placeholder="98XXXXXXXX"
+                          style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--t1)', fontSize: '13px', width: '130px' }} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Tally Ledger Name *</div>
+                        <input value={collNewStaff.tallyLedgerName} onChange={e => setCollNewStaff(p => ({ ...p, tallyLedgerName: e.target.value }))} placeholder="Cash By MINI Gurung"
+                          style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--t1)', fontSize: '13px', width: '200px' }} />
+                      </div>
+                      <button onClick={handleAddStaff} disabled={!collNewStaff.name || !collNewStaff.tallyLedgerName}
+                        style={{ padding: '8px 18px', borderRadius: '8px', border: 'none', background: 'var(--accent)', color: '#fff', cursor: 'pointer', fontWeight: '600', fontSize: '13px' }}>
+                        Save
+                      </button>
+                    </div>
+                  )}
+
+                  <div style={{ overflowX: 'auto', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                    <table className="table" style={{ fontSize: '12px' }}>
+                      <thead>
+                        <tr style={{ background: 'var(--card)' }}>
+                          <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Name</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Phone</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Tally Ledger</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'center', color: 'var(--t3)' }}>Status</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'center', color: 'var(--t3)' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {collStaff.length === 0 ? (
+                          <tr><td colSpan="5" style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No staff added yet</td></tr>
+                        ) : collStaff.map(s => (
+                          <tr key={s.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '10px 8px', color: 'var(--t1)', fontWeight: '600' }}>{s.name}</td>
+                            <td style={{ padding: '10px 8px', color: 'var(--t2)' }}>{s.phone || '-'}</td>
+                            <td style={{ padding: '10px 8px', color: 'var(--t2)' }}>{s.tally_ledger_name}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                              <span style={{ padding: '2px 8px', borderRadius: '4px', background: s.active ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', color: s.active ? '#22c55e' : '#ef4444', fontSize: '11px', fontWeight: '600' }}>
+                                {s.active ? 'Active' : 'Inactive'}
+                              </span>
+                            </td>
+                            <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                              <button onClick={() => handleDeleteStaff(s.id)} style={{ padding: '4px 10px', borderRadius: '6px', border: '1px solid #ef4444', background: 'transparent', color: '#ef4444', cursor: 'pointer', fontSize: '11px' }}>
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* HISTORY TAB */}
+              {collTab === 'history' && (
+                <div>
+                  <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '12px', color: 'var(--t1)' }}>Collection History</div>
+                  {collStats && (
+                    <div style={{ display: 'flex', gap: '12px', marginBottom: '14px', flexWrap: 'wrap' }}>
+                      {[
+                        { label: 'Total Batches', value: collStats.totalBatches, color: 'var(--accent)' },
+                        { label: 'Active', value: collStats.activeBatches, color: '#f59e0b' },
+                        { label: 'Completed', value: collStats.completedBatches, color: '#22c55e' },
+                        { label: 'Total Collected', value: formatCurrency(collStats.totalCollected), color: '#22c55e' },
+                        { label: 'Total Returned', value: collStats.totalReturned, color: '#f59e0b' },
+                        { label: 'Total Bounced', value: collStats.totalBounced, color: '#ef4444' }
+                      ].map((s, i) => (
+                        <div key={i} style={{ padding: '10px 16px', borderRadius: '10px', border: '1px solid var(--border)', background: 'var(--card)', minWidth: '120px' }}>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)' }}>{s.label}</div>
+                          <div style={{ fontSize: '18px', fontWeight: '700', color: s.color }}>{s.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ overflowX: 'auto', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                    <table className="table" style={{ fontSize: '12px' }}>
+                      <thead>
+                        <tr style={{ background: 'var(--card)' }}>
+                          <th style={{ padding: '10px 8px', color: 'var(--t3)' }}>Batch</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Staff</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Date</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)' }}>Cheques</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)' }}>Collected</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)' }}>Returned</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)' }}>Bounced</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'center', color: 'var(--t3)' }}>Status</th>
+                          <th style={{ padding: '10px 8px', textAlign: 'center', color: 'var(--t3)' }}>Tally</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {collBatches.length === 0 ? (
+                          <tr><td colSpan="10" style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No collection history</td></tr>
+                        ) : collBatches.map(b => (
+                          <tr key={b.id} style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer' }}
+                            onClick={() => { if (b.status !== 'completed') { handleOpenBatch(b.id); setCollTab('collect'); } }}>
+                            <td style={{ padding: '10px 8px', fontWeight: '600', color: 'var(--accent)' }}>#{b.id}</td>
+                            <td style={{ padding: '10px 8px', color: 'var(--t1)', fontWeight: '500' }}>{b.staff_name}</td>
+                            <td style={{ padding: '10px 8px', color: 'var(--t2)' }}>{b.assigned_date}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t1)' }}>{b.total_cheques}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'right', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(b.total_amount)}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'right', color: '#22c55e', fontWeight: '600' }}>{formatCurrency(b.collected_amount)}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'right', color: '#f59e0b' }}>{b.returned_count}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'right', color: '#ef4444' }}>{b.bounced_count}</td>
+                            <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                              <span style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '600',
+                                background: b.status === 'completed' ? 'rgba(34,197,94,0.1)' : 'rgba(99,102,241,0.1)',
+                                color: b.status === 'completed' ? '#22c55e' : 'var(--accent)' }}>
+                                {b.status}
+                              </span>
+                            </td>
+                            <td style={{ padding: '10px 8px', textAlign: 'center' }}>
+                              {b.tally_synced ? (
+                                <span style={{ color: '#22c55e', fontSize: '11px', fontWeight: '600' }}>Synced</span>
+                              ) : b.tally_sync_error ? (
+                                <span style={{ color: '#ef4444', fontSize: '11px' }} title={b.tally_sync_error}>Failed</span>
+                              ) : (
+                                <span style={{ color: 'var(--t3)', fontSize: '11px' }}>-</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* RECEIVABLE TAB */}
+              {collTab === 'receivable' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--t1)' }}>
+                      Cheque Receivable
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      {['pending', 'settled', 'all'].map(f => (
+                        <button key={f} onClick={() => setCollRecvFilter(f)}
+                          style={{ padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)', cursor: 'pointer', fontSize: '12px', fontWeight: '500',
+                            background: collRecvFilter === f ? 'var(--accent)' : 'var(--card)', color: collRecvFilter === f ? '#fff' : 'var(--t2)' }}>
+                          {f.charAt(0).toUpperCase() + f.slice(1)}
+                        </button>
+                      ))}
+                      <input placeholder="Search party / cheque..." value={collRecvSearch} onChange={e => setCollRecvSearch(e.target.value)}
+                        style={{ padding: '6px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--t1)', fontSize: '12px', width: '200px' }} />
+                      <button onClick={handleSyncAndFetchReceivable} disabled={collRecvSyncing}
+                        style={{ padding: '6px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', background: 'var(--accent)', color: '#fff', fontSize: '12px', fontWeight: '600', opacity: collRecvSyncing ? 0.6 : 1 }}>
+                        {collRecvSyncing ? 'Syncing...' : 'Re-sync from Tally'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {collRecvLoading ? (
+                    <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading cheque receivable...</div>
+                  ) : (() => {
+                    const search = collRecvSearch.toLowerCase();
+                    let filtered = collReceivable;
+
+                    // Apply status filter
+                    if (collRecvFilter === 'pending') filtered = filtered.filter(c => !c.settled);
+                    else if (collRecvFilter === 'settled') filtered = filtered.filter(c => c.settled);
+
+                    // Apply search filter
+                    if (search) {
+                      filtered = filtered.filter(c => c.partyName.toLowerCase().includes(search) || (c.chequeNumber || '').toLowerCase().includes(search) || (c.bankName || '').toLowerCase().includes(search) || (c.billName || '').toLowerCase().includes(search));
+                    }
+
+                    // Summary stats (from ALL data, not filtered)
+                    const allPending = collReceivable.filter(c => !c.settled);
+                    const allSettled = collReceivable.filter(c => c.settled);
+                    const pendingAmt = allPending.reduce((s, c) => s + c.amount, 0);
+                    const settledAmt = allSettled.reduce((s, c) => s + c.amount, 0);
+                    const partySet = new Set(allPending.map(c => c.partyName));
+
+                    return (
+                      <div>
+                        {/* Summary cards */}
+                        <div style={{ display: 'flex', gap: '12px', marginBottom: '14px', flexWrap: 'wrap' }}>
+                          {[
+                            { label: 'Pending', value: `${allPending.length}`, sub: formatCurrency(pendingAmt), color: '#f59e0b' },
+                            { label: 'Settled', value: `${allSettled.length}`, sub: formatCurrency(settledAmt), color: '#22c55e' },
+                            { label: 'Total', value: collReceivable.length, sub: formatCurrency(pendingAmt + settledAmt), color: 'var(--accent)' },
+                            { label: 'Parties', value: partySet.size, sub: 'with pending', color: 'var(--t1)' }
+                          ].map((s, i) => (
+                            <div key={i} style={{ padding: '10px 16px', borderRadius: '10px', border: '1px solid var(--border)', background: 'var(--card)', minWidth: '120px' }}>
+                              <div style={{ fontSize: '11px', color: 'var(--t3)' }}>{s.label}</div>
+                              <div style={{ fontSize: '16px', fontWeight: '700', color: s.color }}>{s.value}</div>
+                              {s.sub && <div style={{ fontSize: '11px', color: 'var(--t3)' }}>{s.sub}</div>}
+                            </div>
+                          ))}
+                        </div>
+
+                        {filtered.length === 0 ? (
+                          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)', background: 'var(--card)', borderRadius: '8px' }}>
+                            {collReceivable.length === 0
+                              ? 'No cheque receivable data. Click "Re-sync from Tally" to fetch ODBC vouchers.'
+                              : 'No results match your filter.'}
+                          </div>
+                        ) : (
+                          <div style={{ overflowX: 'auto', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                            <table className="table" style={{ fontSize: '12px' }}>
+                              <thead>
+                                <tr style={{ background: 'var(--card)' }}>
+                                  <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Party Name</th>
+                                  <th style={{ padding: '10px 8px', textAlign: 'left', color: 'var(--t3)' }}>Bill Ref</th>
+                                  <th style={{ padding: '10px 8px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                                  <th style={{ padding: '10px 8px', textAlign: 'center', color: 'var(--t3)' }}>Ageing</th>
+                                  <th style={{ padding: '10px 8px', textAlign: 'center', color: 'var(--t3)' }}>Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {filtered.slice(0, 500).map((c, i) => (
+                                  <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                    <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.partyName}>{c.partyName}</td>
+                                    <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '11px' }}>{c.billName || c.voucherNumber || '-'}</td>
+                                    <td style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(c.amount)}</td>
+                                    <td style={{ padding: '8px', textAlign: 'center', fontSize: '11px' }}>
+                                      {c.ageingDays > 0 ? (
+                                        <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '600',
+                                          background: c.ageingDays > 90 ? 'rgba(239,68,68,0.1)' : c.ageingDays > 30 ? 'rgba(245,158,11,0.1)' : 'rgba(59,130,246,0.1)',
+                                          color: c.ageingDays > 90 ? '#ef4444' : c.ageingDays > 30 ? '#f59e0b' : '#3b82f6' }}>
+                                          {c.ageingDays}d
+                                        </span>
+                                      ) : '-'}
+                                    </td>
+                                    <td style={{ padding: '8px', textAlign: 'center' }}>
+                                      <span style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: '600',
+                                        background: c.settled ? 'rgba(34,197,94,0.1)' : 'rgba(245,158,11,0.1)',
+                                        color: c.settled ? '#22c55e' : '#f59e0b' }}>
+                                        {c.settled ? 'Settled' : 'Pending'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {filtered.length > 500 && (
+                              <div style={{ textAlign: 'center', padding: '10px', color: 'var(--t3)', fontSize: '12px' }}>
+                                Showing 500 of {filtered.length} cheques. Use search to filter.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* PRINT SLIP (hidden, shown via window.print) */}
+              {collPrintData && (
+                <div className="collection-print-slip" style={{ display: 'none' }}>
+                  <div style={{ padding: '20px', fontFamily: 'monospace', fontSize: '12px', maxWidth: '600px', margin: '0 auto' }}>
+                    <div style={{ textAlign: 'center', fontWeight: 'bold', fontSize: '16px', borderBottom: '2px solid #000', paddingBottom: '8px', marginBottom: '8px' }}>
+                      CHEQUE COLLECTION SLIP
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <span>Date: {collPrintData.batch?.assigned_date}</span>
+                      <span>Batch #: {collPrintData.batch?.id}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px', borderBottom: '1px solid #000', paddingBottom: '8px' }}>
+                      <span>Staff: {collPrintData.staff?.name}</span>
+                      <span>Phone: {collPrintData.staff?.phone || '-'}</span>
+                    </div>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid #000' }}>
+                          <th style={{ padding: '4px', textAlign: 'left' }}>#</th>
+                          <th style={{ padding: '4px', textAlign: 'left' }}>Party Name</th>
+                          <th style={{ padding: '4px', textAlign: 'right' }}>Amount</th>
+                          <th style={{ padding: '4px', textAlign: 'left' }}>Chq #</th>
+                          <th style={{ padding: '4px', textAlign: 'left' }}>Bank</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(collPrintData.items || []).map((item, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid #ccc' }}>
+                            <td style={{ padding: '3px 4px' }}>{idx + 1}</td>
+                            <td style={{ padding: '3px 4px' }}>{item.party_name}</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{Number(item.amount || 0).toLocaleString('en-IN')}</td>
+                            <td style={{ padding: '3px 4px' }}>{item.cheque_number || '-'}</td>
+                            <td style={{ padding: '3px 4px' }}>{item.bank_name || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div style={{ borderTop: '2px solid #000', marginTop: '8px', paddingTop: '8px', display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
+                      <span>Total: {(collPrintData.items || []).length} cheques</span>
+                      <span>Rs {Number(collPrintData.batch?.total_amount || 0).toLocaleString('en-IN')}</span>
+                    </div>
+                    <div style={{ marginTop: '30px', display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #ccc', paddingTop: '8px' }}>
+                      <span>Staff Signature: ____________</span>
+                      <span>Authorized By: ____________</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* BANK NAMES PAGE */}
+            <div className={`page ${currentPage === 'bank-names' ? 'active' : ''}`}>
+              <div className="sec-head" style={{ marginBottom: '16px' }}>
+                <div className="sec-title" style={{ fontSize: '18px' }}>Bank Names</div>
+              </div>
+
+              {/* Add New */}
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
+                <input type="text" placeholder="Short name (e.g. garima)" value={bnNewShort} onChange={e => setBnNewShort(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', width: '200px', fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && document.getElementById('bn-full-input')?.focus()} />
+                <input id="bn-full-input" type="text" placeholder="Full name (e.g. Garima Bikas Bank)" value={bnNewFull} onChange={e => setBnNewFull(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', flex: 1, fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && handleAddBankName()} />
+                <button className="btn btn-p" style={{ padding: '8px 16px', fontSize: '13px' }} onClick={handleAddBankName} disabled={!bnNewShort.trim() || !bnNewFull.trim()}>Add</button>
+              </div>
+
+              {bankNamesLoading ? <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading...</div> : (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead><tr><th style={{ width: '200px' }}>Short Name</th><th>Full Name</th><th style={{ width: '120px', textAlign: 'center' }}>Actions</th></tr></thead>
+                    <tbody>
+                      {bankNamesList.map(b => (
+                        <tr key={b.id}>
+                          {bnEditId === b.id ? (
+                            <>
+                              <td><input type="text" value={bnEditShort} onChange={e => setBnEditShort(e.target.value)} style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} /></td>
+                              <td><input type="text" value={bnEditFull} onChange={e => setBnEditFull(e.target.value)} style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && handleUpdateBankName(b.id)} /></td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--green)', fontSize: '14px', marginRight: '8px' }} onClick={() => handleUpdateBankName(b.id)} title="Save">Save</button>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--t3)', fontSize: '14px' }} onClick={() => setBnEditId(null)} title="Cancel">Cancel</button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td style={{ fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--blue)' }}>{b.short_name}</td>
+                              <td>{b.full_name || <span style={{ color: 'var(--amber)', fontStyle: 'italic', fontSize: '12px' }}>-- needs full name --</span>}</td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--blue)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setBnEditId(b.id); setBnEditShort(b.short_name); setBnEditFull(b.full_name); }} title="Edit">Edit</button>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: '14px' }} onClick={() => handleDeleteBankName(b.id, b.short_name)} title="Delete">Del</button>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {bankNamesList.length === 0 && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No bank names configured. Add your first bank name above.</div>}
+                  <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--t3)' }}>
+                    {bankNamesList.length} bank name{bankNamesList.length !== 1 ? 's' : ''}
+                    {bankNamesList.filter(b => !b.full_name).length > 0 && <span style={{ color: 'var(--amber)', marginLeft: '8px' }}>({bankNamesList.filter(b => !b.full_name).length} need full name)</span>}
+                  </div>
+                </div>
+              )}
+
+              {/* Ledger Mapping Section */}
+              <div style={{ marginTop: '32px' }} onClick={() => setLmDropdown(null)}>
+                <div className="sec-head" style={{ marginBottom: '16px' }}>
+                  <div className="sec-title" style={{ fontSize: '18px' }}>Ledger Mapping (Billing → Cheque Company)</div>
+                  <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>Maps billing company party names to cheque company (ODBC) ledger names. Auto-saved when posting cheques.</div>
+                </div>
+
+                {/* Add New Mapping */}
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
+                  {/* Billing party input with dropdown */}
+                  <div style={{ flex: 1, position: 'relative' }} onClick={e => e.stopPropagation()}>
+                    <input type="text" placeholder="Search billing party..." value={lmNewBilling}
+                      onChange={e => { setLmNewBilling(e.target.value); setLmDropdown('new-billing'); }}
+                      onFocus={() => setLmDropdown('new-billing')}
+                      onBlur={() => { setTimeout(() => { if (lmNewBilling) { const f = lmBillingParties.filter(p => p.toLowerCase().includes(lmNewBilling.toLowerCase())); if (f.length === 1) setLmNewBilling(f[0]); } setLmDropdown(d => d === 'new-billing' ? null : d); }, 150); }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === 'Tab') {
+                          const filtered = lmBillingParties.filter(p => p.toLowerCase().includes(lmNewBilling.toLowerCase()));
+                          if (filtered.length > 0) setLmNewBilling(filtered[0]);
+                          setLmDropdown(null);
+                          if (e.key === 'Enter') { e.preventDefault(); document.getElementById('lm-odbc-input')?.focus(); }
+                        } else if (e.key === 'Escape') setLmDropdown(null);
+                      }}
+                      style={{ width: '100%', padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', fontSize: '13px' }} />
+                    {lmDropdown === 'new-billing' && lmNewBilling && (() => { const f = lmBillingParties.filter(p => p.toLowerCase().includes(lmNewBilling.toLowerCase())); return f.length > 0 ? (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, maxHeight: '200px', overflow: 'auto', background: 'var(--card)', border: '1px solid var(--accent)', borderTop: 'none', borderRadius: '0 0 6px 6px', zIndex: 200, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
+                        {f.length === 1 && <div style={{ padding: '4px 10px', fontSize: '10px', color: 'var(--green)', background: 'var(--bg)', borderBottom: '1px solid var(--border)' }}>Only match — will auto-select</div>}
+                        {f.slice(0, 15).map((p, i) => (
+                          <div key={p} onClick={() => { setLmNewBilling(p); setLmDropdown(null); document.getElementById('lm-odbc-input')?.focus(); }}
+                            style={{ padding: '6px 12px', fontSize: '12px', cursor: 'pointer', color: i === 0 ? 'var(--accent)' : 'var(--t1)', fontWeight: i === 0 ? '600' : '400', borderBottom: '1px solid var(--border)' }}
+                            onMouseEnter={e => e.target.style.background = 'rgba(99,102,241,0.15)'} onMouseLeave={e => e.target.style.background = 'transparent'}>{p}</div>
+                        ))}
+                      </div>
+                    ) : null; })()}
+                  </div>
+                  <span style={{ color: 'var(--t3)', fontSize: '16px' }}>→</span>
+                  {/* ODBC party input with dropdown */}
+                  <div style={{ flex: 1, position: 'relative' }} onClick={e => e.stopPropagation()}>
+                    <input id="lm-odbc-input" type="text" placeholder="Search ODBC party..." value={lmNewOdbc}
+                      onChange={e => { setLmNewOdbc(e.target.value); setLmDropdown('new-odbc'); }}
+                      onFocus={() => setLmDropdown('new-odbc')}
+                      onBlur={() => { setTimeout(() => { if (lmNewOdbc) { const f = lmOdbcParties.filter(p => p.toLowerCase().includes(lmNewOdbc.toLowerCase())); if (f.length === 1) setLmNewOdbc(f[0]); } setLmDropdown(d => d === 'new-odbc' ? null : d); }, 150); }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === 'Tab') {
+                          const filtered = lmOdbcParties.filter(p => p.toLowerCase().includes(lmNewOdbc.toLowerCase()));
+                          if (filtered.length > 0) setLmNewOdbc(filtered[0]);
+                          setLmDropdown(null);
+                        } else if (e.key === 'Escape') setLmDropdown(null);
+                      }}
+                      style={{ width: '100%', padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', fontSize: '13px' }} />
+                    {lmDropdown === 'new-odbc' && lmNewOdbc && (() => { const f = lmOdbcParties.filter(p => p.toLowerCase().includes(lmNewOdbc.toLowerCase())); return f.length > 0 ? (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, maxHeight: '200px', overflow: 'auto', background: 'var(--card)', border: '1px solid var(--accent)', borderTop: 'none', borderRadius: '0 0 6px 6px', zIndex: 200, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
+                        {f.length === 1 && <div style={{ padding: '4px 10px', fontSize: '10px', color: 'var(--green)', background: 'var(--bg)', borderBottom: '1px solid var(--border)' }}>Only match — will auto-select</div>}
+                        {f.slice(0, 15).map((p, i) => (
+                          <div key={p} onClick={() => { setLmNewOdbc(p); setLmDropdown(null); }}
+                            style={{ padding: '6px 12px', fontSize: '12px', cursor: 'pointer', color: i === 0 ? 'var(--accent)' : 'var(--t1)', fontWeight: i === 0 ? '600' : '400', borderBottom: '1px solid var(--border)' }}
+                            onMouseEnter={e => e.target.style.background = 'rgba(99,102,241,0.15)'} onMouseLeave={e => e.target.style.background = 'transparent'}>{p}</div>
+                        ))}
+                      </div>
+                    ) : null; })()}
+                  </div>
+                  <button className="btn btn-p" style={{ padding: '8px 16px', fontSize: '13px' }} onClick={handleAddLedgerMapping} disabled={!lmNewBilling.trim() || !lmNewOdbc.trim()}>Add</button>
+                </div>
+
+                {/* Search */}
+                {ledgerMappings.length > 5 && (
+                  <input type="text" placeholder="Search mappings..." value={lmSearch} onChange={e => setLmSearch(e.target.value)} style={{ marginBottom: '12px', padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', width: '300px', fontSize: '13px' }} />
+                )}
+
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead><tr><th>Billing Company Party</th><th style={{ width: '40px', textAlign: 'center' }}></th><th>ODBC (Cheque) Company Party</th><th style={{ width: '120px', textAlign: 'center' }}>Actions</th></tr></thead>
+                    <tbody>
+                      {ledgerMappings.filter(m => !lmSearch || m.billing_party.toLowerCase().includes(lmSearch.toLowerCase()) || m.odbc_party.toLowerCase().includes(lmSearch.toLowerCase())).map(m => (
+                        <tr key={m.id}>
+                          {lmEditId === m.id ? (
+                            <>
+                              <td style={{ position: 'relative' }} onClick={e => e.stopPropagation()}>
+                                <input type="text" value={lmEditBilling} onChange={e => { setLmEditBilling(e.target.value); setLmDropdown('edit-billing'); }}
+                                  onFocus={() => setLmDropdown('edit-billing')}
+                                  onBlur={() => { setTimeout(() => { if (lmEditBilling) { const f = lmBillingParties.filter(p => p.toLowerCase().includes(lmEditBilling.toLowerCase())); if (f.length === 1) setLmEditBilling(f[0]); } setLmDropdown(d => d === 'edit-billing' ? null : d); }, 150); }}
+                                  onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Tab') { const f = lmBillingParties.filter(p => p.toLowerCase().includes(lmEditBilling.toLowerCase())); if (f.length > 0) setLmEditBilling(f[0]); setLmDropdown(null); } else if (e.key === 'Escape') setLmDropdown(null); }}
+                                  style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} />
+                                {lmDropdown === 'edit-billing' && lmEditBilling && (() => { const f = lmBillingParties.filter(p => p.toLowerCase().includes(lmEditBilling.toLowerCase())); return f.length > 0 ? (
+                                  <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, maxHeight: '180px', overflow: 'auto', background: 'var(--card)', border: '1px solid var(--accent)', borderRadius: '0 0 6px 6px', zIndex: 200, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
+                                    {f.length === 1 && <div style={{ padding: '3px 10px', fontSize: '10px', color: 'var(--green)', background: 'var(--bg)', borderBottom: '1px solid var(--border)' }}>Only match — will auto-select</div>}
+                                    {f.slice(0, 12).map((p, i) => (
+                                      <div key={p} onClick={() => { setLmEditBilling(p); setLmDropdown(null); }}
+                                        style={{ padding: '5px 10px', fontSize: '12px', cursor: 'pointer', color: i === 0 ? 'var(--accent)' : 'var(--t1)', borderBottom: '1px solid var(--border)' }}
+                                        onMouseEnter={e => e.target.style.background = 'rgba(99,102,241,0.15)'} onMouseLeave={e => e.target.style.background = 'transparent'}>{p}</div>
+                                    ))}
+                                  </div>
+                                ) : null; })()}
+                              </td>
+                              <td style={{ textAlign: 'center', color: 'var(--t3)' }}>→</td>
+                              <td style={{ position: 'relative' }} onClick={e => e.stopPropagation()}>
+                                <input type="text" value={lmEditOdbc} onChange={e => { setLmEditOdbc(e.target.value); setLmDropdown('edit-odbc'); }}
+                                  onFocus={() => setLmDropdown('edit-odbc')}
+                                  onBlur={() => { setTimeout(() => { if (lmEditOdbc) { const f = lmOdbcParties.filter(p => p.toLowerCase().includes(lmEditOdbc.toLowerCase())); if (f.length === 1) setLmEditOdbc(f[0]); } setLmDropdown(d => d === 'edit-odbc' ? null : d); }, 150); }}
+                                  onKeyDown={e => { if (e.key === 'Enter') { const f = lmOdbcParties.filter(p => p.toLowerCase().includes(lmEditOdbc.toLowerCase())); if (f.length > 0) setLmEditOdbc(f[0]); setLmDropdown(null); handleUpdateLedgerMapping(m.id); } else if (e.key === 'Tab') { const f = lmOdbcParties.filter(p => p.toLowerCase().includes(lmEditOdbc.toLowerCase())); if (f.length > 0) setLmEditOdbc(f[0]); setLmDropdown(null); } else if (e.key === 'Escape') setLmDropdown(null); }}
+                                  style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} />
+                                {lmDropdown === 'edit-odbc' && lmEditOdbc && (() => { const f = lmOdbcParties.filter(p => p.toLowerCase().includes(lmEditOdbc.toLowerCase())); return f.length > 0 ? (
+                                  <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, maxHeight: '180px', overflow: 'auto', background: 'var(--card)', border: '1px solid var(--accent)', borderRadius: '0 0 6px 6px', zIndex: 200, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
+                                    {f.length === 1 && <div style={{ padding: '3px 10px', fontSize: '10px', color: 'var(--green)', background: 'var(--bg)', borderBottom: '1px solid var(--border)' }}>Only match — will auto-select</div>}
+                                    {f.slice(0, 12).map((p, i) => (
+                                      <div key={p} onClick={() => { setLmEditOdbc(p); setLmDropdown(null); }}
+                                        style={{ padding: '5px 10px', fontSize: '12px', cursor: 'pointer', color: i === 0 ? 'var(--accent)' : 'var(--t1)', borderBottom: '1px solid var(--border)' }}
+                                        onMouseEnter={e => e.target.style.background = 'rgba(99,102,241,0.15)'} onMouseLeave={e => e.target.style.background = 'transparent'}>{p}</div>
+                                    ))}
+                                  </div>
+                                ) : null; })()}
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--green)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setLmDropdown(null); handleUpdateLedgerMapping(m.id); }}>Save</button>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--t3)', fontSize: '14px' }} onClick={() => { setLmEditId(null); setLmDropdown(null); }}>Cancel</button>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td style={{ fontWeight: '600' }}>{m.billing_party}</td>
+                              <td style={{ textAlign: 'center', color: 'var(--t3)' }}>→</td>
+                              <td style={{ fontFamily: 'var(--mono)', color: 'var(--blue)' }}>{m.odbc_party}</td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--blue)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setLmEditId(m.id); setLmEditBilling(m.billing_party); setLmEditOdbc(m.odbc_party); setLmDropdown(null); }}>Edit</button>
+                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: '14px' }} onClick={() => handleDeleteLedgerMapping(m.id, m.billing_party)}>Del</button>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {ledgerMappings.length === 0 && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No ledger mappings yet. Mappings are auto-saved when you post cheques with different party names.</div>}
+                  <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--t3)' }}>{ledgerMappings.length} mapping{ledgerMappings.length !== 1 ? 's' : ''} configured</div>
+                </div>
+              </div>
+            </div>
+
             {/* SETTINGS PAGE */}
             <div className={`page ${currentPage === 'settings' ? 'active' : ''}`}>
               <div className="sec-head" style={{ marginBottom: '16px' }}>
@@ -7417,6 +8948,40 @@ export default function RushDashboard() {
                       >
                         {syncingDeleted ? '⟳ Checking...' : '🗑️ Sync Deleted'}
                       </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="s-card">
+                  <div className="s-card-h">🏭 Tally Companies</div>
+                  <div className="s-card-b">
+                    <div className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                      <div>
+                        <div className="s-name">Billing Company</div>
+                        <div className="s-desc">Main billing company name in Tally (e.g., For DB)</div>
+                      </div>
+                      <input
+                        type="text"
+                        value={appSettings.billing_company || 'For DB'}
+                        onChange={(e) => setAppSettings(prev => ({ ...prev, billing_company: e.target.value }))}
+                        onBlur={() => handleSaveSettings()}
+                        placeholder="For DB"
+                        style={{ width: '100%', padding: '10px 12px', fontSize: '14px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                      />
+                    </div>
+                    <div className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                      <div>
+                        <div className="s-name">ODBC Cheque Company</div>
+                        <div className="s-desc">Cheque management company name in Tally (e.g., ODBC CHq Mgmt)</div>
+                      </div>
+                      <input
+                        type="text"
+                        value={appSettings.odbc_company || 'ODBC CHq Mgmt'}
+                        onChange={(e) => setAppSettings(prev => ({ ...prev, odbc_company: e.target.value }))}
+                        onBlur={() => handleSaveSettings()}
+                        placeholder="ODBC CHq Mgmt"
+                        style={{ width: '100%', padding: '10px 12px', fontSize: '14px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }}
+                      />
                     </div>
                   </div>
                 </div>

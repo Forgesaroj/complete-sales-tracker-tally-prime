@@ -51,6 +51,9 @@ import ratioAnalysisRoutes from './ratio-analysis.js';
 import tallyXmlRoutes from './tally-xml.js';
 import columnarRoutes from './columnar.js';
 import voucherLockRoutes from './voucher-lock.js';
+import chatRoutes from './chat.js';
+import collectionRoutes from './collection.js';
+import bankNamesRoutes from './bank-names.js';
 
 const router = Router();
 
@@ -88,6 +91,9 @@ router.use('/ratios', ratioAnalysisRoutes);
 router.use('/tally-xml', tallyXmlRoutes);
 router.use('/columnar', columnarRoutes);
 router.use('/voucher-lock', voucherLockRoutes);
+router.use('/chat', chatRoutes);
+router.use('/collection', collectionRoutes);
+router.use('/bank-names', bankNamesRoutes);
 
 // Frontend error logging endpoint
 import fs from 'fs';

@@ -1,6 +1,6 @@
 /**
  * Cheques Routes
- * Cheque tracking and management with ODBC CHq Mgmt company integration
+ * Cheque tracking and management with configurable company integration
  */
 
 import { Router } from 'express';
@@ -8,6 +8,9 @@ import { db } from '../services/database/database.js';
 import { tallyConnector } from '../services/tally/tallyConnector.js';
 
 const router = Router();
+
+/** Get configured company names from settings */
+function co() { return db.getCompanyNames(); }
 
 // ==================== CHEQUE RECEIPT ACTIVITY ====================
 // Main workflow for entering cheque receipts on bills
@@ -92,7 +95,7 @@ router.post('/receipt-activity', async (req, res) => {
             chequeNumber: cheque.chequeNumber || '',
             chequeDate: cheque.chequeDate,
             narration: `For bill ${voucherNumber}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
 
           if (syncResult.success) {
             db.markChequeSynced(result.id, syncResult.voucherId);
@@ -177,7 +180,7 @@ router.put('/receipt-activity/:chequeId/update-date', async (req, res) => {
           chequeNumber: updated.cheque_number || '',
           chequeDate,
           narration: updated.narration || `Cheque from ${updated.party_name}`
-        }, 'ODBC CHq Mgmt');
+        }, co().odbc);
 
         if (result.success) {
           db.markChequeSynced(chequeId, result.voucherId);
@@ -244,7 +247,7 @@ router.post('/receipt-activity/:chequeId/add-breakdown', async (req, res) => {
             partyName: existing.party_name, amount,
             bankName: 'Cheque in Hand', chequeNumber: chequeNumber || '', chequeDate,
             narration: `Breakdown for ${billLink.voucher_number}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
           if (syncResult.success) { db.markChequeSynced(result.id, syncResult.voucherId); synced = true; }
         }
       } catch (e) { /* ignore */ }
@@ -360,7 +363,7 @@ router.post('/', async (req, res) => {
             chequeNumber: chequeNumber || '',
             chequeDate,
             narration: narration || `Cheque from ${partyName}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
 
           if (tallyResult.success) {
             db.markChequeSynced(chequeId, tallyResult.voucherId || null);
@@ -621,7 +624,7 @@ router.get('/reconciliation', async (req, res) => {
 
     // Try fetching from Tally
     try {
-      reconciliation = await tallyConnector.getChequeReconBalances('For DB');
+      reconciliation = await tallyConnector.getChequeReconBalances(co().billing);
       if (reconciliation) tallyConnected = true;
     } catch (e) {
       console.log('Tally not connected for recon balances:', e.message);
@@ -629,7 +632,18 @@ router.get('/reconciliation', async (req, res) => {
 
     try {
       if (tallyConnected) {
-        odbcCheques = await tallyConnector.getODBCCheques('ODBC CHq Mgmt');
+        odbcCheques = await tallyConnector.getODBCCheques(co().odbc);
+        // Auto-save bank short names from bill allocations
+        try {
+          const bankShorts = [];
+          for (const v of odbcCheques) {
+            for (const ba of (v.billAllocations || [])) {
+              const bn = ba.billName || '';
+              if (bn.includes('/')) bankShorts.push(bn.substring(bn.indexOf('/') + 1).trim());
+            }
+          }
+          if (bankShorts.length) db.ensureBankNames(bankShorts);
+        } catch (e2) { /* non-fatal */ }
       }
     } catch (e) {
       console.log('Could not fetch ODBC cheques:', e.message);
@@ -650,7 +664,7 @@ router.get('/reconciliation', async (req, res) => {
 
     res.json({
       tallyConnected,
-      reconciliation: reconciliation || { chequeReceipt: { name: 'Cheque Receipt', balance: 0 }, chequeManagement: { name: 'Cheque Management', balance: 0 }, counterSales: { name: 'Counter Sales', balance: 0, company: 'ODBC CHq Mgmt' }, pendingToPost: 0, mismatch: 0, isReconciled: true },
+      reconciliation: reconciliation || { chequeReceipt: { name: 'Cheque Receipt', balance: 0 }, chequeManagement: { name: 'Cheque Management', balance: 0 }, counterSales: { name: 'Counter Sales', balance: 0, company: co().odbc }, pendingToPost: 0, mismatch: 0, isReconciled: true },
       odbcCheques,
       localCheques,
       summary: summaryObj,
@@ -667,7 +681,7 @@ router.get('/reconciliation', async (req, res) => {
  */
 router.get('/reconciliation/debug-ledgers', async (req, res) => {
   try {
-    const company = req.query.company || 'ODBC CHq Mgmt';
+    const company = req.query.company || co().odbc;
     const group = req.query.group || 'Sales Accounts';
     const ledgers = await tallyConnector.getLedgersFromCompany(group, company);
     // Also try fetching all groups
@@ -691,7 +705,7 @@ router.get('/reconciliation/debug-ledgers', async (req, res) => {
  */
 router.get('/reconciliation/balances', async (req, res) => {
   try {
-    const reconciliation = await tallyConnector.getChequeReconBalances('For DB');
+    const reconciliation = await tallyConnector.getChequeReconBalances(co().billing);
     if (!reconciliation) {
       return res.json({ tallyConnected: false, reconciliation: null });
     }
@@ -703,26 +717,116 @@ router.get('/reconciliation/balances', async (req, res) => {
 
 /**
  * GET /api/cheques/reconciliation/odbc-cheques
- * Fetches cheques from ODBC company with optional date filtering
+ * Gets ODBC vouchers from local DB (fast). Use POST sync-odbc to refresh from Tally.
  */
 router.get('/reconciliation/odbc-cheques', async (req, res) => {
   try {
-    const { fromDate, toDate } = req.query;
-    let odbcCheques = await tallyConnector.getODBCCheques('ODBC CHq Mgmt');
-
-    // Filter by date if provided
-    if (fromDate || toDate) {
-      odbcCheques = odbcCheques.filter(c => {
-        const d = c.chequeDate || c.voucherDate || '';
-        if (fromDate && d < fromDate) return false;
-        if (toDate && d > toDate) return false;
-        return true;
-      });
-    }
-
-    res.json({ success: true, cheques: odbcCheques, count: odbcCheques.length });
+    const { fromDate, toDate, voucherType, search } = req.query;
+    const cheques = db.getODBCVouchers({ fromDate, toDate, voucherType, search });
+    const stats = db.getODBCVoucherStats();
+    const types = db.getODBCVoucherTypes();
+    res.json({ success: true, cheques, count: cheques.length, stats, types });
   } catch (error) {
     res.json({ success: false, cheques: [], error: error.message });
+  }
+});
+
+/**
+ * POST /api/cheques/sync-odbc
+ * Sync ODBC company vouchers from Tally into local DB
+ */
+router.post('/sync-odbc', async (req, res) => {
+  try {
+    const vouchers = await tallyConnector.getODBCCheques(co().odbc);
+    const count = db.upsertODBCVouchers(vouchers);
+    const stats = db.getODBCVoucherStats();
+
+    // Auto-save bank short names from bill allocations (format: chequeNum/bankShort)
+    try {
+      const bankShorts = [];
+      for (const v of vouchers) {
+        for (const ba of (v.billAllocations || [])) {
+          const bn = ba.billName || '';
+          if (bn.includes('/')) {
+            const short = bn.substring(bn.indexOf('/') + 1).trim();
+            if (short) bankShorts.push(short);
+          }
+        }
+      }
+      if (bankShorts.length) db.ensureBankNames(bankShorts);
+    } catch (e) { /* non-fatal */ }
+
+    // Sync outstanding bills using Tally's Bills Receivable report
+    // This gives us BILLPARTY + BILLREF + BILLCL — the reliable source
+    let outstandingCount = 0;
+    try {
+      const reportResults = await tallyConnector.getOutstandingBillsReport(co().odbc);
+      outstandingCount = db.syncOutstandingBills(reportResults);
+      console.log(`Synced ${outstandingCount} outstanding bills from Tally`);
+    } catch (obErr) {
+      console.warn('Failed to sync outstanding bills (non-fatal):', obErr.message);
+    }
+
+    res.json({ success: true, synced: count, outstandingBills: outstandingCount, stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DEBUG: Raw Tally XML query for bill allocations (temporary)
+router.get('/debug-bills-xml', async (req, res) => {
+  try {
+    const approach = req.query.approach || 'report';
+    let xml;
+    if (approach === 'report') {
+      // Try Report export — should preserve ledger→bill hierarchy
+      xml = `<ENVELOPE>
+<HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+<BODY><EXPORTDATA>
+<REQUESTDESC>
+<REPORTNAME>Bills Receivable</REPORTNAME>
+<STATICVARIABLES>
+<SVCURRENTCOMPANY>${co().odbc}</SVCURRENTCOMPANY>
+<EXPLODEFLAG>Yes</EXPLODEFLAG>
+</STATICVARIABLES>
+</REQUESTDESC>
+</EXPORTDATA></BODY></ENVELOPE>`;
+    } else if (approach === 'ledger-only') {
+      // Ledger without BILLALLOCATIONS — should return LEDGER objects
+      xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerBills</ID></HEADER>
+<BODY><DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+<SVCURRENTCOMPANY>${co().odbc}</SVCURRENTCOMPANY></STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="LedgerBills" ISMODIFY="No">
+<TYPE>Ledger</TYPE><CHILDOF>Sundry Debtors</CHILDOF><BELONGSTO>Yes</BELONGSTO>
+<FETCH>NAME,CLOSINGBALANCE</FETCH>
+<FILTER>HasBalance</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="HasBalance">NOT $$IsZero:$CLOSINGBALANCE</SYSTEM>
+</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    } else {
+      // Sales voucher with explicit bill fields
+      xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>SalesBills</ID></HEADER>
+<BODY><DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+<SVCURRENTCOMPANY>${co().odbc}</SVCURRENTCOMPANY></STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="SalesBills" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,PARTYLEDGERNAME,AMOUNT,ALLLEDGERENTRIES.LIST,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.NAME,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLTYPE,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.AMOUNT</FETCH>
+<FILTER>IsSales</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="IsSales">$$IsEqual:$VOUCHERTYPENAME:"Sales"</SYSTEM>
+</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+    }
+    const rawXml = await tallyConnector.sendRawRequest(xml);
+    const limit = parseInt(req.query.limit) || 5000;
+    res.type('text/xml').send(rawXml.substring(0, limit));
+  } catch (error) {
+    res.status(500).send(error.message);
   }
 });
 
@@ -789,7 +893,7 @@ router.get('/cheque-post/receipts', (req, res) => {
  */
 router.get('/cheque-post/odbc-parties', async (req, res) => {
   try {
-    const parties = await tallyConnector.getLedgersFromCompany('Sundry Debtors', 'ODBC CHq Mgmt');
+    const parties = await tallyConnector.getLedgersFromCompany('Sundry Debtors', co().odbc);
     res.json({ success: true, parties: parties.map(p => ({ name: p.name, balance: p.balance })) });
   } catch (error) {
     res.json({ success: false, parties: [], error: error.message });
@@ -802,8 +906,8 @@ router.get('/cheque-post/odbc-parties', async (req, res) => {
  */
 router.get('/cheque-post/odbc-banks', async (req, res) => {
   try {
-    const banks = await tallyConnector.getLedgersFromCompany('Bank Accounts', 'ODBC CHq Mgmt');
-    const cash = await tallyConnector.getLedgersFromCompany('Cash-in-Hand', 'ODBC CHq Mgmt');
+    const banks = await tallyConnector.getLedgersFromCompany('Bank Accounts', co().odbc);
+    const cash = await tallyConnector.getLedgersFromCompany('Cash-in-Hand', co().odbc);
     res.json({ success: true, banks: [...banks, ...cash].map(b => b.name) });
   } catch (error) {
     res.json({ success: false, banks: [], error: error.message });
@@ -823,9 +927,9 @@ router.post('/cheque-post/sync', async (req, res) => {
     }
 
     // Ensure party exists in ODBC company
-    const partyExists = await tallyConnector.partyExistsInCompany(partyName, 'ODBC CHq Mgmt');
+    const partyExists = await tallyConnector.partyExistsInCompany(partyName, co().odbc);
     if (!partyExists) {
-      return res.status(400).json({ error: `Party "${partyName}" not found in ODBC CHq Mgmt. Please select a valid party.` });
+      return res.status(400).json({ error: `Party "${partyName}" not found in ${co().odbc}. Please select a valid party.` });
     }
 
     const vchDate = date || new Date().toISOString().split('T')[0].replace(/-/g, '');
@@ -840,7 +944,7 @@ router.post('/cheque-post/sync', async (req, res) => {
       date: vchDate,
       voucherNumber,
       narration: narration || `Cheque posting from Dashboard`
-    }, 'ODBC CHq Mgmt');
+    }, co().odbc);
 
     res.json(result);
   } catch (error) {
@@ -855,7 +959,7 @@ router.post('/cheque-post/sync', async (req, res) => {
  */
 router.post('/cheque-post/sync-all', async (req, res) => {
   try {
-    const { receipts, date, billingCompany = 'For DB' } = req.body;
+    const { receipts, date, billingCompany = co().billing } = req.body;
 
     if (!receipts || !receipts.length) {
       return res.status(400).json({ error: 'No receipts to sync' });
@@ -870,9 +974,9 @@ router.post('/cheque-post/sync-all', async (req, res) => {
     // Step 1: Push each receipt to ODBC CHq Mgmt
     for (const r of receipts) {
       try {
-        const partyExists = await tallyConnector.partyExistsInCompany(r.partyName, 'ODBC CHq Mgmt');
+        const partyExists = await tallyConnector.partyExistsInCompany(r.partyName, co().odbc);
         if (!partyExists) {
-          odbcResults.push({ partyName: r.partyName, success: false, error: `Party not found in ODBC CHq Mgmt` });
+          odbcResults.push({ partyName: r.partyName, success: false, error: `Party not found in ${co().odbc}` });
           continue;
         }
 
@@ -880,13 +984,21 @@ router.post('/cheque-post/sync-all', async (req, res) => {
         const seq = String(Date.now()).slice(-4);
         const voucherNumber = `${vchDate}-${seq}/${partyShort}`;
 
+        // Build narration with account holder names (stored here since bill ref is chequeNum/bank only)
+        const holders = r.chequeLines
+          .map(l => l.accountHolderName).filter(Boolean)
+          .filter((v, i, a) => a.indexOf(v) === i); // unique
+        const narr = holders.length > 0
+          ? `Cheque from ${holders.join(', ')}`
+          : (r.narration || 'Cheque posting from Dashboard');
+
         const result = await tallyConnector.createODBCSalesVoucher({
           partyName: r.partyName,
           chequeLines: r.chequeLines,
           date: vchDate,
           voucherNumber,
-          narration: r.narration || 'Cheque posting from Dashboard'
-        }, 'ODBC CHq Mgmt');
+          narration: narr
+        }, co().odbc);
 
         const lineCount = r.chequeLines.length;
         const lineTotal = r.chequeLines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
@@ -940,7 +1052,7 @@ router.post('/cheque-post/sync-all', async (req, res) => {
         journalVoucherNumber: journalResult?.voucherNumber || '',
         journalSuccess: journalResult?.success || false,
         masterIds,
-        receipts: receipts.map(r => ({ partyName: r.partyName, chequeCount: r.chequeLines?.length, amount: r.chequeLines?.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0) })),
+        receipts: receipts.map(r => ({ partyName: r.partyName, odbcParty: r.odbcParty || r.partyName, chequeCount: r.chequeLines?.length, amount: r.chequeLines?.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0), chequeLines: (r.chequeLines || []).map(l => ({ chequeNumber: l.chequeNumber, bankName: l.bankName, accountHolderName: l.accountHolderName, chequeDate: l.chequeDate, amount: l.amount })) })),
         results: { odbcResults, journalResult, summary }
       });
     } catch (logErr) {
@@ -989,6 +1101,22 @@ router.get('/cheque-post/posted', (req, res) => {
     res.json({ masterIds });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/cheques/odbc-voucher/:masterId
+ * Fetch ODBC voucher detail (bill allocations) from Tally by MASTERID
+ */
+router.get('/odbc-voucher/:masterId', async (req, res) => {
+  try {
+    const detail = await tallyConnector.getODBCVoucherDetail(req.params.masterId, co().odbc);
+    if (!detail) {
+      return res.status(404).json({ success: false, error: 'Voucher not found' });
+    }
+    res.json({ success: true, ...detail });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -1048,7 +1176,7 @@ router.put('/:id/confirm-date', async (req, res) => {
             chequeNumber: updatedCheque.cheque_number || '',
             chequeDate: chequeDate,
             narration: updatedCheque.narration || `Cheque from ${updatedCheque.party_name}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
 
           if (tallyResult.success) {
             db.markChequeSynced(chequeId, tallyResult.voucherId || null);
@@ -1168,7 +1296,7 @@ router.post('/sync-pending', async (req, res) => {
           chequeNumber: cheque.cheque_number || '',
           chequeDate: cheque.cheque_date,
           narration: cheque.narration || `Cheque from ${cheque.party_name}`
-        }, 'ODBC CHq Mgmt');
+        }, co().odbc);
 
         if (result.success) {
           db.markChequeSynced(cheque.id, result.voucherId || null);

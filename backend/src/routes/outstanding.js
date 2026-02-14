@@ -1,6 +1,6 @@
 /**
  * Outstanding & Ageing Routes
- * Bill-wise receivables and ageing analysis
+ * Bill-wise receivables and ageing analysis (from ODBC outstanding bills)
  */
 
 import { Router } from 'express';
@@ -11,12 +11,12 @@ const router = Router();
 
 /**
  * GET /api/outstanding
- * Get all outstanding bills (cached). Optional ?party=Name filter
+ * Get all outstanding bills. Optional ?party=Name&overdue=1 filters
  */
 router.get('/', (req, res) => {
   try {
-    const { party } = req.query;
-    const bills = db.getOutstandingBills(party || null);
+    const { party, overdue } = req.query;
+    const bills = db.getOutstandingBills(party || null, overdue === '1');
     res.json({ success: true, count: bills.length, bills });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -24,12 +24,26 @@ router.get('/', (req, res) => {
 });
 
 /**
+ * GET /api/outstanding/summary
+ * Get total receivable and overdue receivable summary
+ */
+router.get('/summary', (req, res) => {
+  try {
+    const summary = db.getReceivableSummary();
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /api/outstanding/ageing
- * Get ageing summary (bucketed: 0-30, 30-60, 60-90, 90+)
+ * Get ageing summary (bucketed: 0-30, 30-60, 60-90, 90+). Optional ?overdue=1
  */
 router.get('/ageing', (req, res) => {
   try {
-    const summary = db.getAgeingSummary();
+    const { overdue } = req.query;
+    const summary = db.getAgeingSummary(overdue === '1');
     const total = summary.reduce((s, r) => s + (r.total_amount || 0), 0);
     res.json({ success: true, summary, totalOutstanding: total });
   } catch (error) {
@@ -39,11 +53,12 @@ router.get('/ageing', (req, res) => {
 
 /**
  * GET /api/outstanding/parties
- * Get party-wise outstanding summary
+ * Get party-wise outstanding summary. Optional ?overdue=1
  */
 router.get('/parties', (req, res) => {
   try {
-    const parties = db.getOutstandingParties();
+    const { overdue } = req.query;
+    const parties = db.getOutstandingParties(overdue === '1');
     res.json({ success: true, count: parties.length, parties });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -57,7 +72,7 @@ router.get('/parties', (req, res) => {
 router.get('/customer/:partyName', (req, res) => {
   try {
     const bills = db.getOutstandingBills(req.params.partyName);
-    const total = bills.reduce((s, b) => s + (b.closing_balance || 0), 0);
+    const total = bills.reduce((s, b) => s + Math.abs(b.closing_balance || 0), 0);
     res.json({ success: true, partyName: req.params.partyName, totalOutstanding: total, count: bills.length, bills });
   } catch (error) {
     res.status(500).json({ error: error.message });

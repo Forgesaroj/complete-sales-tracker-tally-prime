@@ -2766,6 +2766,11 @@ router.post('/cheque-receipt-activity', async (req, res) => {
     const createdCheques = [];
     let syncedCount = 0, pendingDateCount = 0;
 
+    // Auto-save bank short names for later mapping
+    for (const cheque of cheques) {
+      if (cheque.bankName) db.ensureBankName(cheque.bankName);
+    }
+
     // Process each cheque
     for (const cheque of cheques) {
       const result = db.createCheque({

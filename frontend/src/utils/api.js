@@ -135,9 +135,10 @@ export const getDashboardBillHistory = (params = {}) => api.get('/invoice/histor
 export const getDashboardBillSummary = (date) => api.get('/invoice/summary', { params: { date } });
 
 // Outstanding & Ageing
-export const getOutstandingBills = (party = '') => api.get('/outstanding', { params: party ? { party } : {} });
-export const getAgeingSummary = () => api.get('/outstanding/ageing');
-export const getOutstandingParties = () => api.get('/outstanding/parties');
+export const getOutstandingBills = (party = '', overdue = false) => api.get('/outstanding', { params: { ...(party ? { party } : {}), ...(overdue ? { overdue: '1' } : {}) } });
+export const getAgeingSummary = (overdue = false) => api.get('/outstanding/ageing', { params: overdue ? { overdue: '1' } : {} });
+export const getOutstandingParties = (overdue = false) => api.get('/outstanding/parties', { params: overdue ? { overdue: '1' } : {} });
+export const getReceivableSummary = () => api.get('/outstanding/summary');
 export const getCustomerOutstanding = (partyName) => api.get(`/outstanding/customer/${encodeURIComponent(partyName)}`);
 export const syncOutstanding = () => api.post('/outstanding/sync', {}, { timeout: 30000 });
 
@@ -192,6 +193,7 @@ export const getColumnarDetails = (params = {}) => api.get('/columnar/details', 
 export const getChequeReconciliation = () => api.get('/cheques/reconciliation', { timeout: 30000 });
 export const getChequeReconBalances = () => api.get('/cheques/reconciliation/balances', { timeout: 15000 });
 export const getODBCCheques = (params) => api.get('/cheques/reconciliation/odbc-cheques', { params, timeout: 30000 });
+export const syncODBCVouchers = () => api.post('/cheques/sync-odbc', {}, { timeout: 60000 });
 
 // Cheque CRUD
 export const getCheques = (params) => api.get('/cheques', { params });
@@ -213,6 +215,7 @@ export const syncChequePost = (data) => api.post('/cheques/cheque-post/sync', da
 export const syncAllChequePosts = (data) => api.post('/cheques/cheque-post/sync-all', data, { timeout: 120000 });
 export const getPostedMasterIds = (date) => api.get('/cheques/cheque-post/posted', { params: { date } });
 export const getChequePostLog = (params) => api.get('/cheques/cheque-post/log', { params });
+export const getODBCVoucherDetail = (masterId) => api.get(`/cheques/odbc-voucher/${masterId}`, { timeout: 30000 });
 
 // Voucher Lock
 export const getVoucherLockStatus = () => api.get('/voucher-lock/status', { timeout: 30000 });
@@ -221,5 +224,43 @@ export const unlockVouchers = (data) => api.post('/voucher-lock/unlock', data, {
 export const setVoucherLockSchedule = (data) => api.put('/voucher-lock/schedule', data);
 export const getVoucherLockLog = () => api.get('/voucher-lock/log');
 export const toggleVoucherLock = (data) => api.post('/voucher-lock/toggle', data, { timeout: 30000 });
+
+// Chat / AI Assistant
+export const getChatStatus = () => api.get('/chat/status');
+export const chatQuery = (command, params) => api.post('/chat/query', { command, params }, { timeout: 30000 });
+export const chatMessage = (message, history = []) => api.post('/chat/message', { message, history }, { timeout: 60000 });
+
+// Cheque Collection
+export const getCollectionStaff = () => api.get('/collection/staff');
+export const createCollectionStaff = (data) => api.post('/collection/staff', data);
+export const updateCollectionStaff = (id, data) => api.put(`/collection/staff/${id}`, data);
+export const deleteCollectionStaff = (id) => api.delete(`/collection/staff/${id}`);
+export const getStaffHistory = (id) => api.get(`/collection/staff/${id}/history`);
+export const getCollectionBatches = (params = {}) => api.get('/collection/batches', { params });
+export const createCollectionBatch = (data) => api.post('/collection/batches', data);
+export const getCollectionBatch = (id) => api.get(`/collection/batches/${id}`);
+export const getBatchPrintData = (id) => api.get(`/collection/batches/${id}/print`);
+export const updateBatchItem = (batchId, itemId, data) => api.put(`/collection/batches/${batchId}/items/${itemId}`, data);
+export const bulkUpdateBatchItems = (batchId, data) => api.put(`/collection/batches/${batchId}/bulk-update`, data);
+export const completeBatch = (id) => api.post(`/collection/batches/${id}/complete`);
+export const createCollectionReceipt = (id) => api.post(`/collection/batches/${id}/create-receipt`, {}, { timeout: 60000 });
+export const getAssignableCheques = () => api.get('/collection/assignable-cheques');
+export const getCollectionStats = () => api.get('/collection/stats');
+
+// Cheque Receivable (from ODBC company)
+export const getChequeReceivable = () => api.get('/collection/cheque-receivable', { timeout: 30000 });
+export const getChequeReceivableLocal = (params = {}) => api.get('/collection/cheque-receivable/local', { params });
+
+// Bank Names
+export const getBankNames = () => api.get('/bank-names');
+export const createBankName = (data) => api.post('/bank-names', data);
+export const updateBankName = (id, data) => api.put(`/bank-names/${id}`, data);
+export const deleteBankName = (id) => api.delete(`/bank-names/${id}`);
+
+// Ledger Mapping (billing party → ODBC party)
+export const getLedgerMappings = () => api.get('/bank-names/ledger-mappings');
+export const upsertLedgerMapping = (data) => api.post('/bank-names/ledger-mappings', data);
+export const updateLedgerMappingApi = (id, data) => api.put(`/bank-names/ledger-mappings/${id}`, data);
+export const deleteLedgerMapping = (id) => api.delete(`/bank-names/ledger-mappings/${id}`);
 
 export default api;

@@ -9,6 +9,9 @@
   --bg2: #181B24;
   --bg3: #1F2331;
   --bg4: #272C3D;
+  --bg: #111318;
+  --card: #181B24;
+  --accent: #6366F1;
   --border: rgba(255,255,255,0.06);
   --border2: rgba(255,255,255,0.1);
   --t1: #F0F1F5;
@@ -41,6 +44,9 @@
   --bg2: #F0F2F5;
   --bg3: #E4E7EC;
   --bg4: #D0D5DD;
+  --bg: #FFFFFF;
+  --card: #F0F2F5;
+  --accent: #4F46E5;
   --border: rgba(0,0,0,0.08);
   --border2: rgba(0,0,0,0.12);
   --t1: #101828;
@@ -148,6 +154,17 @@ body {
 .page-title { font-size: 16px; font-weight: 700; flex: 1; display: flex; align-items: center; gap: 10px; }
 .live { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: var(--green); }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 1.5s infinite; }
+
+/* Tally Companies Badge */
+.tally-companies-badge {
+  display: flex; align-items: center; gap: 6px; padding: 5px 12px;
+  background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3);
+  border-radius: 20px; font-size: 11px; white-space: nowrap;
+}
+.tcb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex-shrink: 0; animation: pulse 2s infinite; }
+.tcb-count { font-weight: 700; color: var(--green); }
+.tcb-names { color: var(--t2); font-weight: 500; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+
 .search-box {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r);
   padding: 7px 12px 7px 32px; color: var(--t1); font-size: 12px; width: 240px;
@@ -937,7 +954,125 @@ tfoot td { background: var(--bg3); font-weight: 700; color: var(--t1); border-to
   background: var(--bg2); border-radius: var(--r2); border: 1px dashed var(--border2);
 }
 
+/* CHAT PANEL */
+.chat-panel {
+  position: fixed; top: 0; right: -400px; bottom: 0; width: 380px;
+  background: var(--bg1); border-left: 1px solid var(--border);
+  z-index: 200; transition: right .25s ease; display: flex; flex-direction: column;
+}
+.chat-panel.open { right: 0; }
+.cp-head {
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.cp-title { display: flex; align-items: center; gap: 8px; }
+.cp-title h3 { font-size: 14px; font-weight: 700; }
+.cp-ai-badge {
+  font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 6px;
+  background: var(--green-g); color: var(--green); letter-spacing: .5px;
+}
+.cp-actions {
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.cp-action-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 10px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  background: var(--bg2); border: 1px solid var(--border); color: var(--t2);
+  cursor: pointer; font-family: var(--font); transition: all .15s;
+}
+.cp-action-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-g); }
+.cp-action-btn:disabled { opacity: .5; cursor: not-allowed; }
+.cp-action-btn.write { border-color: rgba(251,191,36,.2); }
+.cp-action-btn.write:hover { border-color: var(--amber); color: var(--amber); background: var(--amber-g); }
+
+.cp-messages {
+  flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.cp-messages::-webkit-scrollbar { width: 4px; }
+.cp-messages::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+.cp-msg { max-width: 95%; animation: fadeUp .2s ease; }
+.cp-msg-user {
+  align-self: flex-end; background: var(--blue); color: #fff;
+  padding: 8px 12px; border-radius: 12px 12px 2px 12px; font-size: 12px;
+}
+.cp-msg-assistant {
+  align-self: flex-start; background: var(--bg2); border: 1px solid var(--border);
+  padding: 10px 12px; border-radius: 2px 12px 12px 12px;
+}
+.cp-msg-system {
+  align-self: center; background: var(--bg3); color: var(--t2);
+  padding: 6px 12px; border-radius: 8px; font-size: 11px; text-align: center;
+}
+.cp-msg-error {
+  align-self: center; background: var(--red-g); color: var(--red);
+  padding: 6px 12px; border-radius: 8px; font-size: 11px;
+}
+.cp-msg-loading { align-self: flex-start; }
+.cp-msg-label {
+  font-size: 10px; font-weight: 700; color: var(--blue); margin-bottom: 4px;
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.cp-msg-text {
+  font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--font); margin: 0; color: var(--t1);
+}
+.cp-msg-user .cp-msg-text { color: #fff; }
+
+.cp-typing {
+  display: flex; gap: 4px; padding: 10px 14px;
+  background: var(--bg2); border-radius: 12px; width: fit-content;
+}
+.cp-typing span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--t3);
+  animation: typing 1.2s infinite;
+}
+.cp-typing span:nth-child(2) { animation-delay: .2s; }
+.cp-typing span:nth-child(3) { animation-delay: .4s; }
+@keyframes typing { 0%,60%,100%{opacity:.3;transform:translateY(0)} 30%{opacity:1;transform:translateY(-4px)} }
+
+.cp-input-area {
+  padding: 10px 12px; border-top: 1px solid var(--border);
+  display: flex; gap: 8px; align-items: center;
+}
+.cp-input {
+  flex: 1; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--r);
+  padding: 9px 12px; color: var(--t1); font-size: 12px;
+  font-family: var(--font); outline: none; transition: border .2s;
+}
+.cp-input:focus { border-color: var(--blue); }
+.cp-input::placeholder { color: var(--t3); }
+.cp-send {
+  width: 36px; height: 36px; border-radius: var(--r); border: none;
+  background: var(--blue); color: #fff; cursor: pointer; font-size: 14px;
+  display: flex; align-items: center; justify-content: center; transition: .15s;
+  flex-shrink: 0;
+}
+.cp-send:hover { box-shadow: 0 4px 12px rgba(78,142,247,.3); }
+.cp-send:disabled { opacity: .4; cursor: not-allowed; }
+
 /* Nepali font support */
 .font-nepali {
   font-family: 'Noto Sans Devanagari', 'Mangal', sans-serif;
+}
+
+/* Print styles for Collection Slip */
+@media print {
+  body * { visibility: hidden !important; }
+  .collection-print-slip, .collection-print-slip * {
+    visibility: visible !important;
+    display: block !important;
+  }
+  .collection-print-slip {
+    position: fixed !important;
+    left: 0; top: 0; width: 100%;
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .collection-print-slip table { display: table !important; }
+  .collection-print-slip thead { display: table-header-group !important; }
+  .collection-print-slip tbody { display: table-row-group !important; }
+  .collection-print-slip tr { display: table-row !important; }
+  .collection-print-slip th, .collection-print-slip td { display: table-cell !important; }
 }

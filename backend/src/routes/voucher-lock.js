@@ -115,7 +115,7 @@ router.get('/status', async (req, res) => {
 /**
  * POST /api/voucher-lock/lock
  * Lock vouchers up to a given date — queries LOCAL DB, sends ALTER to Tally
- * Body: { date?: 'YYYY-MM-DD', company?: 'For DB' | 'ODBC CHq Mgmt' | 'both' }
+ * Body: { date?: 'YYYY-MM-DD', company?: 'For DB' | db.getCompanyNames().odbc | 'both' }
  */
 router.post('/lock', async (req, res) => {
   try {
@@ -142,7 +142,7 @@ router.post('/lock', async (req, res) => {
     let result = null;
     if (target === 'both') {
       result = await tallyConnector.setVoucherLockUDF(vouchers, 'Yes', defaultCompany);
-      const odbcResult = await tallyConnector.setVoucherLockUDF(vouchers, 'Yes', 'ODBC CHq Mgmt');
+      const odbcResult = await tallyConnector.setVoucherLockUDF(vouchers, 'Yes', db.getCompanyNames().odbc);
       if (result.count === 0) result = odbcResult;
     } else {
       result = await tallyConnector.setVoucherLockUDF(vouchers, 'Yes', target);
@@ -192,7 +192,7 @@ router.post('/unlock', async (req, res) => {
     let result = null;
     if (target === 'both') {
       result = await tallyConnector.setVoucherLockUDF(vouchers, 'No', defaultCompany);
-      const odbcResult = await tallyConnector.setVoucherLockUDF(vouchers, 'No', 'ODBC CHq Mgmt');
+      const odbcResult = await tallyConnector.setVoucherLockUDF(vouchers, 'No', db.getCompanyNames().odbc);
       if (result.count === 0) result = odbcResult;
     } else {
       result = await tallyConnector.setVoucherLockUDF(vouchers, 'No', target);

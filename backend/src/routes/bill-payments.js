@@ -86,7 +86,7 @@ router.post('/', async (req, res) => {
                 chequeNumber: cheque.chequeNumber || '',
                 chequeDate: cheque.chequeDate,
                 narration: `For bill ${voucherNumber}`
-              }, 'ODBC CHq Mgmt');
+              }, db.getCompanyNames().odbc);
 
               if (tallyResult.success) {
                 db.markChequeSynced(chequeResult.id, tallyResult.voucherId);

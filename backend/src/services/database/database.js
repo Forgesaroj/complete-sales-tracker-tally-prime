@@ -516,7 +516,9 @@ class DatabaseService {
         ('smtp_from_email', '', 'Email from address'),
         ('voucher_lock_auto_enabled', 'false', 'Auto-lock vouchers at EOD'),
         ('voucher_lock_auto_time', '18:00', 'Time to auto-lock vouchers'),
-        ('voucher_lock_last_action', '[]', 'Log of lock/unlock actions')
+        ('voucher_lock_last_action', '[]', 'Log of lock/unlock actions'),
+        ('billing_company', 'For DB', 'Billing company name in Tally'),
+        ('odbc_company', 'ODBC CHq Mgmt', 'ODBC Cheque Management company name in Tally')
     `);
 
     // Update existing setting if it was the old default
@@ -898,6 +900,136 @@ class DatabaseService {
     `);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_post_log_date ON cheque_post_log(voucher_date);
+    `);
+
+    // Bank Names (short name → full name mapping)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS bank_names (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        short_name TEXT UNIQUE NOT NULL COLLATE NOCASE,
+        full_name TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Ledger Mapping (billing company party → ODBC company party)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ledger_mapping (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        billing_party TEXT UNIQUE NOT NULL COLLATE NOCASE,
+        odbc_party TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // ODBC Company Vouchers (cheque company)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS odbc_vouchers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        master_id TEXT UNIQUE NOT NULL,
+        alter_id TEXT,
+        voucher_number TEXT,
+        voucher_type TEXT,
+        voucher_date TEXT,
+        party_name TEXT,
+        bank_name TEXT,
+        amount REAL DEFAULT 0,
+        cheque_number TEXT,
+        cheque_date TEXT,
+        narration TEXT,
+        bill_allocations TEXT,
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_odbc_vch_date ON odbc_vouchers(voucher_date);
+      CREATE INDEX IF NOT EXISTS idx_odbc_vch_party ON odbc_vouchers(party_name);
+      CREATE INDEX IF NOT EXISTS idx_odbc_vch_type ON odbc_vouchers(voucher_type);
+    `);
+    // Migration: add guid and ledger_entries columns
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN guid TEXT DEFAULT ""'); } catch {}
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN ledger_entries TEXT DEFAULT "[]"'); } catch {}
+
+    // ODBC Outstanding Bills (ledger-level bill allocations from Tally — reliable source of bill names)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS odbc_outstanding_bills (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        party_name TEXT NOT NULL,
+        bill_name TEXT NOT NULL,
+        bill_date TEXT,
+        closing_balance REAL DEFAULT 0,
+        credit_period INTEGER DEFAULT 0,
+        ageing_days INTEGER DEFAULT 0,
+        ageing_bucket TEXT DEFAULT '0-30',
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(party_name, bill_name)
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_odbc_bills_party ON odbc_outstanding_bills(party_name);
+      CREATE INDEX IF NOT EXISTS idx_odbc_bills_name ON odbc_outstanding_bills(bill_name);
+    `);
+
+    // ==================== CHEQUE COLLECTION MANAGEMENT ====================
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collection_staff (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        phone TEXT,
+        tally_ledger_name TEXT NOT NULL,
+        active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collection_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        staff_id INTEGER NOT NULL REFERENCES collection_staff(id),
+        assigned_date TEXT NOT NULL,
+        return_date TEXT,
+        total_cheques INTEGER DEFAULT 0,
+        total_amount REAL DEFAULT 0,
+        collected_amount REAL DEFAULT 0,
+        returned_count INTEGER DEFAULT 0,
+        bounced_count INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'assigned',
+        notes TEXT,
+        tally_voucher_id TEXT,
+        tally_synced INTEGER DEFAULT 0,
+        tally_sync_error TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collection_batch_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL REFERENCES collection_batches(id) ON DELETE CASCADE,
+        cheque_id INTEGER NOT NULL REFERENCES cheques(id),
+        party_name TEXT NOT NULL,
+        amount REAL NOT NULL,
+        cheque_number TEXT,
+        cheque_date TEXT,
+        bank_name TEXT,
+        status TEXT DEFAULT 'pending',
+        collect_date TEXT,
+        collect_notes TEXT,
+        bill_ref TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_coll_staff_active ON collection_staff(active);
+      CREATE INDEX IF NOT EXISTS idx_coll_batch_staff ON collection_batches(staff_id);
+      CREATE INDEX IF NOT EXISTS idx_coll_batch_status ON collection_batches(status);
+      CREATE INDEX IF NOT EXISTS idx_coll_batch_date ON collection_batches(assigned_date);
+      CREATE INDEX IF NOT EXISTS idx_coll_items_batch ON collection_batch_items(batch_id);
+      CREATE INDEX IF NOT EXISTS idx_coll_items_cheque ON collection_batch_items(cheque_id);
+      CREATE INDEX IF NOT EXISTS idx_coll_items_status ON collection_batch_items(status);
     `);
   }
 
@@ -3733,6 +3865,17 @@ class DatabaseService {
   }
 
   /**
+   * Get configured company names
+   * @returns {{ billing: string, odbc: string }}
+   */
+  getCompanyNames() {
+    return {
+      billing: this.getSetting('billing_company') || 'For DB',
+      odbc: this.getSetting('odbc_company') || 'ODBC CHq Mgmt'
+    };
+  }
+
+  /**
    * Get all settings
    */
   getAllSettings() {
@@ -3802,20 +3945,24 @@ class DatabaseService {
     return this.db.prepare('DELETE FROM outstanding_bills').run();
   }
 
-  getOutstandingBills(party = null) {
+  getOutstandingBills(party = null, overdue = false) {
+    const table = 'odbc_outstanding_bills';
+    const overdueFilter = overdue ? " AND ageing_bucket != '0-30'" : '';
     if (party) {
-      return this.db.prepare('SELECT * FROM outstanding_bills WHERE party_name = ? ORDER BY closing_balance DESC').all(party);
+      return this.db.prepare(`SELECT * FROM ${table} WHERE party_name = ?${overdueFilter} ORDER BY closing_balance DESC`).all(party);
     }
-    return this.db.prepare('SELECT * FROM outstanding_bills ORDER BY closing_balance DESC').all();
+    return this.db.prepare(`SELECT * FROM ${table} WHERE 1=1${overdueFilter} ORDER BY closing_balance DESC`).all();
   }
 
-  getAgeingSummary() {
+  getAgeingSummary(overdue = false) {
+    const table = 'odbc_outstanding_bills';
+    const overdueFilter = overdue ? " WHERE ageing_bucket != '0-30'" : '';
     return this.db.prepare(`
       SELECT ageing_bucket,
         COUNT(*) as bill_count,
-        SUM(closing_balance) as total_amount,
+        SUM(ABS(closing_balance)) as total_amount,
         COUNT(DISTINCT party_name) as party_count
-      FROM outstanding_bills
+      FROM ${table}${overdueFilter}
       GROUP BY ageing_bucket
       ORDER BY CASE ageing_bucket
         WHEN '0-30' THEN 1
@@ -3826,16 +3973,99 @@ class DatabaseService {
     `).all();
   }
 
-  getOutstandingParties() {
+  getOutstandingParties(overdue = false) {
+    const table = 'odbc_outstanding_bills';
+    const overdueFilter = overdue ? " WHERE ageing_bucket != '0-30'" : '';
     return this.db.prepare(`
       SELECT party_name,
-        SUM(closing_balance) as total_outstanding,
+        SUM(ABS(closing_balance)) as total_outstanding,
         COUNT(*) as bill_count,
-        MIN(bill_date) as oldest_bill_date
-      FROM outstanding_bills
+        MIN(bill_date) as oldest_bill_date,
+        MAX(ageing_days) as max_ageing_days
+      FROM ${table}${overdueFilter}
       GROUP BY party_name
       ORDER BY total_outstanding DESC
     `).all();
+  }
+
+  getReceivableSummary() {
+    const table = 'odbc_outstanding_bills';
+    const total = this.db.prepare(`SELECT COUNT(*) as bills, COUNT(DISTINCT party_name) as parties, SUM(ABS(closing_balance)) as amount FROM ${table}`).get();
+    const overdue = this.db.prepare(`SELECT COUNT(*) as bills, COUNT(DISTINCT party_name) as parties, SUM(ABS(closing_balance)) as amount FROM ${table} WHERE ageing_bucket != '0-30'`).get();
+    return { total, overdue };
+  }
+
+  // ==================== BANK NAMES ====================
+
+  getBankNames() {
+    return this.db.prepare('SELECT * FROM bank_names ORDER BY short_name').all();
+  }
+
+  getBankNameByShort(shortName) {
+    return this.db.prepare('SELECT * FROM bank_names WHERE short_name = ? COLLATE NOCASE').get(shortName);
+  }
+
+  createBankName(shortName, fullName) {
+    return this.db.prepare('INSERT INTO bank_names (short_name, full_name) VALUES (?, ?)').run(shortName.toLowerCase().trim(), fullName.trim());
+  }
+
+  updateBankName(id, shortName, fullName) {
+    return this.db.prepare('UPDATE bank_names SET short_name = ?, full_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(shortName.toLowerCase().trim(), fullName.trim(), id);
+  }
+
+  deleteBankName(id) {
+    return this.db.prepare('DELETE FROM bank_names WHERE id = ?').run(id);
+  }
+
+  /**
+   * Auto-save bank short name if not already in bank_names table.
+   * Inserts with empty full_name so user can update it later.
+   */
+  ensureBankName(shortName) {
+    if (!shortName || !shortName.trim()) return;
+    const clean = shortName.toLowerCase().trim();
+    const existing = this.db.prepare('SELECT id FROM bank_names WHERE short_name = ? COLLATE NOCASE').get(clean);
+    if (!existing) {
+      this.db.prepare('INSERT OR IGNORE INTO bank_names (short_name, full_name) VALUES (?, ?)').run(clean, '');
+    }
+  }
+
+  /**
+   * Bulk auto-save bank short names. Efficient for sync operations.
+   */
+  ensureBankNames(shortNames) {
+    const stmt = this.db.prepare('INSERT OR IGNORE INTO bank_names (short_name, full_name) VALUES (?, ?)');
+    const tx = this.db.transaction((names) => {
+      for (const name of names) {
+        if (name && name.trim()) stmt.run(name.toLowerCase().trim(), '');
+      }
+    });
+    tx([...new Set(shortNames.filter(Boolean))]);
+  }
+
+  // ==================== LEDGER MAPPING ====================
+
+  getLedgerMappings() {
+    return this.db.prepare('SELECT * FROM ledger_mapping ORDER BY billing_party').all();
+  }
+
+  getLedgerMapping(billingParty) {
+    return this.db.prepare('SELECT * FROM ledger_mapping WHERE billing_party = ? COLLATE NOCASE').get(billingParty);
+  }
+
+  upsertLedgerMapping(billingParty, odbcParty) {
+    return this.db.prepare(`
+      INSERT INTO ledger_mapping (billing_party, odbc_party) VALUES (?, ?)
+      ON CONFLICT(billing_party) DO UPDATE SET odbc_party = excluded.odbc_party, updated_at = CURRENT_TIMESTAMP
+    `).run(billingParty.trim(), odbcParty.trim());
+  }
+
+  updateLedgerMapping(id, billingParty, odbcParty) {
+    return this.db.prepare('UPDATE ledger_mapping SET billing_party = ?, odbc_party = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(billingParty.trim(), odbcParty.trim(), id);
+  }
+
+  deleteLedgerMapping(id) {
+    return this.db.prepare('DELETE FROM ledger_mapping WHERE id = ?').run(id);
   }
 
   // ==================== STOCK GROUPS ====================
@@ -4015,6 +4245,640 @@ class DatabaseService {
         MAX(posted_at) as last_post
       FROM cheque_post_log
     `).get();
+  }
+
+  // ==================== ODBC VOUCHERS ====================
+
+  /**
+   * Upsert ODBC vouchers (from cheque company)
+   */
+  upsertODBCVouchers(vouchers) {
+    const stmt = this.db.prepare(`
+      INSERT INTO odbc_vouchers (
+        master_id, alter_id, guid, voucher_number, voucher_type, voucher_date,
+        party_name, bank_name, amount, cheque_number, cheque_date,
+        narration, bill_allocations, ledger_entries, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(master_id) DO UPDATE SET
+        alter_id = excluded.alter_id,
+        guid = excluded.guid,
+        voucher_number = excluded.voucher_number,
+        voucher_type = excluded.voucher_type,
+        voucher_date = excluded.voucher_date,
+        party_name = excluded.party_name,
+        bank_name = excluded.bank_name,
+        amount = excluded.amount,
+        cheque_number = excluded.cheque_number,
+        cheque_date = excluded.cheque_date,
+        narration = excluded.narration,
+        bill_allocations = excluded.bill_allocations,
+        ledger_entries = excluded.ledger_entries,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+
+    const upsert = this.db.transaction((items) => {
+      let count = 0;
+      for (const v of items) {
+        stmt.run(
+          String(v.masterId || ''),
+          String(v.alterId || ''),
+          v.guid || '',
+          v.voucherNumber || '',
+          v.voucherType || '',
+          v.voucherDate || '',
+          v.partyName || '',
+          v.bankName || '',
+          v.amount || 0,
+          v.chequeNumber || '',
+          v.chequeDate || '',
+          v.narration || '',
+          JSON.stringify(v.billAllocations || []),
+          JSON.stringify(v.ledgerEntries || [])
+        );
+        count++;
+      }
+      return count;
+    });
+
+    return upsert(vouchers);
+  }
+
+  /**
+   * Get ODBC vouchers from DB with optional filters
+   */
+  getODBCVouchers(filters = {}) {
+    let sql = 'SELECT * FROM odbc_vouchers WHERE 1=1';
+    const params = [];
+
+    if (filters.fromDate) {
+      sql += ' AND voucher_date >= ?';
+      params.push(filters.fromDate);
+    }
+    if (filters.toDate) {
+      sql += ' AND voucher_date <= ?';
+      params.push(filters.toDate);
+    }
+    if (filters.voucherType) {
+      sql += ' AND voucher_type = ?';
+      params.push(filters.voucherType);
+    }
+    if (filters.search) {
+      sql += ' AND (party_name LIKE ? OR voucher_number LIKE ? OR bank_name LIKE ? OR cheque_number LIKE ? OR narration LIKE ?)';
+      const s = `%${filters.search}%`;
+      params.push(s, s, s, s, s);
+    }
+
+    sql += ' ORDER BY voucher_date DESC, id DESC';
+
+    const rows = this.db.prepare(sql).all(...params);
+    return rows.map(r => ({
+      masterId: r.master_id,
+      alterId: r.alter_id,
+      guid: r.guid || '',
+      voucherNumber: r.voucher_number,
+      voucherType: r.voucher_type,
+      voucherDate: r.voucher_date,
+      partyName: r.party_name,
+      bankName: r.bank_name,
+      amount: r.amount,
+      chequeNumber: r.cheque_number,
+      chequeDate: r.cheque_date,
+      narration: r.narration,
+      billAllocations: JSON.parse(r.bill_allocations || '[]'),
+      ledgerEntries: JSON.parse(r.ledger_entries || '[]'),
+      syncedAt: r.synced_at
+    }));
+  }
+
+  /**
+   * Get ODBC voucher stats
+   */
+  getODBCVoucherStats() {
+    return this.db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        COALESCE(SUM(amount), 0) as totalAmount,
+        COUNT(DISTINCT voucher_type) as typeCount,
+        COUNT(DISTINCT party_name) as partyCount,
+        MAX(synced_at) as lastSyncedAt
+      FROM odbc_vouchers
+    `).get();
+  }
+
+  /**
+   * Get distinct voucher types from ODBC vouchers
+   */
+  getODBCVoucherTypes() {
+    return this.db.prepare("SELECT DISTINCT voucher_type FROM odbc_vouchers WHERE voucher_type != '' ORDER BY voucher_type").all()
+      .map(r => r.voucher_type);
+  }
+
+  // ==================== CHEQUE RECEIVABLE (from ODBC Sales vouchers) ====================
+
+  /**
+   * Sync outstanding bills from Tally's ledger-level bill allocations
+   * This is the RELIABLE source: Tally already knows which bills are settled vs pending
+   * @param {Array} parties - Party-grouped array from tallyConnector.getLedgerBillAllocations()
+   *   Each item: { partyName, totalOutstanding, bills: [{ billName, billDate, closingBalance, ... }] }
+   */
+  syncOutstandingBills(parties) {
+    // Clear and re-insert (full refresh from Tally)
+    this.db.prepare('DELETE FROM odbc_outstanding_bills').run();
+
+    const insert = this.db.prepare(`
+      INSERT OR REPLACE INTO odbc_outstanding_bills
+        (party_name, bill_name, bill_date, closing_balance, credit_period, ageing_days, ageing_bucket, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+
+    const today = new Date();
+    const months = { Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11 };
+
+    const txn = this.db.transaction((items) => {
+      let count = 0;
+      for (const party of items) {
+        for (const bill of (party.bills || [])) {
+          // Compute ageing from bill date (format: "18-Dec-2025" or "2-Jan-2026")
+          let ageingDays = bill.ageingDays || 0;
+          if (!ageingDays && bill.billDate) {
+            const parts = String(bill.billDate).split('-');
+            if (parts.length === 3) {
+              const d = new Date(parseInt(parts[2]), months[parts[1]] ?? 0, parseInt(parts[0]));
+              if (!isNaN(d.getTime())) {
+                ageingDays = Math.max(0, Math.floor((today - d) / (1000 * 60 * 60 * 24)));
+              }
+            }
+          }
+          const ageingBucket = ageingDays > 90 ? '90+' : ageingDays > 60 ? '60-90' : ageingDays > 30 ? '30-60' : '0-30';
+
+          insert.run(
+            party.partyName || '',
+            bill.billName || '',
+            bill.billDate || '',
+            bill.closingBalance || 0,
+            bill.creditPeriod || 0,
+            ageingDays,
+            ageingBucket
+          );
+          count++;
+        }
+      }
+      return count;
+    });
+
+    return txn(parties);
+  }
+
+  /**
+   * Sync outstanding bills from Tally's Bill-type collection (flat format)
+   * @param {Array} bills - Flat array from tallyConnector.getODBCChequeReceivable()
+   *   Each item: { billName, partyName, amount, billDate, dueDate, ... }
+   */
+  syncOutstandingBillsFlat(bills) {
+    this.db.prepare('DELETE FROM odbc_outstanding_bills').run();
+
+    const insert = this.db.prepare(`
+      INSERT OR REPLACE INTO odbc_outstanding_bills
+        (party_name, bill_name, bill_date, closing_balance, credit_period, ageing_days, ageing_bucket, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+
+    const today = new Date();
+
+    const txn = this.db.transaction((items) => {
+      let count = 0;
+      for (const bill of items) {
+        let ageingDays = 0;
+        let ageingBucket = '0-30';
+        if (bill.billDate) {
+          const dateStr = String(bill.billDate).replace(/-/g, '');
+          if (dateStr.length === 8) {
+            const d = new Date(parseInt(dateStr.substring(0, 4)), parseInt(dateStr.substring(4, 6)) - 1, parseInt(dateStr.substring(6, 8)));
+            ageingDays = Math.floor((today - d) / (1000 * 60 * 60 * 24));
+          }
+        }
+        if (ageingDays > 90) ageingBucket = '90+';
+        else if (ageingDays > 60) ageingBucket = '60-90';
+        else if (ageingDays > 30) ageingBucket = '30-60';
+
+        insert.run(
+          bill.partyName || '',
+          bill.billName || '',
+          bill.billDate || '',
+          bill.amount || 0,
+          0,
+          ageingDays,
+          ageingBucket
+        );
+        count++;
+      }
+      return count;
+    });
+
+    return txn(bills);
+  }
+
+  /**
+   * Get cheque receivable data using OUTSTANDING BILLS as primary source.
+   *
+   * Strategy:
+   * 1. Outstanding bills from Tally (Bills Receivable report) = PENDING cheques
+   *    Each outstanding bill has party_name + bill_name (contains cheque details) + closing_balance
+   * 2. Sales vouchers that have NO matching outstanding bill for the same party = SETTLED cheques
+   *    Match by comparing per-party totals since voucher-level bill names are empty
+   * 3. Bill name formats: "chequeNum, bankName, accountHolder" or "chequeNum/bankShortName"
+   */
+  getODBCChequeReceivable(fromDate, toDate, party) {
+    // Get outstanding bills (the source of truth for pending cheques)
+    const outstandingBills = this.db.prepare('SELECT * FROM odbc_outstanding_bills ORDER BY party_name, bill_name').all();
+
+    // Build outstanding lookup: partyName -> { totalOutstanding, bills[] }
+    const outstandingByParty = {};
+    for (const ob of outstandingBills) {
+      if (!outstandingByParty[ob.party_name]) {
+        outstandingByParty[ob.party_name] = { total: 0, bills: [] };
+      }
+      outstandingByParty[ob.party_name].total += Math.abs(ob.closing_balance);
+      outstandingByParty[ob.party_name].bills.push(ob);
+    }
+
+    // Get ALL Sales vouchers (each represents cheques posted)
+    const allSales = this.db.prepare(
+      "SELECT master_id, voucher_number, voucher_date, party_name, amount, bill_allocations, narration FROM odbc_vouchers WHERE voucher_type = 'Sales' ORDER BY voucher_date DESC, CAST(master_id AS INTEGER) DESC"
+    ).all();
+
+    // Build per-party Sales totals for settled calculation
+    const salesTotalByParty = {};
+    for (const sv of allSales) {
+      salesTotalByParty[sv.party_name] = (salesTotalByParty[sv.party_name] || 0) + Math.abs(sv.amount);
+    }
+
+    const allCheques = [];
+
+    if (outstandingBills.length > 0) {
+      // === PENDING CHEQUES: directly from outstanding bills ===
+      // Each outstanding bill IS a pending cheque with proper bill name
+      const usedOutstandingKeys = new Set();
+
+      for (const ob of outstandingBills) {
+        const rawBillName = ob.bill_name || '';
+        const amt = Math.abs(ob.closing_balance);
+
+        // Parse bill name: "chequeNum, bankName, accountHolder" or "chequeNum/bankShortName"
+        let chequeNumber = '', bankName = '', accountHolder = '';
+        if (rawBillName.includes(',')) {
+          const parts = rawBillName.split(',').map(s => s.trim());
+          chequeNumber = parts[0] || '';
+          bankName = parts[1] || '';
+          accountHolder = parts[2] || '';
+        } else if (rawBillName.includes('/')) {
+          const parts = rawBillName.split('/').map(s => s.trim());
+          chequeNumber = parts[0] || '';
+          bankName = parts[1] || '';
+        } else {
+          chequeNumber = rawBillName;
+        }
+
+        // Normalize bill ref to chequeNumber/bankShortName
+        const billRef = bankName ? `${chequeNumber}/${bankName}` : chequeNumber;
+
+        // Try to find matching Sales voucher for date/voucher number
+        const matchingVoucher = allSales.find(sv => sv.party_name === ob.party_name);
+
+        usedOutstandingKeys.add(`${ob.party_name}::${rawBillName}`);
+
+        allCheques.push({
+          masterId: matchingVoucher?.master_id || '',
+          voucherNumber: matchingVoucher?.voucher_number || '',
+          voucherDate: ob.bill_date || matchingVoucher?.voucher_date || '',
+          partyName: ob.party_name,
+          billName: billRef,
+          billType: 'New Ref',
+          amount: amt,
+          outstandingAmount: amt,
+          billDate: ob.bill_date || '',
+          chequeNumber,
+          bankName,
+          accountHolder,
+          settled: false,
+          status: 'pending',
+          ageingDays: ob.ageing_days || 0,
+          ageingBucket: ob.ageing_bucket || '0-30',
+          narration: matchingVoucher?.narration || ''
+        });
+      }
+
+      // === SETTLED CHEQUES: Sales vouchers for parties with NO outstanding ===
+      // or parties where settled amount = totalSales - totalOutstanding > 0
+      for (const sv of allSales) {
+        const partyOutstanding = outstandingByParty[sv.party_name];
+
+        if (!partyOutstanding) {
+          // Party has ZERO outstanding → all cheques from this party are settled
+          const amt = Math.abs(sv.amount);
+          const narr = sv.narration || '';
+
+          // Parse voucher_number for cheque ref (format: "chequeNum/bankShortName" or "datePrefix/partyName")
+          const vn = sv.voucher_number || '';
+          let sChq = '', sBank = '';
+          if (vn.includes('/')) {
+            const parts = vn.split('/').map(s => s.trim());
+            sChq = parts[0] || '';
+            sBank = parts[1] || '';
+          }
+          const settledRef = sBank ? `${sChq}/${sBank}` : vn;
+
+          allCheques.push({
+            masterId: sv.master_id,
+            voucherNumber: sv.voucher_number,
+            voucherDate: sv.voucher_date,
+            partyName: sv.party_name,
+            billName: settledRef,
+            billType: 'New Ref',
+            amount: amt,
+            outstandingAmount: 0,
+            billDate: '',
+            chequeNumber: sChq,
+            bankName: sBank,
+            settled: true,
+            status: 'settled',
+            ageingDays: 0,
+            ageingBucket: '',
+            narration: narr
+          });
+        }
+        // If party HAS outstanding, those pending cheques are already added above
+        // The difference (totalSales - totalOutstanding) = settled amount, but we can't
+        // identify WHICH specific vouchers are settled without bill names
+      }
+    } else {
+      // FALLBACK: No outstanding bills synced, show all Sales vouchers as unknown
+      for (const sv of allSales) {
+        const amt = Math.abs(sv.amount);
+        const vn = sv.voucher_number || '';
+        let fChq = '', fBank = '';
+        if (vn.includes('/')) {
+          const parts = vn.split('/').map(s => s.trim());
+          fChq = parts[0] || '';
+          fBank = parts[1] || '';
+        }
+        const fallbackRef = fBank ? `${fChq}/${fBank}` : vn;
+        allCheques.push({
+          masterId: sv.master_id,
+          voucherNumber: sv.voucher_number,
+          voucherDate: sv.voucher_date,
+          partyName: sv.party_name,
+          billName: fallbackRef,
+          billType: '',
+          amount: amt,
+          outstandingAmount: amt,
+          billDate: '',
+          chequeNumber: fChq,
+          bankName: fBank,
+          settled: false,
+          status: 'unknown',
+          ageingDays: 0,
+          ageingBucket: '',
+          narration: sv.narration || ''
+        });
+      }
+    }
+
+    // Apply display filters
+    let result = allCheques;
+    if (fromDate) {
+      const fd = fromDate.replace(/-/g, '');
+      result = result.filter(c => c.voucherDate >= fd);
+    }
+    if (toDate) {
+      const td = toDate.replace(/-/g, '');
+      result = result.filter(c => c.voucherDate <= td);
+    }
+    if (party) {
+      const p = party.toLowerCase();
+      result = result.filter(c => c.partyName.toLowerCase().includes(p));
+    }
+
+    return result;
+  }
+
+  // ==================== CHEQUE COLLECTION ====================
+
+  createCollectionStaff(data) {
+    const stmt = this.db.prepare(`
+      INSERT INTO collection_staff (name, phone, tally_ledger_name) VALUES (?, ?, ?)
+    `);
+    const result = stmt.run(data.name, data.phone || '', data.tallyLedgerName);
+    return { id: result.lastInsertRowid };
+  }
+
+  updateCollectionStaff(id, data) {
+    const fields = [];
+    const values = [];
+    if (data.name !== undefined) { fields.push('name = ?'); values.push(data.name); }
+    if (data.phone !== undefined) { fields.push('phone = ?'); values.push(data.phone); }
+    if (data.tallyLedgerName !== undefined) { fields.push('tally_ledger_name = ?'); values.push(data.tallyLedgerName); }
+    fields.push("updated_at = CURRENT_TIMESTAMP");
+    values.push(id);
+    return this.db.prepare(`UPDATE collection_staff SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  deactivateCollectionStaff(id) {
+    return this.db.prepare('UPDATE collection_staff SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+  }
+
+  getCollectionStaff(activeOnly = true) {
+    const sql = activeOnly
+      ? 'SELECT * FROM collection_staff WHERE active = 1 ORDER BY name'
+      : 'SELECT * FROM collection_staff ORDER BY name';
+    return this.db.prepare(sql).all();
+  }
+
+  getCollectionStaffById(id) {
+    return this.db.prepare('SELECT * FROM collection_staff WHERE id = ?').get(id);
+  }
+
+  createCollectionBatch(staffId, chequeIds) {
+    const staff = this.getCollectionStaffById(staffId);
+    if (!staff) throw new Error('Staff not found');
+
+    const getCheque = this.db.prepare('SELECT * FROM cheques WHERE id = ?');
+    const cheques = chequeIds.map(id => {
+      const c = getCheque.get(id);
+      if (!c) throw new Error(`Cheque ${id} not found`);
+      return c;
+    });
+
+    const totalAmount = cheques.reduce((s, c) => s + (c.amount || 0), 0);
+    const now = new Date().toISOString().split('T')[0].replace(/-/g, '');
+
+    const tx = this.db.transaction(() => {
+      const batchResult = this.db.prepare(`
+        INSERT INTO collection_batches (staff_id, assigned_date, total_cheques, total_amount)
+        VALUES (?, ?, ?, ?)
+      `).run(staffId, now, cheques.length, totalAmount);
+      const batchId = batchResult.lastInsertRowid;
+
+      const insertItem = this.db.prepare(`
+        INSERT INTO collection_batch_items (batch_id, cheque_id, party_name, amount, cheque_number, cheque_date, bank_name, bill_ref)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const updateCheque = this.db.prepare("UPDATE cheques SET status = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+
+      for (const c of cheques) {
+        insertItem.run(batchId, c.id, c.party_name, c.amount, c.cheque_number || '', c.cheque_date || '', c.bank_name || '', c.voucher_number || c.bill_id || '');
+        updateCheque.run(c.id);
+      }
+
+      return { batchId, itemCount: cheques.length, totalAmount };
+    });
+
+    return tx();
+  }
+
+  getCollectionBatches(filters = {}) {
+    let sql = `
+      SELECT b.*, s.name as staff_name, s.phone as staff_phone, s.tally_ledger_name
+      FROM collection_batches b
+      JOIN collection_staff s ON b.staff_id = s.id
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (filters.status) { sql += ' AND b.status = ?'; params.push(filters.status); }
+    if (filters.staffId) { sql += ' AND b.staff_id = ?'; params.push(filters.staffId); }
+    if (filters.fromDate) { sql += ' AND b.assigned_date >= ?'; params.push(filters.fromDate); }
+    if (filters.toDate) { sql += ' AND b.assigned_date <= ?'; params.push(filters.toDate); }
+
+    sql += ' ORDER BY b.created_at DESC';
+    return this.db.prepare(sql).all(...params);
+  }
+
+  getCollectionBatchById(id) {
+    return this.db.prepare(`
+      SELECT b.*, s.name as staff_name, s.phone as staff_phone, s.tally_ledger_name
+      FROM collection_batches b
+      JOIN collection_staff s ON b.staff_id = s.id
+      WHERE b.id = ?
+    `).get(id);
+  }
+
+  getCollectionBatchItems(batchId) {
+    return this.db.prepare('SELECT * FROM collection_batch_items WHERE batch_id = ? ORDER BY id').all(batchId);
+  }
+
+  updateBatchItemStatus(itemId, status, notes = '') {
+    const item = this.db.prepare('SELECT * FROM collection_batch_items WHERE id = ?').get(itemId);
+    if (!item) throw new Error('Batch item not found');
+
+    const tx = this.db.transaction(() => {
+      const now = new Date().toISOString();
+      this.db.prepare(`
+        UPDATE collection_batch_items SET status = ?, collect_date = ?, collect_notes = ?, updated_at = ?
+        WHERE id = ?
+      `).run(status, status === 'collected' ? now : null, notes, now, itemId);
+
+      // Update parent cheque status
+      if (status === 'collected') {
+        this.db.prepare("UPDATE cheques SET status = 'deposited', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.cheque_id);
+      } else if (status === 'returned') {
+        this.db.prepare("UPDATE cheques SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.cheque_id);
+      } else if (status === 'bounced') {
+        this.db.prepare("UPDATE cheques SET status = 'bounced', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.cheque_id);
+      }
+
+      // Recalculate batch totals
+      this._recalcBatchTotals(item.batch_id);
+    });
+    tx();
+  }
+
+  bulkUpdateBatchItems(batchId, updates) {
+    // updates: [{ itemId, status, notes }]
+    const tx = this.db.transaction(() => {
+      for (const u of updates) {
+        const item = this.db.prepare('SELECT * FROM collection_batch_items WHERE id = ? AND batch_id = ?').get(u.itemId, batchId);
+        if (!item) continue;
+
+        const now = new Date().toISOString();
+        this.db.prepare(`
+          UPDATE collection_batch_items SET status = ?, collect_date = ?, collect_notes = ?, updated_at = ?
+          WHERE id = ?
+        `).run(u.status, u.status === 'collected' ? now : null, u.notes || '', now, u.itemId);
+
+        if (u.status === 'collected') {
+          this.db.prepare("UPDATE cheques SET status = 'deposited', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.cheque_id);
+        } else if (u.status === 'returned') {
+          this.db.prepare("UPDATE cheques SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.cheque_id);
+        } else if (u.status === 'bounced') {
+          this.db.prepare("UPDATE cheques SET status = 'bounced', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.cheque_id);
+        }
+      }
+      this._recalcBatchTotals(batchId);
+    });
+    tx();
+  }
+
+  _recalcBatchTotals(batchId) {
+    const stats = this.db.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN status = 'collected' THEN amount ELSE 0 END), 0) as collected_amount,
+        COUNT(CASE WHEN status = 'returned' THEN 1 END) as returned_count,
+        COUNT(CASE WHEN status = 'bounced' THEN 1 END) as bounced_count
+      FROM collection_batch_items WHERE batch_id = ?
+    `).get(batchId);
+
+    this.db.prepare(`
+      UPDATE collection_batches SET collected_amount = ?, returned_count = ?, bounced_count = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(stats.collected_amount, stats.returned_count, stats.bounced_count, batchId);
+  }
+
+  completeBatch(batchId) {
+    const now = new Date().toISOString();
+    return this.db.prepare(`
+      UPDATE collection_batches SET status = 'completed', return_date = ?, updated_at = ?
+      WHERE id = ?
+    `).run(now, now, batchId);
+  }
+
+  markBatchTallySynced(batchId, tallyVoucherId, error = null) {
+    return this.db.prepare(`
+      UPDATE collection_batches SET tally_synced = ?, tally_voucher_id = ?, tally_sync_error = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(error ? 0 : 1, tallyVoucherId || '', error || '', batchId);
+  }
+
+  getAssignableCheques() {
+    return this.db.prepare(`
+      SELECT c.* FROM cheques c
+      WHERE c.status = 'pending'
+        AND c.id NOT IN (
+          SELECT ci.cheque_id FROM collection_batch_items ci
+          JOIN collection_batches cb ON ci.batch_id = cb.id
+          WHERE cb.status IN ('assigned', 'in_progress')
+          AND ci.status = 'pending'
+        )
+      ORDER BY c.cheque_date ASC, c.party_name ASC
+    `).all();
+  }
+
+  getCollectionStats(staffId = null) {
+    let sql = `
+      SELECT
+        COUNT(*) as totalBatches,
+        COALESCE(SUM(total_cheques), 0) as totalCheques,
+        COALESCE(SUM(collected_amount), 0) as totalCollected,
+        COALESCE(SUM(total_amount), 0) as totalAssigned,
+        COUNT(CASE WHEN status = 'assigned' THEN 1 END) as activeBatches,
+        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completedBatches,
+        COALESCE(SUM(returned_count), 0) as totalReturned,
+        COALESCE(SUM(bounced_count), 0) as totalBounced
+      FROM collection_batches
+    `;
+    const params = [];
+    if (staffId) { sql += ' WHERE staff_id = ?'; params.push(staffId); }
+    return this.db.prepare(sql).get(...params);
   }
 
   /**
