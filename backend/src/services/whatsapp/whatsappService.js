@@ -1,7 +1,7 @@
-import pkg from 'whatsapp-web.js';
-const { Client, LocalAuth, MessageMedia } = pkg;
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import fs from 'fs';
+import path from 'path';
 import { db } from '../database/database.js';
 import {
   formatPaymentReminder,
@@ -12,16 +12,19 @@ import {
 
 const TEST_SERVER = process.env.WHATSAPP_TEST_URL || 'http://localhost:3099';
 const isTestMode = () => process.env.WHATSAPP_TEST === 'true';
+const SESSION_DIR = path.resolve('./data/baileys-session');
 
 class WhatsAppService {
   constructor() {
-    this.client = null;
+    this.sock = null;
     this.io = null;
     this.status = 'disconnected'; // disconnected, qr_pending, connecting, ready, error
     this.qrCode = null; // data URL
     this.clientInfo = null;
     this.lastError = null;
     this.isInitializing = false;
+    this.saveCreds = null;
+    this.onMessageReceived = null; // callback for incoming messages
   }
 
   setSocketIO(io) {
@@ -59,7 +62,6 @@ class WhatsAppService {
       this.isInitializing = true;
       this.lastError = null;
       try {
-        // Check test server is reachable
         const res = await fetch(`${TEST_SERVER}/api/messages`);
         if (!res.ok) throw new Error(`Test server returned ${res.status}`);
         this.clientInfo = { pushname: 'TEST MODE', wid: 'test@localhost', platform: 'test-server' };
@@ -76,84 +78,142 @@ class WhatsAppService {
       }
     }
 
-    // ===== REAL MODE =====
+    // ===== REAL MODE (Baileys) =====
     this.isInitializing = true;
     this.lastError = null;
 
     try {
-      // Destroy existing client if any
-      if (this.client) {
-        try { await this.client.destroy(); } catch (e) { /* ignore */ }
-        this.client = null;
+      // Close existing socket if any
+      if (this.sock) {
+        try { this.sock.end(undefined); } catch (e) { /* ignore */ }
+        this.sock = null;
       }
 
-      this.client = new Client({
-        authStrategy: new LocalAuth({
-          dataPath: './data/whatsapp-session'
-        }),
-        puppeteer: {
-          headless: true,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-extensions'
-          ]
-        }
-      });
+      // Ensure session directory exists
+      if (!fs.existsSync(SESSION_DIR)) {
+        fs.mkdirSync(SESSION_DIR, { recursive: true });
+      }
 
-      // QR code event
-      this.client.on('qr', async (qr) => {
-        try {
-          const qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
-          this.qrCode = qrDataUrl;
-          this.emitStatus('qr_pending', { qr: qrDataUrl });
-          console.log('[WhatsApp] QR code received — scan with phone');
-        } catch (e) {
-          console.error('[WhatsApp] QR generation error:', e.message);
-        }
-      });
+      const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+      this.saveCreds = saveCreds;
 
-      // Authenticated (session restored, no QR needed)
-      this.client.on('authenticated', () => {
-        this.qrCode = null;
-        this.emitStatus('connecting');
-        console.log('[WhatsApp] Authenticated (session restored)');
-      });
-
-      // Ready
-      this.client.on('ready', () => {
-        this.qrCode = null;
-        this.clientInfo = this.client.info ? {
-          pushname: this.client.info.pushname,
-          wid: this.client.info.wid?._serialized || this.client.info.wid,
-          platform: this.client.info.platform
-        } : null;
-        this.isInitializing = false;
-        this.emitStatus('ready', { clientInfo: this.clientInfo });
-        console.log('[WhatsApp] Ready:', this.clientInfo?.pushname || 'unknown');
-      });
-
-      // Auth failure
-      this.client.on('auth_failure', (msg) => {
-        this.lastError = String(msg);
-        this.isInitializing = false;
-        this.emitStatus('error', { error: String(msg) });
-        console.error('[WhatsApp] Auth failure:', msg);
-      });
-
-      // Disconnected
-      this.client.on('disconnected', (reason) => {
-        this.clientInfo = null;
-        this.qrCode = null;
-        this.isInitializing = false;
-        this.emitStatus('disconnected', { reason });
-        console.log('[WhatsApp] Disconnected:', reason);
-      });
+      const { version } = await fetchLatestBaileysVersion();
 
       this.emitStatus('connecting');
-      await this.client.initialize();
+
+      this.sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: true,
+        browser: ['Tally Dashboard', 'Chrome', '1.0.0'],
+        generateHighQualityLinkPreview: false,
+        syncFullHistory: false
+      });
+
+      // Save credentials on update
+      this.sock.ev.on('creds.update', saveCreds);
+
+      // Connection updates (QR, connected, disconnected)
+      this.sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        // QR code received — show to user
+        if (qr) {
+          try {
+            const qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
+            this.qrCode = qrDataUrl;
+            this.emitStatus('qr_pending', { qr: qrDataUrl });
+            console.log('[WhatsApp] QR code received — scan with phone (Settings > Linked Devices)');
+          } catch (e) {
+            console.error('[WhatsApp] QR generation error:', e.message);
+          }
+        }
+
+        if (connection === 'open') {
+          // Connected!
+          this.qrCode = null;
+          this.isInitializing = false;
+          const me = this.sock.user;
+          this.clientInfo = {
+            pushname: me?.name || 'Unknown',
+            wid: me?.id || '',
+            platform: 'Baileys'
+          };
+          this.emitStatus('ready', { clientInfo: this.clientInfo });
+          console.log('[WhatsApp] Connected as:', this.clientInfo.pushname, this.clientInfo.wid);
+        }
+
+        if (connection === 'close') {
+          this.qrCode = null;
+          const statusCode = lastDisconnect?.error?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+          if (statusCode === DisconnectReason.loggedOut) {
+            // Session expired — user logged out from phone
+            this.clientInfo = null;
+            this.isInitializing = false;
+            this.lastError = 'Logged out from phone. Please re-scan QR code.';
+            this.emitStatus('disconnected', { reason: 'logged_out' });
+            console.log('[WhatsApp] Logged out — session cleared');
+            // Delete session files so fresh QR appears next time
+            try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
+          } else if (shouldReconnect) {
+            // Auto-reconnect
+            console.log('[WhatsApp] Disconnected, reconnecting...', statusCode);
+            this.emitStatus('connecting');
+            // Re-initialize after short delay
+            setTimeout(() => {
+              this.isInitializing = false;
+              this.status = 'disconnected';
+              this.initialize().catch(e => console.error('[WhatsApp] Reconnect failed:', e.message));
+            }, 3000);
+          } else {
+            this.clientInfo = null;
+            this.isInitializing = false;
+            this.lastError = `Disconnected: ${statusCode}`;
+            this.emitStatus('error', { error: this.lastError });
+          }
+        }
+      });
+
+      // Incoming messages
+      this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
+        for (const msg of messages) {
+          if (msg.key.fromMe) continue; // skip our own messages
+          const text = msg.message?.conversation
+            || msg.message?.extendedTextMessage?.text
+            || '';
+          if (!text) continue;
+
+          const sender = msg.key.remoteJid;
+          const pushName = msg.pushName || '';
+          console.log(`[WhatsApp] Incoming from ${pushName} (${sender}): ${text.slice(0, 80)}`);
+
+          // Log incoming message
+          try {
+            db.logWhatsAppMessage({
+              phone: sender?.replace('@s.whatsapp.net', '') || '',
+              party_name: pushName,
+              message_type: 'text',
+              direction: 'incoming',
+              message_body: text,
+              status: 'received',
+              wa_message_id: msg.key.id
+            });
+          } catch {}
+
+          // Call handler if registered
+          if (this.onMessageReceived) {
+            try {
+              await this.onMessageReceived({ sender, pushName, text, message: msg });
+            } catch (e) {
+              console.error('[WhatsApp] Message handler error:', e.message);
+            }
+          }
+        }
+      });
+
     } catch (error) {
       this.lastError = error.message;
       this.isInitializing = false;
@@ -163,7 +223,12 @@ class WhatsAppService {
     }
   }
 
-  // Format phone number to WhatsApp chat ID
+  // Register a handler for incoming messages
+  onMessage(handler) {
+    this.onMessageReceived = handler;
+  }
+
+  // Format phone number to WhatsApp JID
   formatPhoneNumber(phone) {
     let clean = String(phone).replace(/[\s\-\+\(\)]/g, '');
     // Nepal: 10-digit starting with 9, prefix 977
@@ -171,10 +236,10 @@ class WhatsAppService {
     if (!clean.startsWith('977') && clean.length === 10 && clean.startsWith('9')) {
       clean = '977' + clean;
     }
-    return clean + '@c.us';
+    return clean + '@s.whatsapp.net';
   }
 
-  // Format phone for test server (just digits, no @c.us)
+  // Format phone for test server (just digits)
   cleanPhone(phone) {
     let clean = String(phone).replace(/[\s\-\+\(\)]/g, '');
     if (clean.startsWith('0')) clean = '977' + clean.slice(1);
@@ -230,10 +295,10 @@ class WhatsAppService {
       }
     }
 
-    // ===== REAL MODE =====
-    const chatId = this.formatPhoneNumber(phone);
+    // ===== REAL MODE (Baileys) =====
+    const jid = this.formatPhoneNumber(phone);
     try {
-      const result = await this.client.sendMessage(chatId, message);
+      const result = await this.sock.sendMessage(jid, { text: message });
       db.logWhatsAppMessage({
         phone,
         party_name: partyName,
@@ -241,10 +306,10 @@ class WhatsAppService {
         template_name: templateName,
         message_body: message,
         status: 'sent',
-        wa_message_id: result.id?.id || null,
+        wa_message_id: result?.key?.id || null,
         related_voucher: relatedVoucher
       });
-      return { success: true, messageId: result.id?.id };
+      return { success: true, messageId: result?.key?.id };
     } catch (error) {
       db.logWhatsAppMessage({
         phone,
@@ -309,20 +374,31 @@ class WhatsAppService {
       }
     }
 
-    // ===== REAL MODE =====
-    const chatId = this.formatPhoneNumber(phone);
+    // ===== REAL MODE (Baileys) =====
+    const jid = this.formatPhoneNumber(phone);
     try {
-      const media = MessageMedia.fromFilePath(filePath);
-      const result = await this.client.sendMessage(chatId, media, { caption });
+      const fileBuffer = fs.readFileSync(filePath);
+      const fileName = filePath.split('/').pop();
+      const ext = fileName.split('.').pop().toLowerCase();
+      const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+
+      let msgContent;
+      if (imageExts.includes(ext)) {
+        msgContent = { image: fileBuffer, caption, fileName };
+      } else {
+        msgContent = { document: fileBuffer, caption, fileName, mimetype: 'application/octet-stream' };
+      }
+
+      const result = await this.sock.sendMessage(jid, msgContent);
       db.logWhatsAppMessage({
         phone,
         party_name: partyName,
         message_type: 'media',
         message_body: caption || filePath,
         status: 'sent',
-        wa_message_id: result.id?.id || null
+        wa_message_id: result?.key?.id || null
       });
-      return { success: true, messageId: result.id?.id };
+      return { success: true, messageId: result?.key?.id };
     } catch (error) {
       db.logWhatsAppMessage({
         phone,
@@ -362,11 +438,12 @@ class WhatsAppService {
 
   // Check if number is registered on WhatsApp
   async isRegistered(phone) {
-    if (isTestMode()) return true; // always true in test mode
+    if (isTestMode()) return true;
     if (this.status !== 'ready') return false;
     try {
-      const chatId = this.formatPhoneNumber(phone);
-      return await this.client.isRegisteredUser(chatId);
+      const jid = this.formatPhoneNumber(phone);
+      const [result] = await this.sock.onWhatsApp(jid.replace('@s.whatsapp.net', ''));
+      return result?.exists || false;
     } catch {
       return false;
     }
@@ -376,9 +453,18 @@ class WhatsAppService {
   resolvePhone(partyName) {
     const contacts = db.getWhatsAppContactByParty(partyName);
     if (contacts.length > 0) return contacts[0].phone;
-    // Fallback to Tally party phone
     const party = db.db.prepare("SELECT phone FROM parties WHERE name = ? AND phone IS NOT NULL AND phone != ''").get(partyName);
     return party?.phone || null;
+  }
+
+  // Reply to a message (for command responses)
+  async reply(jid, text, quotedMsg = null) {
+    if (this.status !== 'ready' || isTestMode()) return;
+    try {
+      await this.sock.sendMessage(jid, { text }, quotedMsg ? { quoted: quotedMsg } : undefined);
+    } catch (e) {
+      console.error('[WhatsApp] Reply error:', e.message);
+    }
   }
 
   // Logout
@@ -388,15 +474,18 @@ class WhatsAppService {
       this.emitStatus('disconnected');
       return;
     }
-    if (this.client) {
+    if (this.sock) {
       try {
-        await this.client.logout();
+        await this.sock.logout();
       } catch (e) {
         console.error('[WhatsApp] Logout error:', e.message);
       }
+      this.sock = null;
       this.clientInfo = null;
       this.qrCode = null;
       this.emitStatus('disconnected');
+      // Clear session so fresh QR next time
+      try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
     }
   }
 
@@ -407,13 +496,13 @@ class WhatsAppService {
       this.status = 'disconnected';
       return;
     }
-    if (this.client) {
+    if (this.sock) {
       try {
-        await this.client.destroy();
+        this.sock.end(undefined);
       } catch (e) {
         console.error('[WhatsApp] Destroy error:', e.message);
       }
-      this.client = null;
+      this.sock = null;
       this.clientInfo = null;
       this.qrCode = null;
       this.status = 'disconnected';
