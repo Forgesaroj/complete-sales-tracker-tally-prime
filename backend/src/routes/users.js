@@ -112,6 +112,86 @@ router.patch('/:id/notifications', (req, res) => {
   }
 });
 
+// ==================== ROLE PERMISSIONS ====================
+
+/**
+ * GET /api/users/my-permissions
+ * Get allowed pages for the current user (by userId query param)
+ */
+router.get('/my-permissions', (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+
+    const user = db.getUserById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const perms = db.getRolePermissions(user.role);
+    // If no permissions configured for this role, return empty (means all allowed)
+    if (perms.length === 0) {
+      return res.json({ role: user.role, allowedPages: [] });
+    }
+    // Return only visible pages
+    const allowedPages = perms.filter(p => p.visible).map(p => p.page_key);
+    res.json({ role: user.role, allowedPages });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/users/permissions
+ * Get all role permissions (for admin settings)
+ */
+router.get('/permissions', (req, res) => {
+  try {
+    const all = db.getAllRolePermissions();
+    // Group by role
+    const grouped = {};
+    for (const p of all) {
+      if (!grouped[p.role]) grouped[p.role] = [];
+      grouped[p.role].push({ pageKey: p.page_key, visible: !!p.visible });
+    }
+    res.json({ success: true, permissions: grouped });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/users/permissions/:role
+ * Get permissions for a specific role
+ */
+router.get('/permissions/:role', (req, res) => {
+  try {
+    const perms = db.getRolePermissions(req.params.role);
+    res.json({
+      success: true,
+      role: req.params.role,
+      permissions: perms.map(p => ({ pageKey: p.page_key, visible: !!p.visible }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/users/permissions/:role
+ * Bulk save permissions for a role
+ */
+router.post('/permissions/:role', (req, res) => {
+  try {
+    const { permissions } = req.body;
+    if (!Array.isArray(permissions)) {
+      return res.status(400).json({ error: 'permissions array is required' });
+    }
+    db.bulkSetRolePermissions(req.params.role, permissions);
+    res.json({ success: true, saved: permissions.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== NOTIFICATIONS ====================
 
 /**

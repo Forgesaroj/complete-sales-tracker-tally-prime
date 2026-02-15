@@ -13,6 +13,8 @@ import config from '../config/default.js';
 
 const router = Router();
 
+function co() { return db.getCompanyNames(); }
+
 // ==================== DASHBOARD ====================
 
 /**
@@ -2421,7 +2423,7 @@ router.post('/fonepay/qr/generate', async (req, res) => {
  */
 router.post('/fonepay/qr/generate-for-bill', async (req, res) => {
   try {
-    const { amount, voucherNumber, partyName, billDate, companyName = 'FOR DB' } = req.body;
+    const { amount, voucherNumber, partyName, billDate, companyName = config.tally.companyName || 'FOR DB' } = req.body;
 
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Valid amount is required' });
@@ -2464,7 +2466,7 @@ router.post('/fonepay/qr/generate-for-bill', async (req, res) => {
  */
 router.post('/fonepay/link-to-bill', (req, res) => {
   try {
-    const { transactionId, voucherNumber, partyName, billDate, companyName = 'FOR DB' } = req.body;
+    const { transactionId, voucherNumber, partyName, billDate, companyName = config.tally.companyName || 'FOR DB' } = req.body;
 
     if (!transactionId || !voucherNumber) {
       return res.status(400).json({ error: 'transactionId and voucherNumber are required' });
@@ -2540,7 +2542,7 @@ router.get('/fonepay/for-bill/:voucherNumber', (req, res) => {
  */
 router.post('/fonepay/auto-match', (req, res) => {
   try {
-    const { amount, date, voucherNumber, partyName, billDate, companyName = 'FOR DB' } = req.body;
+    const { amount, date, voucherNumber, partyName, billDate, companyName = config.tally.companyName || 'FOR DB' } = req.body;
 
     if (!amount || !voucherNumber) {
       return res.status(400).json({ error: 'amount and voucherNumber are required' });
@@ -2798,7 +2800,7 @@ router.post('/cheque-receipt-activity', async (req, res) => {
             chequeNumber: cheque.chequeNumber || '',
             chequeDate: cheque.chequeDate,
             narration: `For bill ${voucherNumber}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
 
           if (syncResult.success) {
             db.markChequeSynced(result.id, syncResult.voucherId);
@@ -2883,7 +2885,7 @@ router.put('/cheque-receipt-activity/:chequeId/update-date', async (req, res) =>
           chequeNumber: updated.cheque_number || '',
           chequeDate,
           narration: updated.narration || `Cheque from ${updated.party_name}`
-        }, 'ODBC CHq Mgmt');
+        }, co().odbc);
 
         if (result.success) {
           db.markChequeSynced(chequeId, result.voucherId);
@@ -2950,7 +2952,7 @@ router.post('/cheque-receipt-activity/:chequeId/add-breakdown', async (req, res)
             partyName: existing.party_name, amount,
             bankName: 'Cheque in Hand', chequeNumber: chequeNumber || '', chequeDate,
             narration: `Breakdown for ${billLink.voucher_number}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
           if (syncResult.success) { db.markChequeSynced(result.id, syncResult.voucherId); synced = true; }
         }
       } catch (e) { /* ignore */ }
@@ -3079,7 +3081,7 @@ router.post('/cheques', async (req, res) => {
             chequeNumber: chequeNumber || '',
             chequeDate,
             narration: narration || `Cheque from ${partyName}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
 
           if (tallyResult.success) {
             db.markChequeSynced(chequeId, tallyResult.voucherId || null);
@@ -3326,7 +3328,7 @@ router.put('/cheques/:id/confirm-date', async (req, res) => {
             chequeNumber: updatedCheque.cheque_number || '',
             chequeDate: chequeDate,
             narration: updatedCheque.narration || `Cheque from ${updatedCheque.party_name}`
-          }, 'ODBC CHq Mgmt');
+          }, co().odbc);
 
           if (tallyResult.success) {
             db.markChequeSynced(chequeId, tallyResult.voucherId || null);
@@ -3454,7 +3456,7 @@ router.post('/cheques/sync-pending', async (req, res) => {
           chequeNumber: cheque.cheque_number || '',
           chequeDate: cheque.cheque_date,
           narration: cheque.narration || `Cheque from ${cheque.party_name}`
-        }, 'ODBC CHq Mgmt');
+        }, co().odbc);
 
         if (result.success) {
           db.markChequeSynced(cheque.id, result.voucherId || null);
@@ -3617,7 +3619,7 @@ router.post('/bill-payments', async (req, res) => {
                 chequeNumber: cheque.chequeNumber || '',
                 chequeDate: cheque.chequeDate,
                 narration: `For bill ${voucherNumber}`
-              }, 'ODBC CHq Mgmt');
+              }, co().odbc);
 
               if (tallyResult.success) {
                 db.markChequeSynced(chequeResult.id, tallyResult.voucherId);
@@ -3649,7 +3651,7 @@ router.post('/bill-payments', async (req, res) => {
     let fonepayMatch = null;
     if (qrAmount && qrAmount > 0) {
       const billDate = req.body.billDate || new Date().toISOString().split('T')[0];
-      const companyName = req.body.companyName || 'FOR DB';
+      const companyName = req.body.companyName || config.tally.companyName || 'FOR DB';
 
       // Try to find matching Fonepay transaction
       const matchingTxn = db.findMatchingFonepayTransaction(qrAmount, new Date().toISOString().split('T')[0]);

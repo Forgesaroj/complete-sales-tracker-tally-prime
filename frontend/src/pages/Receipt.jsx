@@ -1,15 +1,7 @@
 /**
- * Receipt Page - Complete Payment for Pending Sales Bills
- *
- * Workflow:
- * 1. Select a Pending Sales Bill
- * 2. Enter payment amounts in various modes
- * 3. System determines new voucher type:
- *    - Full Payment (payment >= bill amount) → "Sales"
- *    - Partial Payment (payment < bill amount) → "Credit Sales"
- * 4. EDITS the original Pending Sales Bill to:
- *    - Change voucher type (Sales or Credit Sales)
- *    - Add UDF fields (SFL1-SFL7) with payment breakdown
+ * Receipt Page - Two modes:
+ * 1. Complete Payment - Edit Pending Sales Bill with payment breakdown
+ * 2. Create Receipt - Standalone receipt voucher for any company
  *
  * Payment Modes (Ledger Names):
  *   - SFL1: Cash Teller 1
@@ -21,7 +13,7 @@
  *   - SFL7: Esewa
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   User,
@@ -40,22 +32,37 @@ import {
   CheckCircle,
   AlertCircle,
   X,
-  IndianRupee
+  IndianRupee,
+  Plus
 } from 'lucide-react';
+
+import { autoMatchFonepay, createReceipt, searchReceiptParties, sendWhatsAppReceipt } from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 export default function Receipt() {
   const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState('complete'); // 'complete' or 'create'
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState(null);
+  const [lastReceipt, setLastReceipt] = useState(null); // { partyName, amount, voucherNumber }
 
-  // Pending bills
+  // Pending bills (complete tab)
   const [pendingBills, setPendingBills] = useState([]);
   const [billSearch, setBillSearch] = useState('');
   const [selectedBill, setSelectedBill] = useState(null);
   const [showBillDropdown, setShowBillDropdown] = useState(false);
+
+  // Create Receipt state
+  const [crCompany, setCrCompany] = useState('billing');
+  const [crPartySearch, setCrPartySearch] = useState('');
+  const [crPartySuggestions, setCrPartySuggestions] = useState([]);
+  const [crShowSuggestions, setCrShowSuggestions] = useState(false);
+  const [crSelectedParty, setCrSelectedParty] = useState('');
+  const [crNarration, setCrNarration] = useState('');
+  const crSearchTimer = useRef(null);
+  const crPartyRef = useRef(null);
 
   // Tally connection status
   const [tallyStatus, setTallyStatus] = useState({ connected: false, checking: true });
@@ -77,6 +84,17 @@ export default function Receipt() {
     loadPendingBills();
     const interval = setInterval(checkTallyStatus, 30000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Close suggestions on outside click
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (crPartyRef.current && !crPartyRef.current.contains(e.target)) {
+        setCrShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
   const checkTallyStatus = async () => {
@@ -137,8 +155,6 @@ export default function Receipt() {
   const getNewVoucherType = () => {
     if (!selectedBill) return null;
     const billAmount = selectedBill.amount || 0;
-    // Full payment or overpayment → Sales
-    // Partial payment → Credit Sales
     return totalPayment >= billAmount ? 'Sales' : 'Credit Sales';
   };
 
@@ -168,9 +184,12 @@ export default function Receipt() {
   };
 
   // Clear selection
-  const clearSelection = () => {
+  const clearForm = () => {
     setSelectedBill(null);
     setBillSearch('');
+    setCrPartySearch('');
+    setCrSelectedParty('');
+    setCrNarration('');
     setPaymentModes({
       cashTeller1: '',
       cashTeller2: '',
@@ -183,10 +202,34 @@ export default function Receipt() {
     setMessage(null);
   };
 
-  // Complete payment on the Pending Sales Bill
-  // This EDITS the original bill (no deletion) to add:
-  // - New voucher type (Sales or Credit Sales)
-  // - UDF fields (SFL1-SFL7) with payment breakdown
+  // Party search for Create Receipt tab
+  const handleCrPartySearch = (val) => {
+    setCrPartySearch(val);
+    setCrSelectedParty('');
+    if (crSearchTimer.current) clearTimeout(crSearchTimer.current);
+    if (val.length < 2) {
+      setCrPartySuggestions([]);
+      setCrShowSuggestions(false);
+      return;
+    }
+    crSearchTimer.current = setTimeout(async () => {
+      try {
+        const res = await searchReceiptParties(val, crCompany);
+        setCrPartySuggestions(res.data?.parties || []);
+        setCrShowSuggestions(true);
+      } catch (e) {
+        console.error('Party search error:', e);
+      }
+    }, 300);
+  };
+
+  const selectCrParty = (name) => {
+    setCrSelectedParty(name);
+    setCrPartySearch(name);
+    setCrShowSuggestions(false);
+  };
+
+  // Complete Payment on Pending Sales Bill
   const completePayment = async () => {
     if (!selectedBill) {
       setMessage({ type: 'error', text: 'Please select a pending bill' });
@@ -207,14 +250,13 @@ export default function Receipt() {
     setMessage(null);
 
     try {
-      // Use the new endpoint that edits the voucher directly (no deletion)
       const res = await fetch(`${API_BASE}/api/pending-sales-bills/${selectedBill.masterId}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           partyName: selectedBill.partyName,
           amount: selectedBill.amount,
-          date: selectedBill.date ? selectedBill.date.split('/').reverse().join('') : null, // Convert DD/MM/YYYY to YYYYMMDD
+          date: selectedBill.date ? selectedBill.date.split('/').reverse().join('') : null,
           voucherNumber: selectedBill.voucherNumber,
           guid: selectedBill.guid,
           paymentModes: {
@@ -229,10 +271,8 @@ export default function Receipt() {
         })
       });
 
-      // Check if response is OK before parsing JSON
       const contentType = res.headers.get('content-type');
       if (!res.ok) {
-        // Try to get error message from response
         if (contentType && contentType.includes('application/json')) {
           const errorData = await res.json();
           throw new Error(errorData.error || `Server error: ${res.status}`);
@@ -241,7 +281,6 @@ export default function Receipt() {
         }
       }
 
-      // Parse JSON response
       if (!contentType || !contentType.includes('application/json')) {
         throw new Error('Invalid response from server (not JSON)');
       }
@@ -249,12 +288,26 @@ export default function Receipt() {
       const data = await res.json();
 
       if (data.success) {
+        const qrAmount = parseFloat(paymentModes.qrCode) || 0;
+        if (qrAmount > 0) {
+          try {
+            await autoMatchFonepay({
+              amount: qrAmount,
+              date: new Date().toISOString().split('T')[0],
+              voucherNumber: selectedBill.voucherNumber,
+              partyName: selectedBill.partyName,
+              companyName: 'FOR DB'
+            });
+          } catch (e) {
+            console.log('Fonepay auto-match suggestion skipped:', e.message);
+          }
+        }
+        setLastReceipt({ partyName: selectedBill.partyName, amount: totalPayment, voucherNumber: selectedBill.voucherNumber });
         setMessage({
           type: 'success',
           text: `Bill ${selectedBill.voucherNumber} updated to ${data.newVoucherType} with payment! Rs ${totalPayment.toLocaleString()}`
         });
-        // Reset form and reload bills
-        clearSelection();
+        clearForm();
         loadPendingBills();
       } else {
         setMessage({ type: 'error', text: data.error || 'Failed to complete payment' });
@@ -262,6 +315,62 @@ export default function Receipt() {
     } catch (error) {
       console.error('Complete payment error:', error);
       setMessage({ type: 'error', text: error.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Create standalone Receipt
+  const submitCreateReceipt = async () => {
+    const partyName = crSelectedParty || crPartySearch.trim();
+    if (!partyName) {
+      setMessage({ type: 'error', text: 'Please select or enter a party name' });
+      return;
+    }
+
+    if (totalPayment <= 0) {
+      setMessage({ type: 'error', text: 'At least one payment mode must have a value' });
+      return;
+    }
+
+    if (!tallyStatus.connected) {
+      setMessage({ type: 'error', text: 'Tally is offline. Cannot create receipt.' });
+      return;
+    }
+
+    setSubmitting(true);
+    setMessage(null);
+
+    try {
+      const companies = { billing: 'FOR DB', odbc: 'ODBC CHq Mgmt' };
+      const res = await createReceipt({
+        partyName,
+        company: companies[crCompany],
+        narration: crNarration || `Receipt via Dashboard - ${crCompany === 'billing' ? 'Billing' : 'ODBC'}`,
+        paymentModes: {
+          cashTeller1: parseFloat(paymentModes.cashTeller1) || 0,
+          cashTeller2: parseFloat(paymentModes.cashTeller2) || 0,
+          chequeReceipt: parseFloat(paymentModes.chequeReceipt) || 0,
+          qrCode: parseFloat(paymentModes.qrCode) || 0,
+          discount: parseFloat(paymentModes.discount) || 0,
+          bankDeposit: parseFloat(paymentModes.bankDeposit) || 0,
+          esewa: parseFloat(paymentModes.esewa) || 0
+        }
+      });
+
+      if (res.data?.success) {
+        setLastReceipt({ partyName, amount: totalPayment, voucherNumber: res.data.voucherNumber || '' });
+        setMessage({
+          type: 'success',
+          text: `Receipt created in ${crCompany === 'billing' ? 'Billing' : 'ODBC'} for ${partyName} — Rs ${totalPayment.toLocaleString()}`
+        });
+        clearForm();
+      } else {
+        setMessage({ type: 'error', text: res.data?.error || 'Failed to create receipt' });
+      }
+    } catch (error) {
+      console.error('Create receipt error:', error);
+      setMessage({ type: 'error', text: error.response?.data?.error || error.message });
     } finally {
       setSubmitting(false);
     }
@@ -296,7 +405,7 @@ export default function Receipt() {
       <div className="flex flex-wrap items-center justify-between mb-6 gap-4">
         <h1 className="text-2xl font-bold flex items-center gap-2">
           <ReceiptIcon size={28} />
-          {t('completePayment', 'Complete Payment')}
+          {t('receipt', 'Receipt')}
         </h1>
 
         {/* Tally Status */}
@@ -326,122 +435,255 @@ export default function Receipt() {
         </div>
       </div>
 
+      {/* Tab Switcher */}
+      <div className="flex mb-4 bg-gray-100 rounded-lg p-1">
+        <button
+          onClick={() => { setActiveTab('complete'); clearForm(); }}
+          className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+            activeTab === 'complete'
+              ? 'bg-white text-blue-700 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <FileText size={16} />
+          Complete Bill
+        </button>
+        <button
+          onClick={() => { setActiveTab('create'); clearForm(); }}
+          className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
+            activeTab === 'create'
+              ? 'bg-white text-green-700 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Plus size={16} />
+          Create Receipt
+        </button>
+      </div>
+
       {/* Message */}
       {message && (
         <div className={`mb-4 p-4 rounded-lg flex items-center gap-2 ${
           message.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
         }`}>
           {message.type === 'success' ? <CheckCircle size={20} /> : <AlertCircle size={20} />}
-          {message.text}
+          <span className="flex-1">{message.text}</span>
+          {message.type === 'success' && lastReceipt && (
+            <button
+              title={`Send WhatsApp to ${lastReceipt.partyName}`}
+              className="ml-2 px-3 py-1 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition-colors"
+              onClick={async (e) => {
+                const btn = e.currentTarget;
+                btn.disabled = true;
+                btn.textContent = '...';
+                try {
+                  await sendWhatsAppReceipt({ partyName: lastReceipt.partyName, receiptData: { voucherNumber: lastReceipt.voucherNumber, amount: lastReceipt.amount, date: new Date().toISOString().slice(0, 10) } });
+                  btn.textContent = 'Sent!';
+                } catch (err) {
+                  btn.textContent = 'Send';
+                  alert('WhatsApp failed: ' + (err.response?.data?.error || err.message));
+                }
+                btn.disabled = false;
+              }}
+            >Send</button>
+          )}
         </div>
       )}
 
       {/* Offline Warning */}
       {!tallyStatus.checking && !tallyStatus.connected && (
         <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 text-sm">
-          <strong>Tally Offline:</strong> Payment completion requires Tally to be online.
+          <strong>Tally Offline:</strong> Receipt operations require Tally to be online.
         </div>
       )}
 
       {/* Receipt Form */}
       <div className="bg-white rounded-lg shadow-md p-6">
-        {/* Bill Selection */}
-        <div className="mb-6">
-          <label className="block font-medium mb-2 flex items-center gap-2">
-            <FileText size={18} />
-            Select Pending Sales Bill
-          </label>
-          <div className="relative">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-                <input
-                  type="text"
-                  value={billSearch}
-                  onChange={(e) => {
-                    setBillSearch(e.target.value);
-                    setShowBillDropdown(true);
-                    if (!e.target.value) setSelectedBill(null);
-                  }}
-                  onFocus={() => setShowBillDropdown(true)}
-                  placeholder="Search by voucher number or party name..."
-                  className="w-full pl-10 p-3 border rounded-lg"
-                />
-              </div>
-              <button
-                onClick={loadPendingBills}
-                className="p-3 text-gray-500 hover:text-blue-500 hover:bg-blue-50 rounded-lg"
-                title="Refresh Bills"
-              >
-                <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
-              </button>
-              {selectedBill && (
+
+        {/* ============= COMPLETE BILL TAB ============= */}
+        {activeTab === 'complete' && (
+          <div className="mb-6">
+            <label className="block font-medium mb-2 flex items-center gap-2">
+              <FileText size={18} />
+              Select Pending Sales Bill
+            </label>
+            <div className="relative">
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <input
+                    type="text"
+                    value={billSearch}
+                    onChange={(e) => {
+                      setBillSearch(e.target.value);
+                      setShowBillDropdown(true);
+                      if (!e.target.value) setSelectedBill(null);
+                    }}
+                    onFocus={() => setShowBillDropdown(true)}
+                    placeholder="Search by voucher number or party name..."
+                    className="w-full pl-10 p-3 border rounded-lg"
+                  />
+                </div>
                 <button
-                  onClick={clearSelection}
-                  className="p-3 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded-lg"
+                  onClick={loadPendingBills}
+                  className="p-3 text-gray-500 hover:text-blue-500 hover:bg-blue-50 rounded-lg"
+                  title="Refresh Bills"
                 >
-                  <X size={20} />
+                  <RefreshCw size={20} className={loading ? 'animate-spin' : ''} />
                 </button>
+                {selectedBill && (
+                  <button
+                    onClick={clearForm}
+                    className="p-3 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded-lg"
+                  >
+                    <X size={20} />
+                  </button>
+                )}
+              </div>
+
+              {/* Bill Dropdown */}
+              {showBillDropdown && billSearch && !selectedBill && (
+                <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                  {loading ? (
+                    <div className="p-4 text-center text-gray-500">
+                      <RefreshCw size={20} className="animate-spin mx-auto mb-2" />
+                      Loading...
+                    </div>
+                  ) : filteredBills.length === 0 ? (
+                    <div className="p-4 text-center text-gray-500">
+                      No pending bills found
+                    </div>
+                  ) : (
+                    filteredBills.slice(0, 20).map((bill, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => selectBill(bill)}
+                        className="p-3 hover:bg-blue-50 cursor-pointer border-b last:border-b-0"
+                      >
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <div className="font-medium">{bill.voucherNumber}</div>
+                            <div className="text-sm text-gray-600">{bill.partyName}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-bold text-red-600">Rs {bill.amount?.toLocaleString()}</div>
+                            <div className="text-xs text-gray-500">{bill.date}</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
               )}
             </div>
 
-            {/* Bill Dropdown */}
-            {showBillDropdown && billSearch && !selectedBill && (
-              <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
-                {loading ? (
-                  <div className="p-4 text-center text-gray-500">
-                    <RefreshCw size={20} className="animate-spin mx-auto mb-2" />
-                    Loading...
+            {/* Selected Bill Info */}
+            {selectedBill && (
+              <div className="mt-3 p-4 bg-blue-50 rounded-lg">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <div className="font-bold text-blue-800">{selectedBill.voucherNumber}</div>
+                    <div className="text-blue-700">{selectedBill.partyName}</div>
+                    <div className="text-sm text-blue-600 mt-1">{selectedBill.date}</div>
                   </div>
-                ) : filteredBills.length === 0 ? (
-                  <div className="p-4 text-center text-gray-500">
-                    No pending bills found
-                  </div>
-                ) : (
-                  filteredBills.slice(0, 20).map((bill, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => selectBill(bill)}
-                      className="p-3 hover:bg-blue-50 cursor-pointer border-b last:border-b-0"
-                    >
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <div className="font-medium">{bill.voucherNumber}</div>
-                          <div className="text-sm text-gray-600">{bill.partyName}</div>
-                        </div>
-                        <div className="text-right">
-                          <div className="font-bold text-red-600">Rs {bill.amount?.toLocaleString()}</div>
-                          <div className="text-xs text-gray-500">{bill.date}</div>
-                        </div>
-                      </div>
+                  <div className="text-right">
+                    <div className="text-sm text-gray-600">Bill Amount</div>
+                    <div className="text-xl font-bold text-red-600">
+                      Rs {selectedBill.amount?.toLocaleString()}
                     </div>
-                  ))
-                )}
+                  </div>
+                </div>
               </div>
             )}
           </div>
+        )}
 
-          {/* Selected Bill Info */}
-          {selectedBill && (
-            <div className="mt-3 p-4 bg-blue-50 rounded-lg">
-              <div className="flex justify-between items-start">
-                <div>
-                  <div className="font-bold text-blue-800">{selectedBill.voucherNumber}</div>
-                  <div className="text-blue-700">{selectedBill.partyName}</div>
-                  <div className="text-sm text-blue-600 mt-1">{selectedBill.date}</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-sm text-gray-600">Bill Amount</div>
-                  <div className="text-xl font-bold text-red-600">
-                    Rs {selectedBill.amount?.toLocaleString()}
-                  </div>
-                </div>
-              </div>
+        {/* ============= CREATE RECEIPT TAB ============= */}
+        {activeTab === 'create' && (
+          <div className="mb-6">
+            {/* Company Selector */}
+            <label className="block font-medium mb-2 flex items-center gap-2">
+              <Building2 size={18} />
+              Company
+            </label>
+            <div className="flex gap-2 mb-4">
+              <button
+                onClick={() => { setCrCompany('billing'); setCrPartySearch(''); setCrSelectedParty(''); setCrPartySuggestions([]); }}
+                className={`flex-1 py-2 px-4 rounded-lg text-sm font-semibold border transition-all ${
+                  crCompany === 'billing'
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400'
+                }`}
+              >
+                Billing (FOR DB)
+              </button>
+              <button
+                onClick={() => { setCrCompany('odbc'); setCrPartySearch(''); setCrSelectedParty(''); setCrPartySuggestions([]); }}
+                className={`flex-1 py-2 px-4 rounded-lg text-sm font-semibold border transition-all ${
+                  crCompany === 'odbc'
+                    ? 'bg-purple-600 text-white border-purple-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:border-purple-400'
+                }`}
+              >
+                ODBC (Cheque)
+              </button>
             </div>
-          )}
-        </div>
 
-        {/* Payment Modes */}
+            {/* Party Search */}
+            <label className="block font-medium mb-2 flex items-center gap-2">
+              <User size={18} />
+              Party Name
+            </label>
+            <div className="relative mb-4" ref={crPartyRef}>
+              <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                value={crPartySearch}
+                onChange={(e) => handleCrPartySearch(e.target.value)}
+                onFocus={() => crPartySuggestions.length > 0 && setCrShowSuggestions(true)}
+                placeholder="Search party name..."
+                className="w-full pl-10 p-3 border rounded-lg"
+              />
+              {crShowSuggestions && crPartySuggestions.length > 0 && (
+                <div className="absolute z-10 w-full mt-1 bg-white border rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                  {crPartySuggestions.map((p, i) => (
+                    <div
+                      key={i}
+                      onClick={() => selectCrParty(p.name)}
+                      className="p-3 hover:bg-blue-50 cursor-pointer border-b last:border-b-0"
+                    >
+                      <div className="font-medium">{p.name}</div>
+                      {p.parent && <div className="text-xs text-gray-500">{p.parent}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {crSelectedParty && (
+                <div className="mt-2 p-3 bg-green-50 rounded-lg flex items-center justify-between">
+                  <span className="font-medium text-green-800">{crSelectedParty}</span>
+                  <button onClick={() => { setCrSelectedParty(''); setCrPartySearch(''); }} className="text-gray-400 hover:text-red-500">
+                    <X size={16} />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Narration */}
+            <label className="block font-medium mb-2 flex items-center gap-2">
+              <FileText size={18} />
+              Narration (optional)
+            </label>
+            <input
+              type="text"
+              value={crNarration}
+              onChange={(e) => setCrNarration(e.target.value)}
+              placeholder="e.g. Cheque payment at counter"
+              className="w-full p-3 border rounded-lg mb-2"
+            />
+          </div>
+        )}
+
+        {/* Payment Modes (shared between both tabs) */}
         <div className="mb-6">
           <label className="block font-medium mb-3 flex items-center gap-2">
             <Banknote size={18} />
@@ -495,7 +737,7 @@ export default function Receipt() {
 
           {/* Payment Summary */}
           <div className="mt-4 p-4 bg-gray-100 rounded-lg space-y-2">
-            {selectedBill && (
+            {activeTab === 'complete' && selectedBill && (
               <>
                 <div className="flex justify-between items-center text-gray-700">
                   <span>Bill Amount:</span>
@@ -515,7 +757,7 @@ export default function Receipt() {
                 </div>
               </>
             )}
-            {!selectedBill && (
+            {(activeTab === 'create' || (activeTab === 'complete' && !selectedBill)) && (
               <div className="flex justify-between items-center">
                 <span className="font-medium text-gray-700">Total Payment:</span>
                 <span className={`text-xl font-bold ${totalPayment > 0 ? 'text-green-600' : 'text-gray-400'}`}>
@@ -526,8 +768,8 @@ export default function Receipt() {
           </div>
         </div>
 
-        {/* Voucher Type Preview */}
-        {selectedBill && totalPayment > 0 && (
+        {/* Voucher Type Preview (complete tab only) */}
+        {activeTab === 'complete' && selectedBill && totalPayment > 0 && (
           <div className={`mb-4 p-3 rounded-lg flex items-center gap-2 ${
             isFullPayment ? 'bg-green-100 text-green-800' : 'bg-orange-100 text-orange-800'
           }`}>
@@ -540,54 +782,48 @@ export default function Receipt() {
         )}
 
         {/* Submit Button */}
-        <button
-          onClick={completePayment}
-          disabled={submitting || totalPayment <= 0 || !selectedBill || !tallyStatus.connected}
-          className={`w-full p-4 rounded-lg flex items-center justify-center gap-2 text-white font-medium ${
-            submitting || totalPayment <= 0 || !selectedBill || !tallyStatus.connected
-              ? 'bg-gray-400 cursor-not-allowed'
-              : isFullPayment
-                ? 'bg-green-600 hover:bg-green-700'
-                : 'bg-orange-600 hover:bg-orange-700'
-          }`}
-        >
-          <Send size={20} />
-          {submitting
-            ? 'Processing...'
-            : selectedBill
-              ? `Complete Payment → ${newVoucherType} (Rs ${totalPayment.toLocaleString()})`
-              : 'Select a Bill First'}
-        </button>
+        {activeTab === 'complete' ? (
+          <button
+            onClick={completePayment}
+            disabled={submitting || totalPayment <= 0 || !selectedBill || !tallyStatus.connected}
+            className={`w-full p-4 rounded-lg flex items-center justify-center gap-2 text-white font-medium ${
+              submitting || totalPayment <= 0 || !selectedBill || !tallyStatus.connected
+                ? 'bg-gray-400 cursor-not-allowed'
+                : isFullPayment
+                  ? 'bg-green-600 hover:bg-green-700'
+                  : 'bg-orange-600 hover:bg-orange-700'
+            }`}
+          >
+            <Send size={20} />
+            {submitting
+              ? 'Processing...'
+              : selectedBill
+                ? `Complete Payment → ${newVoucherType} (Rs ${totalPayment.toLocaleString()})`
+                : 'Select a Bill First'}
+          </button>
+        ) : (
+          <button
+            onClick={submitCreateReceipt}
+            disabled={submitting || totalPayment <= 0 || (!crSelectedParty && !crPartySearch.trim()) || !tallyStatus.connected}
+            className={`w-full p-4 rounded-lg flex items-center justify-center gap-2 text-white font-medium ${
+              submitting || totalPayment <= 0 || (!crSelectedParty && !crPartySearch.trim()) || !tallyStatus.connected
+                ? 'bg-gray-400 cursor-not-allowed'
+                : 'bg-green-600 hover:bg-green-700'
+            }`}
+          >
+            <Send size={20} />
+            {submitting
+              ? 'Creating Receipt...'
+              : `Create Receipt in ${crCompany === 'billing' ? 'Billing' : 'ODBC'} (Rs ${totalPayment.toLocaleString()})`}
+          </button>
+        )}
 
         <p className="text-xs text-gray-500 mt-3 text-center">
-          Converts Pending Sales Bill to {newVoucherType || 'Sales/Credit Sales'} with UDF payment fields (SFL1-SFL7)
+          {activeTab === 'complete'
+            ? `Converts Pending Sales Bill to ${newVoucherType || 'Sales/Credit Sales'} with UDF payment fields (SFL1-SFL7)`
+            : `Creates a Receipt voucher in ${crCompany === 'billing' ? 'FOR DB' : 'ODBC CHq Mgmt'} with payment breakdown`
+          }
         </p>
-      </div>
-
-      {/* Info Box */}
-      <div className="mt-6 bg-blue-50 p-4 rounded-lg text-sm">
-        <strong>How it works:</strong>
-        <div className="mt-2 space-y-1 text-gray-700">
-          <div>• Select a Pending Sales Bill from the list above</div>
-          <div>• Enter payment amounts in different modes</div>
-          <div>• The bill is <strong>edited</strong> (not deleted) to update:</div>
-          <div className="ml-4 text-green-700">◦ <strong>Sales</strong> - if payment covers full amount</div>
-          <div className="ml-4 text-orange-700">◦ <strong>Credit Sales</strong> - if partial payment</div>
-          <div>• Payment breakdown is saved in UDF fields on the same voucher</div>
-        </div>
-        <div className="mt-3">
-          <strong>UDF Payment Fields (on the voucher):</strong>
-          <div className="mt-1 grid grid-cols-2 gap-1 text-gray-600">
-            <div>• SFL1: Cash Teller 1</div>
-            <div>• SFL2: Cash Teller 2</div>
-            <div>• SFL3: Cheque receipt</div>
-            <div>• SFL4: Q/R code</div>
-            <div>• SFL5: Discount</div>
-            <div>• SFL6: Bank Deposit(All)</div>
-            <div>• SFL7: Esewa</div>
-            <div>• SFLTot: Total (auto)</div>
-          </div>
-        </div>
       </div>
     </div>
   );

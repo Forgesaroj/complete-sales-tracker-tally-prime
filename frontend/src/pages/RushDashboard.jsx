@@ -3,7 +3,8 @@
  * Comprehensive dashboard with sidebar navigation, stats, bills, counter, dispatch, sacks, daybook
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import NepaliDate from 'nepali-date-converter';
 import socket from '../utils/socket';
 import {
   getDashboardSummary,
@@ -16,9 +17,19 @@ import {
   getTallyStatus,
   getSyncStatus,
   getAllVouchers,
+  getCombinedVouchers,
+  getCombinedVoucherTypes,
+  backfillTimestamps,
   getVoucherTypesList,
   getFonepayTransactions,
   getFonepaySummary,
+  getFonepayLedger,
+  addFonepayAdjustment,
+  deleteFonepayAdjustment,
+  linkFonepayToBill,
+  unlinkFonepayFromBill,
+  bulkLinkFonepay,
+  suggestFonepayMatches,
   getRBBTransactions,
   getRBBSummary,
   getStockItems,
@@ -117,6 +128,7 @@ import {
   createCollectionReceipt,
   getAssignableCheques,
   getCollectionStats,
+  getCollectionPartyBalances,
   getChequeReceivableLocal,
   getODBCVoucherDetail,
   getBankNames,
@@ -126,7 +138,57 @@ import {
   getLedgerMappings,
   upsertLedgerMapping,
   updateLedgerMappingApi,
-  deleteLedgerMapping
+  deleteLedgerMapping,
+  getLedgerBoth,
+  getPhoneMappings,
+  savePhoneMapping,
+  deletePhoneMapping,
+  getDataCompleteness,
+  getEODRecon,
+  getHierarchyCompanies,
+  syncLedgerHierarchy,
+  getLedgerDetail,
+  getLedgerAccountView,
+  login,
+  getMyPermissions,
+  getRolePermissions,
+  saveRolePermissions,
+  searchLedgers,
+  getBookAssignments,
+  createBookAssignment,
+  deleteBookAssignment,
+  submitCollectionPost,
+  getCollectionPostEntries,
+  getCollectionPostBooks,
+  searchCollectionPosts,
+  searchReceiptParties,
+  getReceiptBooks,
+  createReceiptBooksBulk,
+  createReceiptBook,
+  markBooksReady,
+  markBooksInactive,
+  assignBooks,
+  returnBook,
+  rereadyBook,
+  saveBookSummary,
+  getBookEntries,
+  validateBook,
+  deleteReceiptBook,
+  getWhatsAppStatus,
+  initializeWhatsApp,
+  logoutWhatsApp,
+  sendWhatsAppMessage,
+  sendWhatsAppReminder,
+  sendWhatsAppReceipt,
+  sendWhatsAppOutstanding,
+  checkWhatsAppNumber,
+  getWhatsAppContacts,
+  saveWhatsAppContact,
+  deleteWhatsAppContact,
+  importWhatsAppContacts,
+  verifyWhatsAppContact,
+  getWhatsAppMessages,
+  getWhatsAppMessageStats
 } from '../utils/api';
 import ChatPanel from '../components/ChatPanel';
 
@@ -161,8 +223,15 @@ const PAGE_TITLES = {
   'cheque-post': '📝 Cheque Post',
   'cheque-vouchers': '📋 Cheque Voucher List',
   collection: '📦 Cheque Collection',
-  'bank-names': '🏦 Bank Names',
-  settings: '⚙️ Settings'
+  'collection-post': '📝 Collection Post',
+  'ledger-both': '📖 Ledger (Both)',
+  'bank-names': '⚙️ Mapping Settings',
+  'eod-recon': '📊 EOD Reconciliation',
+  'data-completeness': '📋 Data Quality Tracking',
+  'ledger-hierarchy': '🏗️ Ledger Hierarchy',
+  'ledger-account': '📒 Ledger Account',
+  settings: '⚙️ Settings',
+  'whatsapp': '💬 WhatsApp'
 };
 
 // Format currency
@@ -267,7 +336,30 @@ const formatDate = (dateStr) => {
   return `${day}/${month}/${year}`;
 };
 
+// Format Tally's UPDATEDDATETIME (YYYYMMDDHHmmssSSS) to readable datetime
+const formatTallyDateTime = (dt) => {
+  if (!dt || dt.length < 14 || dt === '000000000') return '';
+  const y = dt.substring(0, 4);
+  const m = dt.substring(4, 6);
+  const d = dt.substring(6, 8);
+  const hh = dt.substring(8, 10);
+  const mm = dt.substring(10, 12);
+  const ss = dt.substring(12, 14);
+  const h12 = parseInt(hh) % 12 || 12;
+  const ampm = parseInt(hh) >= 12 ? 'PM' : 'AM';
+  return `${d}/${m}/${y} ${h12}:${mm}:${ss} ${ampm}`;
+};
+
 export default function RushDashboard() {
+  // Auth state
+  const [currentUser, setCurrentUser] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('rush_user') || 'null'); } catch { return null; }
+  });
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [allowedPages, setAllowedPages] = useState(new Set());
+
   // State
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [isSimpleMode, setIsSimpleMode] = useState(true);
@@ -280,6 +372,27 @@ export default function RushDashboard() {
   const [chatPanelOpen, setChatPanelOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  // Role permissions settings state
+  const [rpSelectedRole, setRpSelectedRole] = useState('cashier');
+  const [rpPermissions, setRpPermissions] = useState({});
+  const [rpLoading, setRpLoading] = useState(false);
+  const [rpSaving, setRpSaving] = useState(false);
+
+  // Ledger Account view state
+  const [laSearch, setLaSearch] = useState('');
+  const [laLedgerName, setLaLedgerName] = useState('');
+  const [laData, setLaData] = useState(null);
+  const [laLoading, setLaLoading] = useState(false);
+  const [laError, setLaError] = useState('');
+  const [laFromDate, setLaFromDate] = useState('');
+  const [laToDate, setLaToDate] = useState('');
+  const [laVchDetail, setLaVchDetail] = useState(null);
+  const [laVchDetailLoading, setLaVchDetailLoading] = useState(false);
+  const [laSuggestions, setLaSuggestions] = useState([]);
+  const [laShowSuggestions, setLaShowSuggestions] = useState(false);
+  const laSearchTimer = useRef(null);
+  const laSearchRef = useRef(null);
 
   // Data state
   const [summary, setSummary] = useState({
@@ -310,6 +423,7 @@ export default function RushDashboard() {
     business_address: '',
     business_phone: '',
     business_pan: '',
+    admin_whatsapp_phone: '',
     smtp_host: '',
     smtp_port: '587',
     smtp_secure: 'false',
@@ -327,6 +441,11 @@ export default function RushDashboard() {
   const [pendingInvoices, setPendingInvoices] = useState([]);
   const [pendingInvoicesLoading, setPendingInvoicesLoading] = useState(false);
   const [syncingPendingInvoices, setSyncingPendingInvoices] = useState(false);
+  const [currentDateTime, setCurrentDateTime] = useState(() => {
+    const now = new Date();
+    const nd = new NepaliDate(now);
+    return { en: now, np: nd };
+  });
   const [loading, setLoading] = useState(true);
   const [vouchersLoading, setVouchersLoading] = useState(false);
   const [fonepayLoading, setFonepayLoading] = useState(false);
@@ -365,6 +484,7 @@ export default function RushDashboard() {
   const [voucherDateTo, setVoucherDateTo] = useState(getTodayISO());
   const [voucherSort, setVoucherSort] = useState({ field: 'alter_id', direction: 'desc' }); // Default: highest Alt ID first
   const [voucherTypeFilter, setVoucherTypeFilter] = useState('');
+  const [voucherCompanyFilter, setVoucherCompanyFilter] = useState('both'); // 'billing', 'odbc', 'both'
   const [auditFilter, setAuditFilter] = useState('non_audited');
   const [criticalFilter, setCriticalFilter] = useState(false);
   const [criticalReasonFilter, setCriticalReasonFilter] = useState(''); // '', 'udf_change', 'audited_edit', 'post_dated'
@@ -386,6 +506,15 @@ export default function RushDashboard() {
   const [fonepayDateFrom, setFonepayDateFrom] = useState('');
   const [fonepayDateTo, setFonepayDateTo] = useState('');
   const [fonepaySearch, setFonepaySearch] = useState('');
+  const [fonepayFilter, setFonepayFilter] = useState('all'); // 'all' | 'linked' | 'unlinked' | 'suggested'
+  const [fonepaySelected, setFonepaySelected] = useState(new Set());
+  const [suggestedMatches, setSuggestedMatches] = useState({}); // transactionId -> { bill info }
+  const [fonepayLinkModal, setFonepayLinkModal] = useState(null); // txn being manually linked
+  const [fonepayLinkSearch, setFonepayLinkSearch] = useState('');
+  const [fonepayLinkBills, setFonepayLinkBills] = useState([]);
+  const [fonepayMatchLoading, setFonepayMatchLoading] = useState(false);
+  const [fonepayLedgerData, setFonepayLedgerData] = useState(null);
+  const [fonepayShowBalance, setFonepayShowBalance] = useState(false); // toggle balance column visibility
 
   // RBB filter state (default: no date filter to show all records)
   const [rbbDateFrom, setRbbDateFrom] = useState('');
@@ -424,6 +553,36 @@ export default function RushDashboard() {
   const [lmBillingParties, setLmBillingParties] = useState([]);
   const [lmOdbcParties, setLmOdbcParties] = useState([]);
   const [lmDropdown, setLmDropdown] = useState(null); // 'new-billing', 'new-odbc', 'edit-billing', 'edit-odbc'
+  const [lmEditPhone, setLmEditPhone] = useState(''); // phone editing in ledger mapping row
+  const [lmEditPhoneId, setLmEditPhoneId] = useState(null); // which mapping row is editing phone
+  // Phone → Party Mapping state
+  const [phoneMappings, setPhoneMappings] = useState([]);
+  const [pmNewPhone, setPmNewPhone] = useState('');
+  const [pmNewParty, setPmNewParty] = useState('');
+  const [bnTab, setBnTab] = useState('banks'); // 'banks' or 'ledger'
+
+  // EOD Reconciliation state
+  const [eodData, setEodData] = useState(null);
+  const [eodLoading, setEodLoading] = useState(false);
+  const [eodDate, setEodDate] = useState(new Date().toISOString().slice(0, 10).replace(/-/g, ''));
+  const [eodActualCash, setEodActualCash] = useState('');
+
+  // Data Completeness state
+  const [completenessData, setCompletenessData] = useState(null);
+  const [completenessLoading, setCompletenessLoading] = useState(false);
+  const [dcExpanded, setDcExpanded] = useState({}); // { categoryIndex: true/false }
+
+  // Ledger Hierarchy state (multi-company)
+  const [hierarchyCompanies, setHierarchyCompanies] = useState([]);
+  const [hierarchyActiveCompany, setHierarchyActiveCompany] = useState('');
+  const [hierarchyDataByCompany, setHierarchyDataByCompany] = useState({}); // { companyName: { ledgers, groups, ... } }
+  const [hierarchyLoading, setHierarchyLoading] = useState(false);
+  const [hierarchySyncing, setHierarchySyncing] = useState(false);
+  const [hierarchySearch, setHierarchySearch] = useState('');
+  const [hierarchyGroupFilter, setHierarchyGroupFilter] = useState('');
+  const [hierarchyExpandedGroups, setHierarchyExpandedGroups] = useState({});
+  const [ledgerDetail, setLedgerDetail] = useState(null);
+  const [ledgerDetailLoading, setLedgerDetailLoading] = useState(false);
 
   // Profit & Loss state
   const [profitLoss, setProfitLoss] = useState(null);
@@ -558,6 +717,7 @@ export default function RushDashboard() {
   const [collActiveBatch, setCollActiveBatch] = useState(null);
   const [collActiveBatchItems, setCollActiveBatchItems] = useState([]);
   const [collStats, setCollStats] = useState(null);
+  const [collPartyBalances, setCollPartyBalances] = useState({});
   const [collLoading, setCollLoading] = useState(false);
   const [collSyncing, setCollSyncing] = useState(false);
   const [collSearch, setCollSearch] = useState('');
@@ -570,6 +730,70 @@ export default function RushDashboard() {
   const [collRecvSearch, setCollRecvSearch] = useState('');
   const [collRecvSyncing, setCollRecvSyncing] = useState(false);
   const [collRecvFilter, setCollRecvFilter] = useState('pending');
+
+  // Collection Post state
+  const [clpStep, setClpStep] = useState('inventory'); // 'inventory' | 'create' | 'summary' | 'entry' | 'confirm' | 'results'
+  const [clpDate, setClpDate] = useState(new Date().toISOString().split('T')[0]);
+  const [clpBookNumber, setClpBookNumber] = useState('');
+  const [clpStaffName, setClpStaffName] = useState('');
+  const [clpAssignmentId, setClpAssignmentId] = useState(null);
+  const [clpEntries, setClpEntries] = useState([{ receiptNumber: '', partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' }]);
+  const [clpSubmitting, setClpSubmitting] = useState(false);
+  const [clpResults, setClpResults] = useState(null);
+  const [clpWaChecked, setClpWaChecked] = useState(new Set());
+  const [clpWaSending, setClpWaSending] = useState(false);
+  const [clpWaProgress, setClpWaProgress] = useState('');
+  const [clpAssignments, setClpAssignments] = useState([]);
+  const [clpAssignLoading, setClpAssignLoading] = useState(false);
+  const [clpPostedEntries, setClpPostedEntries] = useState([]);
+  const [clpEnterNav, setClpEnterNav] = useState(true);
+  const [clpSuggestions, setClpSuggestions] = useState([]);
+  const [clpActiveRow, setClpActiveRow] = useState(-1);
+  const clpSearchTimer = useRef(null);
+  // WhatsApp state
+  const [waStatus, setWaStatus] = useState('disconnected');
+  const [waTestMode, setWaTestMode] = useState(false);
+  const [waQRCode, setWaQRCode] = useState(null);
+  const [waClientInfo, setWaClientInfo] = useState(null);
+  const [waContacts, setWaContacts] = useState([]);
+  const [waMessages, setWaMessages] = useState([]);
+  const [waStats, setWaStats] = useState(null);
+  const [waTab, setWaTab] = useState('status');
+  const [waSendPhone, setWaSendPhone] = useState('');
+  const [waSendMessage, setWaSendMessage] = useState('');
+  const [waSendParty, setWaSendParty] = useState('');
+  const [waSending, setWaSending] = useState(false);
+  const [waContactForm, setWaContactForm] = useState({ partyName: '', phone: '', label: 'primary' });
+  const [waContactSearch, setWaContactSearch] = useState('');
+  const [waLoading, setWaLoading] = useState(false);
+
+  // Receipt Books — Inventory
+  const [clpBooks, setClpBooks] = useState([]);
+  const [clpBookCounts, setClpBookCounts] = useState({});
+  const [clpBooksLoading, setClpBooksLoading] = useState(false);
+  const [clpSelectedBooks, setClpSelectedBooks] = useState([]);
+  const [clpActiveBook, setClpActiveBook] = useState(null);
+  const [clpCreateMode, setClpCreateMode] = useState('bulk');
+  const [clpCreateForm, setClpCreateForm] = useState({ rangeStart: '', rangeEnd: '', pagesPerBook: '50', numberingMode: 'sequential', batchLabel: '', startBookNumber: '', restartEvery: '' });
+  const [clpSingleForm, setClpSingleForm] = useState({ pageStart: '', pageEnd: '', label: '' });
+  const [clpAssignModal, setClpAssignModal] = useState(false);
+  const [clpAssignStaff, setClpAssignStaff] = useState('');
+  const [clpAssignRoute, setClpAssignRoute] = useState('');
+  const [clpSummary, setClpSummary] = useState({ entryCount: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' });
+  const [clpSummaryLocked, setClpSummaryLocked] = useState(false);
+
+  // Ledger (Both) state
+  const [lbRows, setLbRows] = useState([]);
+  const [lbSummary, setLbSummary] = useState(null);
+  const [lbLoading, setLbLoading] = useState(false);
+  const [lbSearch, setLbSearch] = useState('');
+  const [lbSort, setLbSort] = useState('total');
+  const [lbFilter, setLbFilter] = useState('all');
+  const [lbBillingParties, setLbBillingParties] = useState([]);
+  const [lbOdbcParties, setLbOdbcParties] = useState([]);
+  const [lbBulkMode, setLbBulkMode] = useState(false);
+  const [lbBulkMappings, setLbBulkMappings] = useState({});
+  const [lbBulkSaving, setLbBulkSaving] = useState(false);
 
   // Cheque Post state
   const [cpReceipts, setCpReceipts] = useState([]);
@@ -651,6 +875,15 @@ export default function RushDashboard() {
       }
     }
   };
+
+  // Clock: update every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = new Date();
+      setCurrentDateTime({ en: now, np: new NepaliDate(now) });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Auto-save forms to localStorage on every change
   useEffect(() => {
@@ -817,19 +1050,31 @@ export default function RushDashboard() {
       const dateTo = voucherDateTo ? voucherDateTo.replace(/-/g, '') : undefined;
       const offset = (voucherPage - 1) * VOUCHERS_PER_PAGE;
 
+      // Use combined endpoint (both companies) or billing-only based on filter
+      const useCombined = voucherCompanyFilter !== 'billing';
       const [vouchersRes, typesRes] = await Promise.all([
-        getAllVouchers({
-          limit: VOUCHERS_PER_PAGE,
-          offset,
-          dateFrom,
-          dateTo,
-          voucherType: voucherTypeFilter || undefined,
-          search: debouncedSearch || undefined,
-          auditStatus: auditFilter || undefined,
-          isCritical: criticalFilter ? '1' : undefined,
-          criticalReason: criticalReasonFilter || undefined
-        }),
-        getVoucherTypesList()
+        useCombined
+          ? getCombinedVouchers({
+              limit: VOUCHERS_PER_PAGE,
+              offset,
+              dateFrom,
+              dateTo,
+              voucherType: voucherTypeFilter || undefined,
+              search: debouncedSearch || undefined,
+              company: voucherCompanyFilter === 'both' ? 'both' : voucherCompanyFilter
+            })
+          : getAllVouchers({
+              limit: VOUCHERS_PER_PAGE,
+              offset,
+              dateFrom,
+              dateTo,
+              voucherType: voucherTypeFilter || undefined,
+              search: debouncedSearch || undefined,
+              auditStatus: auditFilter || undefined,
+              isCritical: criticalFilter ? '1' : undefined,
+              criticalReason: criticalReasonFilter || undefined
+            }),
+        useCombined ? getCombinedVoucherTypes() : getVoucherTypesList()
       ]);
       const data = vouchersRes.data || {};
       setAllVouchers(Array.isArray(data.vouchers) ? data.vouchers : []);
@@ -844,7 +1089,7 @@ export default function RushDashboard() {
     } finally {
       setVouchersLoading(false);
     }
-  }, [voucherDateFrom, voucherDateTo, voucherTypeFilter, voucherPage, debouncedSearch, auditFilter, criticalFilter, criticalReasonFilter]);
+  }, [voucherDateFrom, voucherDateTo, voucherTypeFilter, voucherCompanyFilter, voucherPage, debouncedSearch, auditFilter, criticalFilter, criticalReasonFilter]);
 
   // Fetch change log for a specific voucher
   const fetchVoucherChanges = useCallback(async (masterId) => {
@@ -933,16 +1178,27 @@ export default function RushDashboard() {
       if (fonepayDateFrom) params.fromDate = fonepayDateFrom;
       if (fonepayDateTo) params.toDate = fonepayDateTo;
 
-      const [txnRes, summaryRes] = await Promise.all([
+      const ledgerParams = {};
+      if (fonepayDateFrom) ledgerParams.fromDate = fonepayDateFrom;
+      if (fonepayDateTo) ledgerParams.toDate = fonepayDateTo;
+
+      const [txnRes, summaryRes, ledgerRes] = await Promise.all([
         getFonepayTransactions(params),
-        getFonepaySummary()
+        getFonepaySummary(),
+        getFonepayLedger(ledgerParams)
       ]);
       // API returns { success, count, transactions } - extract the transactions array
       const txnData = txnRes.data?.transactions || txnRes.data || [];
       setFonepayTxns(Array.isArray(txnData) ? txnData : []);
-      // API returns { success, totalCount, totalAmount, successCount, failedCount }
+      // API returns { success, totalCount, totalAmount, successCount, failedCount, linkedCount, linkedAmount, unlinkedCount, unlinkedAmount }
       const summary = summaryRes.data || {};
-      setFonepaySummary({ total: summary.totalAmount || 0, count: summary.totalCount || 0 });
+      setFonepaySummary({
+        total: summary.totalAmount || 0, count: summary.totalCount || 0,
+        linkedCount: summary.linkedCount || 0, linkedAmount: summary.linkedAmount || 0,
+        unlinkedCount: summary.unlinkedCount || 0, unlinkedAmount: summary.unlinkedAmount || 0
+      });
+      // Ledger data
+      setFonepayLedgerData(ledgerRes.data || null);
     } catch (error) {
       console.error('Failed to fetch Fonepay:', error);
       setFonepayTxns([]);
@@ -950,6 +1206,98 @@ export default function RushDashboard() {
       setFonepayLoading(false);
     }
   }, [fonepayDateFrom, fonepayDateTo]);
+
+  // Fonepay: run auto-match suggestions
+  const handleFonepayAutoMatch = useCallback(async () => {
+    setFonepayMatchLoading(true);
+    try {
+      const res = await suggestFonepayMatches(fonepayDateFrom || undefined, fonepayDateTo || undefined);
+      const suggestions = res.data?.suggestions || [];
+      const map = {};
+      for (const s of suggestions) {
+        map[s.transactionId] = { ...s.matchedReceipt, confidence: s.confidence || 'low', warning: s.warning || null };
+      }
+      setSuggestedMatches(map);
+      if (suggestions.length > 0) {
+        setFonepayFilter('suggested');
+      }
+    } catch (error) {
+      console.error('Auto-match failed:', error);
+    } finally {
+      setFonepayMatchLoading(false);
+    }
+  }, [fonepayDateFrom, fonepayDateTo]);
+
+  // Fonepay: bulk confirm selected suggested matches
+  const handleFonepayBulkConfirm = useCallback(async () => {
+    const links = [];
+    for (const txnId of fonepaySelected) {
+      const receipt = suggestedMatches[txnId];
+      if (receipt) {
+        links.push({
+          transactionId: txnId,
+          voucherNumber: receipt.voucherNumber,
+          partyName: receipt.partyName,
+          companyName: receipt.companyName,
+          billDate: receipt.voucherDate
+        });
+      }
+    }
+    if (links.length === 0) return;
+    try {
+      await bulkLinkFonepay(links);
+      // Remove confirmed from suggestions
+      const newSuggestions = { ...suggestedMatches };
+      for (const l of links) delete newSuggestions[l.transactionId];
+      setSuggestedMatches(newSuggestions);
+      setFonepaySelected(new Set());
+      fetchFonepay();
+    } catch (error) {
+      console.error('Bulk confirm failed:', error);
+    }
+  }, [fonepaySelected, suggestedMatches, fetchFonepay]);
+
+  // Fonepay: unlink a single transaction
+  const handleFonepayUnlink = useCallback(async (transactionId) => {
+    try {
+      await unlinkFonepayFromBill(transactionId);
+      fetchFonepay();
+    } catch (error) {
+      console.error('Unlink failed:', error);
+    }
+  }, [fetchFonepay]);
+
+  // Fonepay: manual link from modal
+  const handleFonepayManualLink = useCallback(async (txnId, bill) => {
+    try {
+      await linkFonepayToBill({
+        transactionId: txnId,
+        voucherNumber: bill.bill_name,
+        partyName: bill.party_name,
+        companyName: 'FOR DB',
+        billDate: bill.bill_date
+      });
+      setFonepayLinkModal(null);
+      setFonepayLinkSearch('');
+      setFonepayLinkBills([]);
+      fetchFonepay();
+    } catch (error) {
+      console.error('Manual link failed:', error);
+    }
+  }, [fetchFonepay]);
+
+  // Fonepay: open link modal and load bills
+  const openFonepayLinkModal = useCallback(async (txn) => {
+    setFonepayLinkModal(txn);
+    setFonepayLinkSearch('');
+    try {
+      const res = await getOutstandingBills();
+      setFonepayLinkBills(res.data?.bills || res.data || []);
+    } catch (error) {
+      console.error('Failed to load bills:', error);
+      setFonepayLinkBills([]);
+    }
+  }, []);
 
   // Fetch RBB transactions
   const fetchRBB = useCallback(async () => {
@@ -1276,6 +1624,14 @@ export default function RushDashboard() {
     socket.on('dispatch:updated', fetchData);
     socket.on('sack:statusChanged', fetchSacks);
 
+    socket.on('whatsapp:status', (data) => {
+      setWaStatus(data.status);
+      if (data.testMode !== undefined) setWaTestMode(data.testMode);
+      if (data.qr) setWaQRCode(data.qr);
+      if (data.clientInfo) setWaClientInfo(data.clientInfo);
+      if (data.status === 'ready') setWaQRCode(null);
+    });
+
     const statusInterval = setInterval(() => {
       checkTallyStatus();
       checkSyncStatus();
@@ -1287,6 +1643,7 @@ export default function RushDashboard() {
       socket.off('sync:update');
       socket.off('dispatch:updated');
       socket.off('sack:statusChanged');
+      socket.off('whatsapp:status');
       clearInterval(statusInterval);
     };
   }, []);
@@ -1309,6 +1666,87 @@ export default function RushDashboard() {
       fetchBillHistory();
     }
   }, [billHistoryDate, currentPage, fetchBillHistory]);
+
+  // EOD Reconciliation fetch
+  const fetchEODRecon = useCallback((dateOverride) => {
+    const d = dateOverride || eodDate;
+    setEodLoading(true);
+    getEODRecon(d).then(r => setEodData(r.data)).catch(() => {}).finally(() => setEodLoading(false));
+  }, [eodDate]);
+
+  // Auto-fetch EOD data when page is active
+  useEffect(() => {
+    if (currentPage === 'eod-recon' && !eodData && !eodLoading) {
+      fetchEODRecon();
+    }
+  }, [currentPage]);
+
+  // Fetch data completeness when page is active
+  useEffect(() => {
+    if (currentPage === 'data-completeness' && !completenessData) {
+      setCompletenessLoading(true);
+      getDataCompleteness().then(r => setCompletenessData(r.data)).catch(() => {}).finally(() => setCompletenessLoading(false));
+    }
+  }, [currentPage]);
+
+  // Sync ledger hierarchy for a specific company
+  const handleHierarchySync = async (company) => {
+    const target = company || hierarchyActiveCompany;
+    if (!target) return;
+    setHierarchySyncing(true);
+    try {
+      const r = await syncLedgerHierarchy(target);
+      setHierarchyDataByCompany(prev => ({ ...prev, [target]: r.data }));
+    } catch (e) {
+      console.error('Hierarchy sync error:', e);
+    } finally {
+      setHierarchySyncing(false);
+    }
+  };
+
+  // Switch company tab — sync if not cached
+  const handleHierarchyTabSwitch = (company) => {
+    setHierarchyActiveCompany(company);
+    setHierarchySearch('');
+    setHierarchyGroupFilter('');
+    setHierarchyExpandedGroups({});
+    if (!hierarchyDataByCompany[company]) {
+      handleHierarchySync(company);
+    }
+  };
+
+  // Fetch and show ledger detail modal
+  const handleLedgerClick = async (ledgerName, company) => {
+    setLedgerDetailLoading(true);
+    setLedgerDetail({ name: ledgerName, company, loading: true });
+    try {
+      const r = await getLedgerDetail(ledgerName, company);
+      setLedgerDetail({ ...r.data.ledger, company });
+    } catch (e) {
+      setLedgerDetail({ name: ledgerName, company, error: e.message || 'Failed to fetch' });
+    } finally {
+      setLedgerDetailLoading(false);
+    }
+  };
+
+  // Fetch companies list when hierarchy page opens
+  useEffect(() => {
+    if (currentPage === 'ledger-hierarchy' && hierarchyCompanies.length === 0) {
+      setHierarchyLoading(true);
+      getHierarchyCompanies().then(r => {
+        const companies = r.data.companies || [];
+        setHierarchyCompanies(companies);
+        if (companies.length > 0 && !hierarchyActiveCompany) {
+          const first = companies[0];
+          setHierarchyActiveCompany(first);
+          // Auto-sync first company
+          if (!hierarchyDataByCompany[first]) {
+            handleHierarchySync(first);
+          }
+        }
+      }).catch(() => {}).finally(() => setHierarchyLoading(false));
+    }
+  }, [currentPage]);
 
   // Update theme when dark mode changes
   useEffect(() => {
@@ -1388,11 +1826,39 @@ export default function RushDashboard() {
     }
   };
 
+  // Extract phone numbers (10-digit starting with 9) from a string
+  // Handles: "Name 9845053047", "Name9847270641", "Name 9821150455   9861984080"
+  const extractPhones = (str) => {
+    const matches = (str || '').match(/9[0-9]{9}/g);
+    return matches ? [...new Set(matches)] : [];
+  };
+
   // Ledger Mapping
   const fetchLedgerMappings = useCallback(async () => {
     try {
-      const res = await getLedgerMappings();
-      setLedgerMappings(res.data.mappings || []);
+      const [mapRes, phoneRes] = await Promise.all([getLedgerMappings(), getPhoneMappings()]);
+      const mappings = mapRes.data.mappings || [];
+      const phones = phoneRes.data.mappings || [];
+      // Build phone lookup: party_name → [phones]
+      const partyPhones = {};
+      for (const p of phones) {
+        const key = p.party_name.toLowerCase();
+        if (!partyPhones[key]) partyPhones[key] = [];
+        partyPhones[key].push(p.phone);
+      }
+      // Enrich mappings with phone data
+      for (const m of mappings) {
+        // Check existing phone mappings for this ODBC party
+        const existing = partyPhones[m.odbc_party.toLowerCase()] || [];
+        // Auto-extract from ODBC party name
+        const extracted = extractPhones(m.odbc_party);
+        // Combine: existing mappings + extracted (deduplicated)
+        const all = [...new Set([...existing, ...extracted])];
+        m._phones = all.join(', ');
+        m._phonesArr = all;
+      }
+      setLedgerMappings(mappings);
+      setPhoneMappings(phones);
     } catch (e) { console.error('Ledger mappings fetch error:', e); }
   }, []);
 
@@ -1400,6 +1866,11 @@ export default function RushDashboard() {
     if (!lmNewBilling.trim() || !lmNewOdbc.trim()) return;
     try {
       await upsertLedgerMapping({ billingParty: lmNewBilling, odbcParty: lmNewOdbc });
+      // Auto-extract phones from ODBC name and save mappings
+      const phones = extractPhones(lmNewOdbc);
+      for (const phone of phones) {
+        try { await savePhoneMapping({ phone, partyName: lmNewOdbc }); } catch {}
+      }
       setLmNewBilling(''); setLmNewOdbc('');
       fetchLedgerMappings();
     } catch (e) {
@@ -1423,6 +1894,50 @@ export default function RushDashboard() {
     try {
       await deleteLedgerMapping(id);
       fetchLedgerMappings();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  // Save phone(s) for a ledger mapping row
+  const handleSaveLedgerPhone = async (mapping, phoneStr) => {
+    const phones = phoneStr.split(',').map(p => p.trim()).filter(p => /^9[0-9]{9}$/.test(p));
+    if (phones.length === 0) return addToast('error', 'Invalid', 'Enter valid 10-digit phone number(s) starting with 9');
+    try {
+      for (const phone of phones) {
+        await savePhoneMapping({ phone, partyName: mapping.odbc_party });
+      }
+      addToast('success', 'Saved', `${phones.length} phone(s) mapped to ${mapping.odbc_party}`);
+      fetchLedgerMappings();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  // Phone → Party Mappings
+  const fetchPhoneMappings = useCallback(async () => {
+    try {
+      const res = await getPhoneMappings();
+      setPhoneMappings(res.data.mappings || []);
+    } catch (e) { console.error('Phone mappings fetch error:', e); }
+  }, []);
+
+  const handleAddPhoneMapping = async () => {
+    if (!pmNewPhone.trim() || !pmNewParty.trim()) return;
+    try {
+      await savePhoneMapping({ phone: pmNewPhone, partyName: pmNewParty });
+      setPmNewPhone(''); setPmNewParty('');
+      fetchPhoneMappings();
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+  };
+
+  const handleDeletePhoneMapping = async (phone) => {
+    if (!confirm(`Delete phone mapping for "${phone}"?`)) return;
+    try {
+      await deletePhoneMapping(phone);
+      fetchPhoneMappings();
     } catch (e) {
       addToast('error', 'Error', e.response?.data?.error || e.message);
     }
@@ -1681,6 +2196,366 @@ export default function RushDashboard() {
     setCmLoading(false);
   };
 
+  // ==================== COLLECTION POST ====================
+
+  const fetchBookAssignments = async () => {
+    setClpAssignLoading(true);
+    try {
+      const res = await getBookAssignments();
+      setClpAssignments(res.data.assignments || []);
+    } catch (e) { console.error('Failed to load book assignments:', e); }
+    setClpAssignLoading(false);
+  };
+
+  // Fetch receipt books inventory
+  const fetchReceiptBooks = async () => {
+    setClpBooksLoading(true);
+    try {
+      const res = await getReceiptBooks();
+      setClpBooks(res.data.books || []);
+      setClpBookCounts(res.data.counts || {});
+    } catch (e) { console.error('Failed to load receipt books:', e); }
+    setClpBooksLoading(false);
+  };
+
+  // Bulk create books
+  const handleBulkCreate = async () => {
+    const { rangeStart, rangeEnd, pagesPerBook, numberingMode, batchLabel, startBookNumber, restartEvery } = clpCreateForm;
+    if (!rangeStart || !rangeEnd) return addToast('error', 'Error', 'Range start and end required');
+    try {
+      const res = await createReceiptBooksBulk({ rangeStart: parseInt(rangeStart), rangeEnd: parseInt(rangeEnd), pagesPerBook: parseInt(pagesPerBook) || 50, numberingMode, batchLabel: batchLabel || undefined, startBookNumber: startBookNumber ? parseInt(startBookNumber) : undefined, restartEvery: restartEvery ? parseInt(restartEvery) : undefined });
+      addToast('success', 'Created', `${res.data.count} receipt books created`);
+      setClpCreateForm({ rangeStart: '', rangeEnd: '', pagesPerBook: '50', numberingMode: 'sequential', batchLabel: '', startBookNumber: '', restartEvery: '' });
+      setClpStep('inventory');
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Single create book
+  const handleSingleCreate = async () => {
+    const { pageStart, pageEnd, label } = clpSingleForm;
+    if (!pageStart || !pageEnd) return addToast('error', 'Error', 'Page start and end required');
+    try {
+      await createReceiptBook({ pageStart: parseInt(pageStart), pageEnd: parseInt(pageEnd), label: label || undefined });
+      addToast('success', 'Created', 'Receipt book created');
+      setClpSingleForm({ pageStart: '', pageEnd: '', label: '' });
+      setClpStep('inventory');
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Toggle book selection
+  const clpToggleBook = (id) => {
+    setClpSelectedBooks(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
+  // Bulk mark ready
+  const handleMarkReady = async () => {
+    if (!clpSelectedBooks.length) return;
+    try {
+      const res = await markBooksReady(clpSelectedBooks);
+      addToast('success', 'Updated', `${res.data.count} books marked ready`);
+      setClpSelectedBooks([]);
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Bulk mark inactive
+  const handleMarkInactive = async () => {
+    if (!clpSelectedBooks.length) return;
+    try {
+      const res = await markBooksInactive(clpSelectedBooks);
+      addToast('success', 'Updated', `${res.data.count} books marked inactive`);
+      setClpSelectedBooks([]);
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Assign selected books to staff
+  const handleAssignBooks = async () => {
+    if (!clpSelectedBooks.length || !clpAssignStaff.trim()) return addToast('error', 'Error', 'Select books and enter staff name');
+    try {
+      const res = await assignBooks({ bookIds: clpSelectedBooks, staffName: clpAssignStaff.trim(), routeName: clpAssignRoute || undefined });
+      addToast('success', 'Assigned', `${res.data.count} books assigned to ${clpAssignStaff}`);
+      setClpSelectedBooks([]);
+      setClpAssignModal(false);
+      setClpAssignStaff('');
+      setClpAssignRoute('');
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Return book
+  const handleReturnBook = async (bookId) => {
+    try {
+      await returnBook(bookId);
+      addToast('success', 'Returned', 'Book marked as returned');
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Re-ready posted book
+  const handleRereadyBook = async (bookId) => {
+    try {
+      const res = await rereadyBook(bookId);
+      addToast('success', 'Ready', `Book ready again with ${res.data.remainingPages} pages remaining`);
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Delete book
+  const handleDeleteBooks = async () => {
+    if (!clpSelectedBooks.length) return;
+    if (!confirm(`Delete ${clpSelectedBooks.length} book(s)?`)) return;
+    try {
+      let deleted = 0;
+      for (const id of clpSelectedBooks) {
+        try { await deleteReceiptBook(id); deleted++; } catch {}
+      }
+      addToast('success', 'Deleted', `${deleted} book(s) deleted`);
+      setClpSelectedBooks([]);
+      fetchReceiptBooks();
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  // Open book for summary/entry
+  const handleOpenBook = async (book) => {
+    setClpActiveBook(book);
+    setClpStaffName(book.assigned_to || '');
+    setClpBookNumber(`${book.available_from || book.page_start}-${book.page_end}`);
+
+    // Load existing entries for this book's current cycle
+    try {
+      const res = await getBookEntries(book.id);
+      const allEntries = res.data.entries || [];
+      const posted = allEntries.filter(e => e.tally_success);
+      const failed = allEntries.filter(e => !e.tally_success);
+      setClpPostedEntries(posted);
+
+      // If book is posted → view-only
+      if (book.status === 'posted') {
+        setClpEntries([]);
+        setClpStep('results');
+        const postedResults = posted.map(e => ({ receiptNumber: e.receipt_number, partyName: e.party_name, total: e.total, success: true, tallyMasterId: e.tally_master_id }));
+        setClpResults({ results: postedResults, successCount: posted.length, totalCount: posted.length });
+        setClpWaChecked(new Set(postedResults.map((_, i) => i)));
+        return;
+      }
+
+      // If summary already entered → go to entry, else go to summary
+      if (book.summary_entry_count) {
+        setClpSummary({ entryCount: String(book.summary_entry_count), cash: String(book.summary_cash || 0), fonepay: String(book.summary_fonepay || 0), cheque: String(book.summary_cheque || 0), bankDeposit: String(book.summary_bank_deposit || 0), discount: String(book.summary_discount || 0) });
+        setClpSummaryLocked(true);
+
+        // Pre-fill failed entries + empty row
+        const editableRows = failed.map(e => ({
+          receiptNumber: e.receipt_number || '', partyName: e.party_name || '',
+          cash: e.cash > 0 ? String(e.cash) : '', fonepay: e.fonepay > 0 ? String(e.fonepay) : '',
+          cheque: e.cheque > 0 ? String(e.cheque) : '', bankDeposit: e.bank_deposit > 0 ? String(e.bank_deposit) : '',
+          discount: e.discount > 0 ? String(e.discount) : ''
+        }));
+        const allNumbers = allEntries.map(e => parseInt(e.receipt_number) || 0);
+        const maxUsed = allNumbers.length > 0 ? Math.max(...allNumbers) : (book.available_from || book.page_start) - 1;
+        const nextRcpt = maxUsed + 1;
+        const emptyRow = { receiptNumber: nextRcpt <= book.page_end ? String(nextRcpt) : '', partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' };
+        setClpEntries(editableRows.length > 0 ? [...editableRows, emptyRow] : [emptyRow]);
+        setClpStep('entry');
+      } else {
+        setClpSummary({ entryCount: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' });
+        setClpSummaryLocked(false);
+        setClpStep('summary');
+      }
+    } catch (e) {
+      setClpSummary({ entryCount: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' });
+      setClpSummaryLocked(false);
+      setClpStep('summary');
+    }
+  };
+
+  // Save summary and go to entry
+  const handleSaveSummary = async () => {
+    if (!clpActiveBook) return;
+    const { entryCount, cash, fonepay, cheque, bankDeposit, discount } = clpSummary;
+    if (!entryCount || parseInt(entryCount) <= 0) return addToast('error', 'Error', 'Entry count required');
+    try {
+      await saveBookSummary(clpActiveBook.id, { entryCount: parseInt(entryCount), cash: parseFloat(cash) || 0, fonepay: parseFloat(fonepay) || 0, cheque: parseFloat(cheque) || 0, bankDeposit: parseFloat(bankDeposit) || 0, discount: parseFloat(discount) || 0 });
+      addToast('success', 'Saved', 'Summary saved');
+      setClpSummaryLocked(true);
+      // Update activeBook with summary
+      setClpActiveBook(prev => ({ ...prev, summary_entry_count: parseInt(entryCount), summary_cash: parseFloat(cash) || 0, summary_fonepay: parseFloat(fonepay) || 0, summary_cheque: parseFloat(cheque) || 0, summary_bank_deposit: parseFloat(bankDeposit) || 0, summary_discount: parseFloat(discount) || 0 }));
+      // Setup entry rows
+      const availStart = clpActiveBook.available_from || clpActiveBook.page_start;
+      setClpEntries([{ receiptNumber: String(availStart), partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' }]);
+      setClpPostedEntries([]);
+      setClpStep('entry');
+    } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+  };
+
+  const handleStartBlankPost = () => {
+    setClpStaffName('');
+    setClpBookNumber('');
+    setClpAssignmentId(null);
+    setClpActiveBook(null);
+    setClpPostedEntries([]);
+    setClpEntries([{ receiptNumber: '', partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' }]);
+    setClpSummaryLocked(false);
+    setClpStep('entry');
+  };
+
+  const clpUpdateEntry = (idx, field, value) => {
+    setClpEntries(prev => {
+      const updated = [...prev];
+      updated[idx] = { ...updated[idx], [field]: value };
+      // Auto-add row when typing party in last row
+      if (field === 'partyName' && idx === updated.length - 1 && value.length > 0) {
+        const nextRcpt = updated[idx].receiptNumber ? String(parseInt(updated[idx].receiptNumber) + 1) : '';
+        updated.push({ receiptNumber: nextRcpt, partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' });
+      }
+      return updated;
+    });
+  };
+
+  const clpRemoveEntry = (idx) => {
+    setClpEntries(prev => prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx));
+  };
+
+  const clpRowTotal = (entry) => {
+    return (parseFloat(entry.cash) || 0) + (parseFloat(entry.fonepay) || 0) +
+      (parseFloat(entry.cheque) || 0) + (parseFloat(entry.bankDeposit) || 0) +
+      (parseFloat(entry.discount) || 0);
+  };
+
+  const clpValidEntries = () => clpEntries.filter(e => e.partyName.trim() && clpRowTotal(e) > 0);
+
+  const clpHandlePartySearch = (idx, value) => {
+    clpUpdateEntry(idx, 'partyName', value);
+    setClpActiveRow(idx);
+    if (clpSearchTimer.current) clearTimeout(clpSearchTimer.current);
+    if (value.trim().length < 2) { setClpSuggestions([]); return; }
+    clpSearchTimer.current = setTimeout(async () => {
+      try {
+        const res = await searchReceiptParties(value.trim(), 'both');
+        setClpSuggestions(res.data.parties || []);
+      } catch { setClpSuggestions([]); }
+    }, 300);
+  };
+
+  const clpSelectParty = (idx, name) => {
+    clpUpdateEntry(idx, 'partyName', name);
+    setClpSuggestions([]);
+    setClpActiveRow(-1);
+    // Focus cash input of this row
+    const cashInput = document.querySelector(`[data-clp-cash="${idx}"]`);
+    if (cashInput) cashInput.focus();
+  };
+
+  // Keyboard navigation: Enter moves to next field in order, Tab works naturally
+  // Field order per row: rcpt → party → cash → fonepay → cheque → bankDep → discount → (next row rcpt)
+  const clpKeyNav = (e, idx, field) => {
+    if (!clpEnterNav || e.key !== 'Enter') return;
+    e.preventDefault();
+    const fieldOrder = ['rcpt', 'party', 'cash', 'fonepay', 'cheque', 'bankdep', 'discount'];
+    const currentIdx = fieldOrder.indexOf(field);
+    const nextField = currentIdx < fieldOrder.length - 1 ? fieldOrder[currentIdx + 1] : null;
+
+    if (nextField) {
+      // Move to next field in same row
+      const el = document.querySelector(`[data-clp="${nextField}-${idx}"]`);
+      if (el) el.focus();
+    } else {
+      // Last field in row → move to next row's rcpt (or add row)
+      const nextRow = idx + 1;
+      if (nextRow >= clpEntries.length) {
+        // Auto-add row if last row has data
+        if (clpEntries[idx].partyName.trim()) {
+          const nextRcpt = clpEntries[idx].receiptNumber ? String(parseInt(clpEntries[idx].receiptNumber) + 1) : '';
+          setClpEntries(prev => [...prev, { receiptNumber: nextRcpt, partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' }]);
+          setTimeout(() => { const el = document.querySelector(`[data-clp="rcpt-${nextRow}"]`); if (el) el.focus(); }, 50);
+        }
+      } else {
+        const el = document.querySelector(`[data-clp="rcpt-${nextRow}"]`);
+        if (el) el.focus();
+      }
+    }
+  };
+
+  const clpGoToConfirm = () => {
+    const valid = clpValidEntries();
+    if (valid.length === 0) return addToast('error', 'Error', 'Add at least one entry with party and amount');
+    // Check duplicate receipt numbers (new entries + already posted)
+    const allRcptNums = [...clpPostedEntries.map(e => e.receipt_number), ...valid.map(e => e.receiptNumber)].filter(Boolean);
+    const seen = new Set();
+    const dupes = [];
+    for (const n of allRcptNums) { if (seen.has(n)) dupes.push(n); seen.add(n); }
+    if (dupes.length > 0) return addToast('error', 'Duplicate Receipt #', `Receipt numbers must be unique: ${dupes.join(', ')}`);
+    setClpStep('confirm');
+  };
+
+  const clpHandleSubmit = async () => {
+    setClpSubmitting(true);
+    try {
+      const valid = clpValidEntries();
+      const res = await submitCollectionPost({
+        date: clpDate,
+        bookNumber: clpBookNumber,
+        staffName: clpStaffName,
+        assignmentId: clpAssignmentId,
+        bookId: clpActiveBook ? clpActiveBook.id : undefined,
+        entries: valid.map(e => ({
+          receiptNumber: e.receiptNumber,
+          partyName: e.partyName,
+          cash: parseFloat(e.cash) || 0,
+          fonepay: parseFloat(e.fonepay) || 0,
+          cheque: parseFloat(e.cheque) || 0,
+          bankDeposit: parseFloat(e.bankDeposit) || 0,
+          discount: parseFloat(e.discount) || 0
+        }))
+      });
+      setClpResults(res.data);
+      setClpWaChecked(new Set(res.data.results.map((r, i) => r.success ? i : -1).filter(i => i >= 0)));
+      setClpStep('results');
+      addToast(res.data.successCount > 0 ? 'success' : 'error', 'Collection Post', `${res.data.successCount}/${res.data.totalCount} receipts created`);
+    } catch (e) {
+      addToast('error', 'Error', e.response?.data?.error || e.message);
+    }
+    setClpSubmitting(false);
+  };
+
+  const clpReset = () => {
+    setClpStep('inventory');
+    setClpBookNumber('');
+    setClpStaffName('');
+    setClpAssignmentId(null);
+    setClpActiveBook(null);
+    setClpPostedEntries([]);
+    setClpEntries([{ receiptNumber: '', partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' }]);
+    setClpResults(null);
+    setClpWaChecked(new Set());
+    setClpWaSending(false);
+    setClpWaProgress('');
+    setClpSummaryLocked(false);
+    setClpSummary({ entryCount: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' });
+    fetchReceiptBooks();
+  };
+
+  const clpFormatDate = (d) => {
+    if (!d) return '-';
+    if (d.length === 8) return `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}`;
+    return d;
+  };
+
+  // Summary computed total
+  const clpSummaryTotal = () => (parseFloat(clpSummary.cash) || 0) + (parseFloat(clpSummary.fonepay) || 0) + (parseFloat(clpSummary.cheque) || 0) + (parseFloat(clpSummary.bankDeposit) || 0) + (parseFloat(clpSummary.discount) || 0);
+
+  // Group books by status for the inventory view
+  const clpGroupedBooks = () => {
+    const inUse = clpBooks.filter(b => b.status === 'assigned' || b.status === 'returned');
+    const ready = clpBooks.filter(b => b.status === 'ready');
+    const posted = clpBooks.filter(b => b.status === 'posted');
+    const inactive = clpBooks.filter(b => b.status === 'inactive');
+    return { inUse, ready, posted, inactive };
+  };
+
   // ==================== CHEQUE COLLECTION ====================
   const fetchCollectionData = async () => {
     setCollLoading(true);
@@ -1697,6 +2572,45 @@ export default function RushDashboard() {
       setCollStats(statsRes.data.stats || null);
     } catch (e) { console.error('Collection fetch error:', e); }
     setCollLoading(false);
+    // Fetch party balances in background (live Tally, may be slow)
+    getCollectionPartyBalances().then(r => setCollPartyBalances(r.data.balances || {})).catch(() => {});
+  };
+
+  // Ledger (Both) fetch
+  const fetchLedgerBoth = async () => {
+    setLbLoading(true);
+    try {
+      const res = await getLedgerBoth();
+      setLbRows(res.data.rows || []);
+      setLbSummary(res.data.summary || null);
+      setLbBillingParties(res.data.allBillingParties || []);
+      setLbOdbcParties(res.data.allOdbcParties || []);
+      setLbBulkMappings({});
+    } catch (e) { console.error('LedgerBoth fetch error:', e); }
+    setLbLoading(false);
+  };
+
+  const saveLbBulkMappings = async () => {
+    const entries = Object.entries(lbBulkMappings).filter(([, v]) => v);
+    if (entries.length === 0) return;
+    setLbBulkSaving(true);
+    let saved = 0, failed = 0;
+    for (const [key, value] of entries) {
+      try {
+        // key format: "billing:PartyName" or "cheque:PartyName"
+        const [type, ...nameParts] = key.split(':');
+        const name = nameParts.join(':');
+        const billingParty = type === 'billing' ? name : value;
+        const odbcParty = type === 'cheque' ? name : value;
+        await upsertLedgerMapping({ billingParty, odbcParty });
+        saved++;
+      } catch (e) { failed++; }
+    }
+    addToast('success', 'Bulk Mapped', `${saved} mapped${failed ? `, ${failed} failed` : ''}`);
+    setLbBulkMode(false);
+    setLbBulkMappings({});
+    fetchLedgerBoth();
+    setLbBulkSaving(false);
   };
 
   const fetchChequeReceivable = async () => {
@@ -1989,7 +2903,8 @@ export default function RushDashboard() {
           chequeNumber: l.chequeNumber,
           chequeDate: (l.chequeDate || '').replace(/-/g, ''),
           amount: parseFloat(l.amount),
-          accountHolderName: l.accountHolderName || ''
+          accountHolderName: l.accountHolderName || '',
+          partyOverride: l.partyOverride || ''
         })),
         date: receipt.voucherDate,
         narration: `Cheque from ${receipt.partyName}`
@@ -2066,7 +2981,8 @@ export default function RushDashboard() {
               chequeNumber: l.chequeNumber,
               chequeDate: (l.chequeDate || '').replace(/-/g, ''),
               amount: parseFloat(l.amount),
-              accountHolderName: l.accountHolderName || ''
+              accountHolderName: l.accountHolderName || '',
+              partyOverride: l.partyOverride || ''
             })),
             narration: `Cheque from ${r.partyName}`
           };
@@ -2099,7 +3015,145 @@ export default function RushDashboard() {
     setCpSyncAllLoading(false);
   };
 
+  // ==================== AUTH HANDLERS ====================
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    setLoginLoading(true);
+    try {
+      const res = await login(loginForm);
+      const user = res.data.user;
+      localStorage.setItem('rush_user', JSON.stringify(user));
+      setCurrentUser(user);
+      setLoginForm({ username: '', password: '' });
+      // Fetch permissions after login
+      fetchUserPermissions(user.id);
+    } catch (err) {
+      setLoginError(err.response?.data?.error || 'Login failed');
+    }
+    setLoginLoading(false);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('rush_user');
+    setCurrentUser(null);
+    setAllowedPages(new Set());
+    setCurrentPage('dashboard');
+  };
+
+  const fetchUserPermissions = async (userId) => {
+    try {
+      const res = await getMyPermissions(userId);
+      const pages = res.data.allowedPages || [];
+      // Empty array = no restrictions configured, allow all
+      setAllowedPages(new Set(pages));
+    } catch {
+      setAllowedPages(new Set());
+    }
+  };
+
+  const canAccessPage = (pageKey) => {
+    // No user logged in (login skipped) or admin = full access
+    if (!currentUser || currentUser?.role === 'admin') return true;
+    // No restrictions configured = allow all
+    if (allowedPages.size === 0) return true;
+    // Check permission
+    return allowedPages.has(pageKey);
+  };
+
+  // Fetch permissions on mount if logged in
+  useEffect(() => {
+    if (currentUser?.id) {
+      fetchUserPermissions(currentUser.id);
+    }
+  }, [currentUser?.id]);
+
+  // Role permissions settings handlers
+  const fetchRolePerms = async (role) => {
+    setRpLoading(true);
+    try {
+      const res = await getRolePermissions(role);
+      const permsMap = {};
+      for (const p of (res.data.permissions || [])) {
+        permsMap[p.pageKey] = p.visible;
+      }
+      setRpPermissions(permsMap);
+    } catch {
+      setRpPermissions({});
+    }
+    setRpLoading(false);
+  };
+
+  const handleSaveRolePerms = async () => {
+    setRpSaving(true);
+    try {
+      const allPages = Object.keys(PAGE_TITLES);
+      const permissions = allPages.map(pk => ({
+        pageKey: pk,
+        visible: rpPermissions[pk] !== undefined ? rpPermissions[pk] : true
+      }));
+      await saveRolePermissions(rpSelectedRole, permissions);
+      alert('Permissions saved!');
+    } catch (err) {
+      alert('Save error: ' + (err.response?.data?.error || err.message));
+    }
+    setRpSaving(false);
+  };
+
+  // Ledger Account search autocomplete
+  const handleLaSearchChange = (val) => {
+    setLaSearch(val);
+    if (laSearchTimer.current) clearTimeout(laSearchTimer.current);
+    if (val.trim().length < 2) { setLaSuggestions([]); setLaShowSuggestions(false); return; }
+    laSearchTimer.current = setTimeout(async () => {
+      try {
+        const res = await searchLedgers(val.trim());
+        setLaSuggestions(res.data.ledgers || []);
+        setLaShowSuggestions(true);
+      } catch (e) { setLaSuggestions([]); }
+    }, 300);
+  };
+
+  const selectLaSuggestion = (name) => {
+    setLaSearch(name);
+    setLaShowSuggestions(false);
+    setLaSuggestions([]);
+    fetchLedgerAccount(name);
+  };
+
+  // Ledger Account view handler
+  const fetchLedgerAccount = async (name) => {
+    if (!name) return;
+    setLaLedgerName(name);
+    setLaLoading(true);
+    setLaError('');
+    setLaData(null);
+    try {
+      const from = laFromDate ? laFromDate.replace(/-/g, '') : undefined;
+      const to = laToDate ? laToDate.replace(/-/g, '') : undefined;
+      const res = await getLedgerAccountView(name, from, to);
+      setLaData(res.data);
+    } catch (err) {
+      setLaError(err.response?.data?.error || err.message);
+    }
+    setLaLoading(false);
+  };
+
+  const fetchLaVoucherDetail = async (masterId) => {
+    if (!masterId) return;
+    setLaVchDetailLoading(true);
+    try {
+      const res = await getTallyXmlVoucherDetail(masterId);
+      setLaVchDetail(res.data);
+    } catch (e) {
+      setLaVchDetail({ error: e.message });
+    }
+    setLaVchDetailLoading(false);
+  };
+
   const goToPage = (page) => {
+    if (!canAccessPage(page)) return;
     setCurrentPage(page);
     setMobileMenuOpen(false);
     if (page === 'sacks') fetchSacks();
@@ -2126,10 +3180,19 @@ export default function RushDashboard() {
     if (page === 'ratio-analysis') fetchRatios();
     if (page === 'xml-viewer') fetchXmlVouchers();
     if (page === 'columnar') fetchColumnar();
+    if (page === 'eod-recon') fetchEODRecon();
     if (page === 'cheques') { fetchChequeRecon(); fetchChequeManagement(); }
     if (page === 'cheque-post') { fetchChequePost(); fetchLedgerMappings(); }
     if (page === 'cheque-vouchers') fetchChequeVouchers();
     if (page === 'collection') fetchCollectionData();
+    if (page === 'collection-post') { fetchReceiptBooks(); setClpStep('inventory'); setClpSelectedBooks([]); }
+    if (page === 'ledger-both') fetchLedgerBoth();
+    if (page === 'whatsapp') {
+      getWhatsAppStatus().then(r => { setWaStatus(r.data.status); setWaQRCode(r.data.qrCode); setWaClientInfo(r.data.clientInfo); if (r.data.testMode !== undefined) setWaTestMode(r.data.testMode); }).catch(() => {});
+      getWhatsAppContacts().then(r => setWaContacts(r.data.contacts || [])).catch(() => {});
+      getWhatsAppMessages({ limit: 50 }).then(r => setWaMessages(r.data.messages || [])).catch(() => {});
+      getWhatsAppMessageStats().then(r => setWaStats(r.data.stats || null)).catch(() => {});
+    }
     if (page === 'settings') fetchVoucherLockStatus();
   };
 
@@ -2713,6 +3776,9 @@ export default function RushDashboard() {
     return acc;
   }, { debit: 0, credit: 0 });
 
+  // Login screen disabled for now — enable later by uncommenting the gate below
+  // if (!currentUser) { return <LoginScreen />; }
+
   return (
     <div className={`rush-dashboard ${isDarkMode ? 'dark' : 'light'}`} data-mode={isSimpleMode ? 'simple' : 'advanced'}>
       {/* SIDEBAR */}
@@ -2721,122 +3787,154 @@ export default function RushDashboard() {
           <div className="brand-icon">R</div>
           <div>
             <h2>Rush Wholesale</h2>
-            <span>POS Dashboard</span>
+            <span style={{ fontSize: '11px' }}>{currentUser ? <>{currentUser.displayName} <span style={{ background: 'var(--blue-g)', color: 'var(--blue)', padding: '1px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '600', textTransform: 'uppercase' }}>{currentUser.role}</span></> : 'POS Dashboard'}</span>
           </div>
         </div>
 
         <div className="nav">
           <div className="nav-label">Main</div>
-          <div className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`} onClick={() => goToPage('dashboard')}>
+          {canAccessPage('dashboard') && <div className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`} onClick={() => goToPage('dashboard')}>
             <span className="nav-icon">📊</span> Dashboard
-          </div>
-          <div className={`nav-item create-bill-btn ${currentPage === 'create-bill' ? 'active' : ''}`} onClick={() => goToPage('create-bill')} style={{ background: currentPage === 'create-bill' ? 'var(--blue)' : 'var(--blue-g)', color: currentPage === 'create-bill' ? 'white' : 'var(--blue)', fontWeight: '600' }}>
+          </div>}
+          {canAccessPage('create-bill') && <div className={`nav-item create-bill-btn ${currentPage === 'create-bill' ? 'active' : ''}`} onClick={() => goToPage('create-bill')} style={{ background: currentPage === 'create-bill' ? 'var(--blue)' : 'var(--blue-g)', color: currentPage === 'create-bill' ? 'white' : 'var(--blue)', fontWeight: '600' }}>
             <span className="nav-icon">➕</span> Create Bill
-          </div>
-<div className={`nav-item ${currentPage === 'pending' ? 'active' : ''}`} onClick={() => goToPage('pending')}>
+          </div>}
+          {canAccessPage('pending') && <div className={`nav-item ${currentPage === 'pending' ? 'active' : ''}`} onClick={() => goToPage('pending')}>
             <span className="nav-icon">⏳</span> Pending Bills
             {pendingBillsArray.length > 0 && <span className="nav-badge amber">{pendingBillsArray.length}</span>}
-          </div>
-          <div className={`nav-item ${currentPage === 'vouchers' ? 'active' : ''}`} onClick={() => goToPage('vouchers')}>
+          </div>}
+          {canAccessPage('vouchers') && <div className={`nav-item ${currentPage === 'vouchers' ? 'active' : ''}`} onClick={() => goToPage('vouchers')}>
             <span className="nav-icon">📜</span> Total Vouchers
             {billsArray.length > 0 && <span className="nav-badge blue">{billsArray.length}</span>}
-          </div>
-
-          <div className={`nav-item ${currentPage === 'deleted' ? 'active' : ''}`} onClick={() => goToPage('deleted')}>
+          </div>}
+          {canAccessPage('deleted') && <div className={`nav-item ${currentPage === 'deleted' ? 'active' : ''}`} onClick={() => goToPage('deleted')}>
             <span className="nav-icon">🗑️</span> Deleted Vouchers
             {deletedVouchersCount > 0 && <span className="nav-badge red">{deletedVouchersCount}</span>}
-          </div>
+          </div>}
 
           <div className="nav-label">Operations</div>
-          <div className={`nav-item ${currentPage === 'dispatch' ? 'active' : ''}`} onClick={() => goToPage('dispatch')}>
+          {canAccessPage('dispatch') && <div className={`nav-item ${currentPage === 'dispatch' ? 'active' : ''}`} onClick={() => goToPage('dispatch')}>
             <span className="nav-icon">📦</span> Dispatch
             {dispatchGroups.pending.length > 0 && <span className="nav-badge amber">{dispatchGroups.pending.length}</span>}
-          </div>
-          <div className={`nav-item ${currentPage === 'sacks' ? 'active' : ''}`} onClick={() => goToPage('sacks')}>
+          </div>}
+          {canAccessPage('sacks') && <div className={`nav-item ${currentPage === 'sacks' ? 'active' : ''}`} onClick={() => goToPage('sacks')}>
             <span className="nav-icon">🎒</span> Sacks
-          </div>
+          </div>}
 
           <div className="nav-label">Accounts</div>
-          <div className={`nav-item ${currentPage === 'daybook' ? 'active' : ''}`} onClick={() => goToPage('daybook')}>
+          {canAccessPage('daybook') && <div className={`nav-item ${currentPage === 'daybook' ? 'active' : ''}`} onClick={() => goToPage('daybook')}>
             <span className="nav-icon">📒</span> Daybook
-          </div>
-          <div className={`nav-item ${currentPage === 'columnar' ? 'active' : ''}`} onClick={() => goToPage('columnar')}>
+          </div>}
+          {canAccessPage('columnar') && <div className={`nav-item ${currentPage === 'columnar' ? 'active' : ''}`} onClick={() => goToPage('columnar')}>
             <span className="nav-icon">📋</span> Columnar
-          </div>
-          <div className={`nav-item ${currentPage === 'parties' ? 'active' : ''}`} onClick={() => goToPage('parties')}>
+          </div>}
+          {canAccessPage('eod-recon') && <div className={`nav-item ${currentPage === 'eod-recon' ? 'active' : ''}`} onClick={() => goToPage('eod-recon')}>
+            <span className="nav-icon">📊</span> EOD Recon
+          </div>}
+          {canAccessPage('parties') && <div className={`nav-item ${currentPage === 'parties' ? 'active' : ''}`} onClick={() => goToPage('parties')}>
             <span className="nav-icon">👥</span> Parties
-          </div>
+          </div>}
+          {canAccessPage('ledger-hierarchy') && <div className={`nav-item ${currentPage === 'ledger-hierarchy' ? 'active' : ''}`} onClick={() => goToPage('ledger-hierarchy')}>
+            <span className="nav-icon">🏗️</span> Ledger Hierarchy
+          </div>}
+          {canAccessPage('ledger-account') && <div className={`nav-item ${currentPage === 'ledger-account' ? 'active' : ''}`} onClick={() => goToPage('ledger-account')}>
+            <span className="nav-icon">📒</span> Ledger Account
+          </div>}
 
           <div className="nav-label">Payments</div>
-          <div className={`nav-item ${currentPage === 'fonepay' ? 'active' : ''}`} onClick={() => goToPage('fonepay')}>
+          {canAccessPage('fonepay') && <div className={`nav-item ${currentPage === 'fonepay' ? 'active' : ''}`} onClick={() => goToPage('fonepay')}>
             <span className="nav-icon">📱</span> Fonepay
             {fonepayTxns.length > 0 && <span className="nav-badge green">{fonepayTxns.length}</span>}
-          </div>
-          <div className={`nav-item ${currentPage === 'rbb' ? 'active' : ''}`} onClick={() => goToPage('rbb')}>
+          </div>}
+          {canAccessPage('rbb') && <div className={`nav-item ${currentPage === 'rbb' ? 'active' : ''}`} onClick={() => goToPage('rbb')}>
             <span className="nav-icon">🏦</span> RBB Banking
             {rbbTxns.length > 0 && <span className="nav-badge cyan">{rbbTxns.length}</span>}
-          </div>
-          <div className={`nav-item ${currentPage === 'bill-history' ? 'active' : ''}`} onClick={() => goToPage('bill-history')}>
+          </div>}
+          {canAccessPage('bill-history') && <div className={`nav-item ${currentPage === 'bill-history' ? 'active' : ''}`} onClick={() => goToPage('bill-history')}>
             <span className="nav-icon">📋</span> Dashboard Bills
             {billHistory.length > 0 && <span className="nav-badge orange">{billHistory.length}</span>}
-          </div>
+          </div>}
 
           <div className="nav-label">Cheque Mgmt</div>
-          <div className={`nav-item ${currentPage === 'cheques' ? 'active' : ''}`} onClick={() => goToPage('cheques')}>
+          {canAccessPage('cheques') && <div className={`nav-item ${currentPage === 'cheques' ? 'active' : ''}`} onClick={() => goToPage('cheques')}>
             <span className="nav-icon">📝</span> Cheques
-          </div>
-          <div className={`nav-item ${currentPage === 'cheque-post' ? 'active' : ''}`} onClick={() => goToPage('cheque-post')}>
+          </div>}
+          {canAccessPage('cheque-post') && <div className={`nav-item ${currentPage === 'cheque-post' ? 'active' : ''}`} onClick={() => goToPage('cheque-post')}>
             <span className="nav-icon">📮</span> Cheque Post
-          </div>
-          <div className={`nav-item ${currentPage === 'cheque-vouchers' ? 'active' : ''}`} onClick={() => goToPage('cheque-vouchers')}>
+          </div>}
+          {canAccessPage('cheque-vouchers') && <div className={`nav-item ${currentPage === 'cheque-vouchers' ? 'active' : ''}`} onClick={() => goToPage('cheque-vouchers')}>
             <span className="nav-icon">📋</span> Cheque Vouchers
-          </div>
-          <div className={`nav-item ${currentPage === 'collection' ? 'active' : ''}`} onClick={() => goToPage('collection')}>
+          </div>}
+          {canAccessPage('collection') && <div className={`nav-item ${currentPage === 'collection' ? 'active' : ''}`} onClick={() => goToPage('collection')}>
             <span className="nav-icon">📦</span> Collection
-          </div>
-          <div className={`nav-item ${currentPage === 'bank-names' ? 'active' : ''}`} onClick={() => goToPage('bank-names')}>
-            <span className="nav-icon">🏦</span> Bank Names
-          </div>
+          </div>}
+          {canAccessPage('collection-post') && <div className={`nav-item ${currentPage === 'collection-post' ? 'active' : ''}`} onClick={() => goToPage('collection-post')}>
+            <span className="nav-icon">📝</span> Collection Post
+          </div>}
+          {canAccessPage('ledger-both') && <div className={`nav-item ${currentPage === 'ledger-both' ? 'active' : ''}`} onClick={() => goToPage('ledger-both')}>
+            <span className="nav-icon">📖</span> Ledger (Both)
+          </div>}
+          {canAccessPage('bank-names') && <div className={`nav-item ${currentPage === 'bank-names' ? 'active' : ''}`} onClick={() => goToPage('bank-names')}>
+            <span className="nav-icon">⚙️</span> Mapping Settings
+          </div>}
 
           <div className="nav-label adv">Reports</div>
-          <div className={`nav-item adv ${currentPage === 'outstanding' ? 'active' : ''}`} onClick={() => goToPage('outstanding')}>
+          {canAccessPage('outstanding') && <div className={`nav-item adv ${currentPage === 'outstanding' ? 'active' : ''}`} onClick={() => goToPage('outstanding')}>
             <span className="nav-icon">💰</span> Outstanding
-          </div>
-          <div className={`nav-item adv ${currentPage === 'stock-groups' ? 'active' : ''}`} onClick={() => goToPage('stock-groups')}>
+          </div>}
+          {canAccessPage('stock-groups') && <div className={`nav-item adv ${currentPage === 'stock-groups' ? 'active' : ''}`} onClick={() => goToPage('stock-groups')}>
             <span className="nav-icon">📦</span> Stock Groups
-          </div>
-          <div className={`nav-item adv ${currentPage === 'profit-loss' ? 'active' : ''}`} onClick={() => goToPage('profit-loss')}>
+          </div>}
+          {canAccessPage('profit-loss') && <div className={`nav-item adv ${currentPage === 'profit-loss' ? 'active' : ''}`} onClick={() => goToPage('profit-loss')}>
             <span className="nav-icon">📈</span> Profit & Loss
-          </div>
-          <div className={`nav-item adv ${currentPage === 'balance-sheet' ? 'active' : ''}`} onClick={() => goToPage('balance-sheet')}>
+          </div>}
+          {canAccessPage('balance-sheet') && <div className={`nav-item adv ${currentPage === 'balance-sheet' ? 'active' : ''}`} onClick={() => goToPage('balance-sheet')}>
             <span className="nav-icon">📊</span> Balance Sheet
-          </div>
-          <div className={`nav-item adv ${currentPage === 'trial-balance' ? 'active' : ''}`} onClick={() => goToPage('trial-balance')}>
+          </div>}
+          {canAccessPage('trial-balance') && <div className={`nav-item adv ${currentPage === 'trial-balance' ? 'active' : ''}`} onClick={() => goToPage('trial-balance')}>
             <span className="nav-icon">⚖️</span> Trial Balance
-          </div>
-          <div className={`nav-item adv ${currentPage === 'cash-flow' ? 'active' : ''}`} onClick={() => goToPage('cash-flow')}>
+          </div>}
+          {canAccessPage('cash-flow') && <div className={`nav-item adv ${currentPage === 'cash-flow' ? 'active' : ''}`} onClick={() => goToPage('cash-flow')}>
             <span className="nav-icon">💵</span> Cash Flow
-          </div>
-          <div className={`nav-item adv ${currentPage === 'ratio-analysis' ? 'active' : ''}`} onClick={() => goToPage('ratio-analysis')}>
+          </div>}
+          {canAccessPage('ratio-analysis') && <div className={`nav-item adv ${currentPage === 'ratio-analysis' ? 'active' : ''}`} onClick={() => goToPage('ratio-analysis')}>
             <span className="nav-icon">📉</span> Ratio Analysis
-          </div>
-          <div className={`nav-item adv ${currentPage === 'price-lists' ? 'active' : ''}`} onClick={() => goToPage('price-lists')}>
+          </div>}
+          {canAccessPage('price-lists') && <div className={`nav-item adv ${currentPage === 'price-lists' ? 'active' : ''}`} onClick={() => goToPage('price-lists')}>
             <span className="nav-icon">🏷️</span> Price Lists
-          </div>
-          <div className={`nav-item adv ${currentPage === 'bank-recon' ? 'active' : ''}`} onClick={() => goToPage('bank-recon')}>
+          </div>}
+          {canAccessPage('bank-recon') && <div className={`nav-item adv ${currentPage === 'bank-recon' ? 'active' : ''}`} onClick={() => goToPage('bank-recon')}>
             <span className="nav-icon">🏦</span> Reconciliation
-          </div>
-          <div className={`nav-item adv ${currentPage === 'inventory-movement' ? 'active' : ''}`} onClick={() => goToPage('inventory-movement')}>
+          </div>}
+          {canAccessPage('inventory-movement') && <div className={`nav-item adv ${currentPage === 'inventory-movement' ? 'active' : ''}`} onClick={() => goToPage('inventory-movement')}>
             <span className="nav-icon">📊</span> Inventory Move
-          </div>
+          </div>}
 
           <div className="nav-label adv">System</div>
-          <div className={`nav-item adv ${currentPage === 'xml-viewer' ? 'active' : ''}`} onClick={() => goToPage('xml-viewer')}>
+          {canAccessPage('xml-viewer') && <div className={`nav-item adv ${currentPage === 'xml-viewer' ? 'active' : ''}`} onClick={() => goToPage('xml-viewer')}>
             <span className="nav-icon">🔍</span> XML Viewer
-          </div>
-          <div className={`nav-item adv ${currentPage === 'settings' ? 'active' : ''}`} onClick={() => goToPage('settings')}>
+          </div>}
+          {canAccessPage('data-completeness') && <div className={`nav-item adv ${currentPage === 'data-completeness' ? 'active' : ''}`} onClick={() => goToPage('data-completeness')}>
+            <span className="nav-icon">📋</span> Data Quality
+          </div>}
+          {canAccessPage('settings') && <div className={`nav-item adv ${currentPage === 'settings' ? 'active' : ''}`} onClick={() => goToPage('settings')}>
             <span className="nav-icon">⚙️</span> Settings
+          </div>}
+
+          <div className="nav-label">Communication</div>
+          <div className={`nav-item ${currentPage === 'whatsapp' ? 'active' : ''}`} onClick={() => goToPage('whatsapp')}>
+            <span className="nav-icon">💬</span> WhatsApp
+            {waTestMode && <span style={{ marginLeft: '4px', fontSize: '9px', fontWeight: '700', background: '#eab308', color: '#000', padding: '1px 5px', borderRadius: '3px', lineHeight: '1.2' }}>TEST</span>}
+            {waStatus === 'ready' && <span style={{ marginLeft: 'auto', width: '8px', height: '8px', borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }}></span>}
+            {waStatus === 'qr_pending' && <span style={{ marginLeft: 'auto', width: '8px', height: '8px', borderRadius: '50%', background: '#eab308', display: 'inline-block' }}></span>}
           </div>
+
+          {/* Logout (only when logged in) */}
+          {currentUser && <div style={{ marginTop: '12px', padding: '0 8px' }}>
+            <div className="nav-item" onClick={handleLogout} style={{ color: 'var(--red)', fontSize: '13px' }}>
+              <span className="nav-icon">🚪</span> Logout
+            </div>
+          </div>}
         </div>
 
         {/* Pending Bills Summary Card */}
@@ -2899,6 +3997,12 @@ export default function RushDashboard() {
             <span className="tcb-names">{tallyCompanies.join(' | ')}</span>
           </div>
         )}
+
+        <div className="topbar-datetime">
+          <div className="dt-nepali">{currentDateTime.np.format('YYYY MMMM DD, ddd')}</div>
+          <div className="dt-english">{currentDateTime.en.toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}</div>
+          <div className="dt-time">{currentDateTime.en.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</div>
+        </div>
 
         <input
           className="search-box"
@@ -3250,6 +4354,7 @@ export default function RushDashboard() {
                           </td>
                           <td className="party-cell" style={{ maxWidth: '180px' }}>
                             {v.party_name || '-'}
+                            {v.extra_parties_count > 0 && <span style={{ fontSize: '10px', color: 'var(--orange)', marginLeft: '4px', fontWeight: '700' }}>+{v.extra_parties_count}</span>}
                           </td>
                           <td>
                             <span className={`vt-badge ${(v.voucher_type || '').toLowerCase().includes('receipt') ? 'receipt' : (v.voucher_type || '').toLowerCase().includes('payment') ? 'payment' : 'sales'}`}>
@@ -3257,7 +4362,7 @@ export default function RushDashboard() {
                             </span>
                           </td>
                           <td className="r amt-cell" style={{ color: 'var(--green)' }}>
-                            Rs {(v.amount || 0).toLocaleString('en-IN')}
+                            Rs {((v.total_amount && v.total_amount > 0 ? v.total_amount : v.amount) || 0).toLocaleString('en-IN')}
                           </td>
                           <td className="age-cell">
                             <span className={`age-badge ${formatDaysAgo(v.voucher_date) === 'Today' ? 'today' : 'old'}`}>
@@ -4050,6 +5155,13 @@ export default function RushDashboard() {
                       <option key={i} value={vt.voucher_type}>{vt.voucher_type} ({vt.count})</option>
                     ))}
                   </select>
+                  {/* Company Filter */}
+                  <div style={{ display: 'flex', gap: '2px', background: 'var(--bg)', borderRadius: '6px', border: '1px solid var(--border)', padding: '2px' }}>
+                    {[['both', 'Both'], ['billing', 'FOR DB'], ['odbc', 'ODBC']].map(([key, label]) => (
+                      <button key={key} onClick={() => { setVoucherCompanyFilter(key); setVoucherPage(1); }}
+                        style={{ padding: '4px 10px', fontSize: '11px', fontWeight: voucherCompanyFilter === key ? '700' : '400', borderRadius: '4px', border: 'none', cursor: 'pointer', background: voucherCompanyFilter === key ? 'var(--accent)' : 'transparent', color: voucherCompanyFilter === key ? 'white' : 'var(--t2)', transition: 'all 0.15s' }}>{label}</button>
+                    ))}
+                  </div>
                   <input
                     className="search-box"
                     placeholder="Search vouchers..."
@@ -4059,6 +5171,27 @@ export default function RushDashboard() {
                   />
                   <button className="btn btn-p" onClick={fetchAllVouchers} disabled={vouchersLoading} style={{ padding: '6px 12px', fontSize: '12px' }}>
                     {vouchersLoading ? '⟳ Loading...' : '🔄 Refresh'}
+                  </button>
+                  <button className="btn" onClick={async () => {
+                    try {
+                      addToast('info', 'Syncing', 'Syncing ODBC vouchers from Tally...');
+                      await syncODBCVouchers();
+                      addToast('success', 'Synced', 'ODBC vouchers synced from Tally');
+                      if (voucherCompanyFilter !== 'billing') fetchAllVouchers();
+                    } catch (e) { addToast('error', 'Sync Failed', e.response?.data?.error || e.message); }
+                  }} style={{ padding: '6px 12px', fontSize: '12px' }}>
+                    Sync ODBC
+                  </button>
+                  <button className="btn" onClick={async () => {
+                    try {
+                      addToast('info', 'Backfill', 'Fetching creation timestamps from Tally...');
+                      const res = await backfillTimestamps();
+                      const d = res.data;
+                      addToast('success', 'Done', `${d.updated} vouchers updated with creation timestamps`);
+                      fetchAllVouchers();
+                    } catch (e) { addToast('error', 'Failed', e.response?.data?.error || e.message); }
+                  }} style={{ padding: '6px 12px', fontSize: '12px' }} title="Fetch creation timestamps from Tally for vouchers that don't have them yet">
+                    Backfill Timestamps
                   </button>
                   <div style={{ width: '1px', height: '24px', background: 'var(--border)' }} />
                   <select
@@ -4265,6 +5398,12 @@ export default function RushDashboard() {
                       >
                         Voucher Type {voucherSort.field === 'voucher_type' && <span className="sort-arrow">{voucherSort.direction === 'asc' ? '▲' : '▼'}</span>}
                       </th>
+                      {voucherCompanyFilter === 'both' && <th
+                        className="sortable"
+                        onClick={() => setVoucherSort(s => ({ field: 'company', direction: s.field === 'company' && s.direction === 'asc' ? 'desc' : 'asc' }))}
+                      >
+                        Company {voucherSort.field === 'company' && <span className="sort-arrow">{voucherSort.direction === 'asc' ? '▲' : '▼'}</span>}
+                      </th>}
                       <th
                         className="sortable"
                         onClick={() => setVoucherSort(s => ({ field: 'party_name', direction: s.field === 'party_name' && s.direction === 'asc' ? 'desc' : 'asc' }))}
@@ -4284,6 +5423,12 @@ export default function RushDashboard() {
                         English Date {voucherSort.field === 'voucher_date' && <span className="sort-arrow">{voucherSort.direction === 'asc' ? '▲' : '▼'}</span>}
                       </th>
                       <th>Nepali Date</th>
+                      <th
+                        className="sortable"
+                        onClick={() => setVoucherSort(s => ({ field: 'tally_created_datetime', direction: s.field === 'tally_created_datetime' && s.direction === 'asc' ? 'desc' : 'asc' }))}
+                      >
+                        Created At {voucherSort.field === 'tally_created_datetime' && <span className="sort-arrow">{voucherSort.direction === 'asc' ? '▲' : '▼'}</span>}
+                      </th>
                       <th>Age</th>
                       <th>Audit</th>
                       <th style={{ width: '50px', textAlign: 'center' }}>Lock</th>
@@ -4301,7 +5446,7 @@ export default function RushDashboard() {
                       if (bVal == null) bVal = '';
 
                       // Numeric fields
-                      if (field === 'id' || field === 'amount') {
+                      if (field === 'id' || field === 'amount' || field === 'alter_id') {
                         aVal = Number(aVal) || 0;
                         bVal = Number(bVal) || 0;
                       } else {
@@ -4379,12 +5524,34 @@ export default function RushDashboard() {
                             });
                           })()}
                         </td>
+                        {voucherCompanyFilter === 'both' && <td>
+                          <span style={{
+                            fontSize: '9px', padding: '2px 6px', borderRadius: '3px', fontWeight: '700',
+                            background: voucher.company === 'FOR DB' ? 'var(--blue-g, #e3f2fd)' : 'var(--amber-g, #fff8e1)',
+                            color: voucher.company === 'FOR DB' ? 'var(--blue, #1976d2)' : 'var(--amber, #f57f17)'
+                          }}>
+                            {voucher.company === 'FOR DB' ? 'FOR DB' : 'ODBC'}
+                          </span>
+                        </td>}
                         <td className="party-cell">{voucher.party_name || '-'}</td>
                         <td className={`r amt-cell ${(voucher.amount || 0) < 0 ? 'credit' : 'debit'}`}>
                           Rs {Math.abs(voucher.amount || 0).toLocaleString('en-IN')}
                         </td>
                         <td className="date-cell">{formatDate(voucher.voucher_date)}</td>
                         <td className="date-cell nepali">{toNepaliDate(voucher.voucher_date)}</td>
+                        <td className="date-cell" style={{ fontSize: '10px', whiteSpace: 'nowrap' }} title={voucher.tally_created_datetime ? `Created: ${formatTallyDateTime(voucher.tally_created_datetime)}\nUpdated: ${formatTallyDateTime(voucher.tally_updated_datetime)}\nStatus: ${voucher.object_update_action || '?'}\nEntered by: ${voucher.entered_by || '?'}` : ''}>
+                          {voucher.tally_created_datetime ? (<>
+                            {formatTallyDateTime(voucher.tally_created_datetime)}
+                            {voucher.object_update_action && (
+                              <span style={{ marginLeft: '4px', fontSize: '8px', padding: '1px 4px', borderRadius: '3px', fontWeight: '700',
+                                background: voucher.object_update_action === 'Create' ? 'var(--green-g, #e8f5e9)' : 'var(--amber-g, #fff8e1)',
+                                color: voucher.object_update_action === 'Create' ? 'var(--green, #2e7d32)' : 'var(--amber, #f57f17)'
+                              }}>
+                                {voucher.object_update_action === 'Create' ? 'NEW' : 'EDITED'}
+                              </span>
+                            )}
+                          </>) : <span style={{ color: 'var(--t3)' }}>—</span>}
+                        </td>
                         <td className="age-cell">
                           <span className={`age-badge ${formatDaysAgo(voucher.voucher_date) === 'Today' ? 'today' :
                             formatDaysAgo(voucher.voucher_date).includes('1 day') ? 'recent' : 'old'}`}>
@@ -4392,6 +5559,9 @@ export default function RushDashboard() {
                           </span>
                         </td>
                         <td onClick={(e) => e.stopPropagation()} style={{ padding: '4px' }}>
+                          {voucher.company === 'ODBC CHq Mgmt' ? (
+                            <span style={{ fontSize: '10px', color: 'var(--t3)' }}>—</span>
+                          ) : (
                           <select
                             value={voucher.audit_status || ''}
                             onChange={async (e) => {
@@ -4414,8 +5584,12 @@ export default function RushDashboard() {
                             <option value="need_to_ask">Need to Ask</option>
                             <option value="non_audited">Non Audited</option>
                           </select>
+                          )}
                         </td>
                         <td onClick={(e) => e.stopPropagation()} style={{ padding: '4px', textAlign: 'center' }}>
+                          {voucher.company === 'ODBC CHq Mgmt' ? (
+                            <span style={{ fontSize: '10px', color: 'var(--t3)' }}>—</span>
+                          ) : (
                           <button
                             onClick={async () => {
                               const isLocked = voucher._locked;
@@ -4438,11 +5612,12 @@ export default function RushDashboard() {
                           >
                             {voucher._locked ? '🔒' : '🔓'}
                           </button>
+                          )}
                         </td>
                       </tr>
                       {isExpanded && (
                         <tr className="change-log-row">
-                          <td colSpan="13" style={{ padding: 0, border: 'none' }}>
+                          <td colSpan={voucherCompanyFilter === 'both' ? 15 : 14} style={{ padding: 0, border: 'none' }}>
                             <div style={{ background: 'var(--bg)', borderLeft: '3px solid var(--blue)', padding: '12px 16px', margin: '0 8px 8px 8px', borderRadius: '0 8px 8px 0' }}>
                               <div style={{ fontSize: '12px', fontWeight: '700', color: 'var(--blue)', marginBottom: '8px' }}>
                                 Alteration History — Master ID: {mid}
@@ -4646,9 +5821,9 @@ export default function RushDashboard() {
                             </span>
                           </td>
                           <td style={{ fontWeight: '600' }}>{v.voucher_number}</td>
-                          <td>{v.party_name}</td>
+                          <td>{v.party_name}{v.extra_parties_count > 0 && <span style={{ fontSize: '10px', color: 'var(--orange)', marginLeft: '4px', fontWeight: '700' }}>+{v.extra_parties_count}</span>}</td>
                           <td className="r" style={{ fontWeight: '600', color: v.amount < 0 ? 'var(--red)' : 'var(--green)' }}>
-                            {formatCurrency(v.amount)}
+                            {formatCurrency(v.total_amount && v.total_amount > 0 ? v.total_amount : v.amount)}
                           </td>
                           <td style={{ fontSize: '12px' }}>{formatDate(v.voucher_date)}</td>
                           <td style={{ fontSize: '11px', color: 'var(--t3)' }}>
@@ -4959,56 +6134,146 @@ export default function RushDashboard() {
 
             {/* FONEPAY PAGE */}
             <div className={`page ${currentPage === 'fonepay' ? 'active' : ''}`}>
+              {/* Ledger Summary Cards — Opening / CR / DR / Balance */}
+              {fonepayLedgerData && (
+              <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                <div onClick={() => {
+                    const val = prompt('Enter Fonepay opening balance:', fonepayLedgerData.openingBalance || 0);
+                    if (val !== null && !isNaN(parseFloat(val))) {
+                      saveAppSettings({ fonepay_opening_balance: val }).then(() => fetchFonepay());
+                    }
+                  }}
+                  style={{ flex: 1, minWidth: '140px', background: 'var(--card)', borderRadius: '10px', padding: '14px 18px', border: '1px solid var(--blue)', borderLeftWidth: '3px', cursor: 'pointer' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--blue)', fontWeight: '600', marginBottom: '4px' }}>OPENING BAL (click to edit)</div>
+                  <div style={{ fontSize: '20px', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--blue)' }}>Rs {(fonepayLedgerData.openingBalance || 0).toLocaleString('en-IN')}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Carried forward</div>
+                </div>
+                <div style={{ flex: 1, minWidth: '160px', background: 'var(--card)', borderRadius: '10px', padding: '14px 18px', border: '1px solid var(--green)', borderLeftWidth: '3px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--green)', fontWeight: '600', marginBottom: '4px' }}>FONEPAY COLLECTED (CR)</div>
+                  <div style={{ fontSize: '20px', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--green)' }}>Rs {(fonepayLedgerData.totalCR || 0).toLocaleString('en-IN')}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--t3)' }}>{fonepayLedgerData.crCount || 0} transactions</div>
+                </div>
+                <div style={{ flex: 1, minWidth: '160px', background: 'var(--card)', borderRadius: '10px', padding: '14px 18px', border: '1px solid var(--red)', borderLeftWidth: '3px' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--red)', fontWeight: '600', marginBottom: '4px' }}>RBB SETTLED (DR)</div>
+                  <div style={{ fontSize: '20px', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--red)' }}>Rs {((fonepayLedgerData.totalDR || 0) - (fonepayLedgerData.totalCharges || 0)).toLocaleString('en-IN')}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--t3)' }}>{fonepayLedgerData.drCount || 0} settlements</div>
+                </div>
+                <div onClick={() => {
+                    const date = prompt('Charge date (YYYY-MM-DD):', new Date().toISOString().split('T')[0]);
+                    if (!date) return;
+                    const amt = prompt('Charge amount:');
+                    if (!amt || isNaN(parseFloat(amt)) || parseFloat(amt) <= 0) return;
+                    const desc = prompt('Description:', 'Service Charge') || 'Service Charge';
+                    addFonepayAdjustment({ date, amount: parseFloat(amt), description: desc }).then(() => fetchFonepay());
+                  }}
+                  style={{ flex: 1, minWidth: '130px', background: 'var(--card)', borderRadius: '10px', padding: '14px 18px', border: '1px solid var(--orange)', borderLeftWidth: '3px', cursor: 'pointer' }}>
+                  <div style={{ fontSize: '11px', color: 'var(--orange)', fontWeight: '600', marginBottom: '4px' }}>CHARGES (click to add)</div>
+                  <div style={{ fontSize: '20px', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--orange)' }}>Rs {(fonepayLedgerData.totalCharges || 0).toLocaleString('en-IN')}</div>
+                  <div style={{ fontSize: '11px', color: 'var(--t3)' }}>{fonepayLedgerData.chargeCount || 0} entries</div>
+                </div>
+                <div style={{ flex: 1, minWidth: '160px', background: 'var(--card)', borderRadius: '10px', padding: '14px 18px',
+                  border: `1px solid ${(fonepayLedgerData.balance || 0) === 0 ? 'var(--green)' : 'var(--orange)'}`, borderLeftWidth: '3px' }}>
+                  <div style={{ fontSize: '11px', color: (fonepayLedgerData.balance || 0) === 0 ? 'var(--green)' : 'var(--orange)', fontWeight: '600', marginBottom: '4px' }}>
+                    BALANCE {(fonepayLedgerData.balance || 0) === 0 ? '(MATCHED)' : '(PENDING)'}
+                  </div>
+                  <div style={{ fontSize: '20px', fontWeight: '700', fontFamily: 'var(--mono)',
+                    color: (fonepayLedgerData.balance || 0) === 0 ? 'var(--green)' : 'var(--orange)' }}>
+                    Rs {Math.abs(fonepayLedgerData.balance || 0).toLocaleString('en-IN')}
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--t3)' }}>
+                    {(fonepayLedgerData.balance || 0) === 0 ? 'All settled' : (fonepayLedgerData.balance || 0) > 0 ? 'Settlement pending' : 'Over-settled'}
+                    {(fonepayLedgerData.totalCharges || 0) > 0 && (
+                      <span style={{ display: 'block', marginTop: '2px', color: 'var(--orange)', fontStyle: 'italic' }}>
+                        Includes Rs {(fonepayLedgerData.totalCharges || 0).toLocaleString('en-IN')} service charges
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              )}
+
+              {/* Header with filters */}
               <div className="sec-head" style={{ marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
-                <div className="sec-title" style={{ fontSize: '18px' }}>
-                  📱 Fonepay Transactions
-                  <span className="cnt" style={{ marginLeft: '8px' }}>{fonepayTxns.length} transactions</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {/* Filter Tabs */}
+                  {['all', 'linked', 'unlinked', ...(Object.keys(suggestedMatches).length > 0 ? ['suggested'] : [])].map(f => (
+                    <button key={f} onClick={() => { setFonepayFilter(f); setFonepaySelected(new Set()); }}
+                      style={{ padding: '5px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', border: fonepayFilter === f ? 'none' : '1px solid var(--border)',
+                        background: fonepayFilter === f ? (f === 'linked' ? 'var(--green)' : f === 'unlinked' ? 'var(--orange)' : f === 'suggested' ? '#e6a817' : 'var(--blue)') : 'var(--card)',
+                        color: fonepayFilter === f ? '#fff' : 'var(--t2)' }}>
+                      {f.charAt(0).toUpperCase() + f.slice(1)}
+                    </button>
+                  ))}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                   {/* Date Range Filter */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--card)', padding: '6px 12px', borderRadius: '8px', border: '1px solid var(--border)' }}>
                     <span style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600' }}>From:</span>
-                    <input
-                      type="date"
-                      value={fonepayDateFrom}
-                      onChange={(e) => setFonepayDateFrom(e.target.value)}
-                      style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px 8px', fontSize: '12px', color: 'var(--t1)' }}
-                    />
+                    <input type="date" value={fonepayDateFrom} onChange={(e) => setFonepayDateFrom(e.target.value)}
+                      style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px 8px', fontSize: '12px', color: 'var(--t1)' }} />
                     <span style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600', marginLeft: '8px' }}>To:</span>
-                    <input
-                      type="date"
-                      value={fonepayDateTo}
-                      onChange={(e) => setFonepayDateTo(e.target.value)}
-                      style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px 8px', fontSize: '12px', color: 'var(--t1)' }}
-                    />
-                    <button
-                      onClick={() => { setFonepayDateFrom(getTodayISO()); setFonepayDateTo(getTodayISO()); }}
-                      style={{ background: 'var(--blue-g)', color: 'var(--blue)', border: 'none', borderRadius: '4px', padding: '4px 8px', fontSize: '10px', fontWeight: '600', cursor: 'pointer' }}
-                    >
-                      Today
-                    </button>
-                    <button
-                      onClick={() => { setFonepayDateFrom(''); setFonepayDateTo(''); }}
-                      style={{ background: 'var(--bg)', color: 'var(--t2)', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px 8px', fontSize: '10px', cursor: 'pointer' }}
-                    >
-                      All
-                    </button>
+                    <input type="date" value={fonepayDateTo} onChange={(e) => setFonepayDateTo(e.target.value)}
+                      style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px 8px', fontSize: '12px', color: 'var(--t1)' }} />
+                    <button onClick={() => { setFonepayDateFrom(getTodayISO()); setFonepayDateTo(getTodayISO()); }}
+                      style={{ background: 'var(--blue-g)', color: 'var(--blue)', border: 'none', borderRadius: '4px', padding: '4px 8px', fontSize: '10px', fontWeight: '600', cursor: 'pointer' }}>Today</button>
+                    <button onClick={() => { setFonepayDateFrom(''); setFonepayDateTo(''); }}
+                      style={{ background: 'var(--bg)', color: 'var(--t2)', border: '1px solid var(--border)', borderRadius: '4px', padding: '4px 8px', fontSize: '10px', cursor: 'pointer' }}>All</button>
                   </div>
-                  <input
-                    className="search-box"
-                    placeholder="Search initiator, amount..."
-                    value={fonepaySearch}
-                    onChange={(e) => setFonepaySearch(e.target.value)}
-                    style={{ width: '180px' }}
-                  />
-                  <div style={{ background: 'var(--green-g)', color: 'var(--green)', padding: '6px 14px', borderRadius: '8px', fontFamily: 'var(--mono)', fontWeight: '700' }}>
-                    Total: Rs {(fonepaySummary.total || 0).toLocaleString('en-IN')}
-                  </div>
+                  <input className="search-box" placeholder="Search initiator, amount, party..." value={fonepaySearch}
+                    onChange={(e) => setFonepaySearch(e.target.value)} style={{ width: '200px' }} />
+                  <button className="btn" onClick={handleFonepayAutoMatch} disabled={fonepayMatchLoading}
+                    style={{ padding: '6px 12px', fontSize: '11px', fontWeight: '600', background: '#e6a817', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
+                    {fonepayMatchLoading ? 'Matching...' : 'Auto-Match'}
+                  </button>
+                  <button className="btn" onClick={() => {
+                      const date = prompt('Charge date (YYYY-MM-DD):', new Date().toISOString().split('T')[0]);
+                      if (!date) return;
+                      const amt = prompt('Charge amount:');
+                      if (!amt || isNaN(parseFloat(amt)) || parseFloat(amt) <= 0) return;
+                      const desc = prompt('Description:', 'Service Charge') || 'Service Charge';
+                      addFonepayAdjustment({ date, amount: parseFloat(amt), description: desc }).then(() => fetchFonepay());
+                    }}
+                    style={{ padding: '6px 12px', fontSize: '11px', fontWeight: '600', background: 'var(--orange)', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
+                    + Charge
+                  </button>
+                  <button className="btn" onClick={() => {
+                      const date = prompt('Transaction date (YYYY-MM-DD):', new Date().toISOString().split('T')[0]);
+                      if (!date) return;
+                      const amt = prompt('Amount received:');
+                      if (!amt || isNaN(parseFloat(amt)) || parseFloat(amt) <= 0) return;
+                      const desc = prompt('Description:', 'Missing Portal Txn') || 'Missing Portal Txn';
+                      addFonepayAdjustment({ date, amount: parseFloat(amt), description: desc, type: 'collection' }).then(() => fetchFonepay());
+                    }}
+                    style={{ padding: '6px 12px', fontSize: '11px', fontWeight: '600', background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
+                    + Missing Txn
+                  </button>
+                  <button className="btn" onClick={() => setFonepayShowBalance(!fonepayShowBalance)}
+                    style={{ padding: '6px 12px', fontSize: '11px', fontWeight: '600', background: fonepayShowBalance ? 'var(--blue)' : 'var(--card)', color: fonepayShowBalance ? '#fff' : 'var(--t2)', border: fonepayShowBalance ? 'none' : '1px solid var(--border)', borderRadius: '6px', cursor: 'pointer' }}>
+                    Bal
+                  </button>
                   <button className="btn btn-p" onClick={fetchFonepay} disabled={fonepayLoading} style={{ padding: '6px 12px', fontSize: '12px' }}>
-                    {fonepayLoading ? '⟳ Loading...' : '🔄 Refresh'}
+                    {fonepayLoading ? 'Loading...' : 'Refresh'}
                   </button>
                 </div>
               </div>
+
+              {/* Bulk Action Bar */}
+              {fonepaySelected.size > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 16px', marginBottom: '12px', background: 'var(--blue-g)', borderRadius: '8px', border: '1px solid var(--blue)' }}>
+                  <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--blue)' }}>{fonepaySelected.size} selected</span>
+                  {/* Show Confirm button only if any selected have suggested matches */}
+                  {[...fonepaySelected].some(id => suggestedMatches[id]) && (
+                    <button onClick={handleFonepayBulkConfirm}
+                      style={{ padding: '5px 14px', borderRadius: '6px', fontSize: '11px', fontWeight: '700', background: 'var(--green)', color: '#fff', border: 'none', cursor: 'pointer' }}>
+                      Confirm Matches
+                    </button>
+                  )}
+                  <button onClick={() => setFonepaySelected(new Set())}
+                    style={{ padding: '5px 12px', borderRadius: '6px', fontSize: '11px', background: 'var(--card)', color: 'var(--t2)', border: '1px solid var(--border)', cursor: 'pointer' }}>
+                    Clear Selection
+                  </button>
+                </div>
+              )}
 
               {fonepayLoading ? (
                 <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px' }}>
@@ -5020,79 +6285,298 @@ export default function RushDashboard() {
                 <table className="vouchers-table">
                   <thead>
                     <tr>
+                      <th style={{ width: '32px' }}>
+                        <input type="checkbox" onChange={(e) => {
+                          if (e.target.checked) {
+                            const filtered = fonepayTxns.filter(t => {
+                              if (fonepayFilter === 'linked') return !!t.voucher_number;
+                              if (fonepayFilter === 'unlinked') return !t.voucher_number && !suggestedMatches[t.transaction_id];
+                              if (fonepayFilter === 'suggested') return !!suggestedMatches[t.transaction_id];
+                              return true;
+                            });
+                            setFonepaySelected(new Set(filtered.map(t => t.transaction_id)));
+                          } else {
+                            setFonepaySelected(new Set());
+                          }
+                        }} checked={fonepaySelected.size > 0} />
+                      </th>
                       <th>#</th>
                       <th>Date & Time</th>
-                      <th>Initiator (Number)</th>
-                      <th className="r">Amount</th>
-                      <th>Transaction ID</th>
-                      <th>Nepali Date</th>
-                      <th>Status</th>
-                      <th>Age</th>
+                      <th>Description</th>
+                      <th className="r">DR (Settled)</th>
+                      <th className="r">CR (Collected)</th>
+                      {fonepayShowBalance && <th className="r">Balance</th>}
+                      <th>Linked To</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {fonepayTxns.filter(t => {
-                      if (!fonepaySearch) return true;
-                      const q = fonepaySearch.toLowerCase();
-                      // Parse raw_data for initiator if available
-                      let initiator = '';
-                      try {
-                        if (t.raw_data) {
-                          const raw = JSON.parse(t.raw_data);
-                          initiator = raw.initiator || '';
+                    {/* Build combined entries: Fonepay txns (CR) + RBB settlements (DR) */}
+                    {(() => {
+                      // Fonepay CR entries
+                      const crRows = fonepayTxns.filter(t => {
+                        const isLinked = !!t.voucher_number;
+                        const isSuggested = !!suggestedMatches[t.transaction_id];
+                        if (fonepayFilter === 'linked' && !isLinked) return false;
+                        if (fonepayFilter === 'unlinked' && (isLinked || isSuggested)) return false;
+                        if (fonepayFilter === 'suggested' && !isSuggested) return false;
+                        if (!fonepaySearch) return true;
+                        const q = fonepaySearch.toLowerCase();
+                        let init = '';
+                        try { if (t.raw_data) { init = JSON.parse(t.raw_data).initiator || ''; } } catch (e) {}
+                        return t.transaction_id?.toLowerCase().includes(q) || init?.includes(q) ||
+                               String(t.amount || '').includes(q) || t.party_name?.toLowerCase().includes(q) ||
+                               t.voucher_number?.toLowerCase().includes(q) || t.description?.toLowerCase().includes(q);
+                      }).map(t => {
+                        let initiator = '-', issuerName = '';
+                        try { if (t.raw_data) { const raw = JSON.parse(t.raw_data); initiator = raw.initiator || '-'; issuerName = raw.issuerName || ''; } } catch (e) {}
+                        return { type: 'CR', date: t.transaction_date || '', amount: Math.abs(t.amount || 0),
+                          description: initiator, detail: issuerName, txn: t };
+                      });
+
+                      // Use backend entry order (sorted by settlement time slots)
+                      // Map CR entries to their fonepay txn objects for linking
+                      const crByKey = {};
+                      for (const cr of crRows) {
+                        const key = cr.date + '|' + cr.amount;
+                        if (!crByKey[key]) crByKey[key] = [];
+                        crByKey[key].push(cr);
+                      }
+
+                      const combined = (fonepayLedgerData?.entries || []).map(entry => {
+                        if (entry.side === 'DR') {
+                          return { type: 'DR', date: entry.date || '', amount: entry.dr,
+                            description: entry.description, detail: entry.detail, settlement: entry.settlement || '',
+                            source: entry.source || 'rbb', adjustmentId: entry.adjustmentId, txn: null };
                         }
-                      } catch (e) {}
-                      // Search by initiator (number), amount, and transaction ID
-                      const amountStr = String(t.amount || '');
-                      return t.transaction_id?.toLowerCase().includes(q) ||
-                             initiator?.includes(q) ||
-                             amountStr.includes(q) ||
-                             t.description?.toLowerCase().includes(q);
-                    }).map((txn, index) => {
-                      // Parse raw_data for initiator and issuer
-                      let initiator = '-', issuerName = '';
-                      try {
-                        if (txn.raw_data) {
-                          const raw = JSON.parse(txn.raw_data);
-                          initiator = raw.initiator || '-';
-                          issuerName = raw.issuerName || '';
+                        // Manual collection adjustments — don't try to match to fonepay txn
+                        if (entry.source === 'adjustment') {
+                          return { type: 'CR', date: entry.date || '', amount: entry.cr,
+                            description: entry.description, detail: entry.detail,
+                            source: 'adjustment', adjustmentId: entry.adjustmentId, txn: null };
                         }
-                      } catch (e) {}
-                      // Format date with time
-                      const dateTime = txn.transaction_date || '';
-                      return (
-                      <tr key={txn.id || index}>
-                        <td className="idx">{index + 1}</td>
-                        <td className="date-cell" style={{ whiteSpace: 'nowrap' }}>
-                          <div style={{ fontWeight: '600' }}>{formatDate(dateTime)}</div>
-                          <div style={{ fontSize: '10px', color: 'var(--t3)' }}>{dateTime.split(' ')[1] || ''}</div>
+                        // Match CR entry to a fonepay txn
+                        const key = entry.date + '|' + entry.cr;
+                        const match = crByKey[key]?.shift();
+                        return match || { type: 'CR', date: entry.date || '', amount: entry.cr,
+                          description: entry.description, detail: entry.detail, txn: null };
+                      });
+
+                      // Opening balance from backend
+                      const openBal = fonepayLedgerData?.openingBalance || 0;
+
+                      // Compute running balance (oldest to newest, starting from opening balance)
+                      const sorted = [...combined].reverse();
+                      let bal = openBal;
+                      for (const row of sorted) {
+                        bal += (row.type === 'CR' ? row.amount : 0) - (row.type === 'DR' ? row.amount : 0);
+                        row.balance = bal;
+                      }
+
+                      return combined.map((row, index) => {
+                        if (row.type === 'DR') {
+                          const isCharge = row.source === 'adjustment';
+                          return (
+                            <tr key={`dr-${index}`} style={{ background: isCharge ? 'rgba(243,156,18,0.08)' : 'rgba(231,76,60,0.05)' }}>
+                              <td></td>
+                              <td className="idx">{index + 1}</td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                <div style={{ fontWeight: '600' }}>{formatDate(row.date)}</div>
+                              </td>
+                              <td>
+                                <div style={{ fontWeight: '600', fontSize: '12px' }}>{row.description}</div>
+                                <div style={{ fontSize: '10px', color: 'var(--t3)' }}>
+                                  <span style={{ padding: '1px 5px', borderRadius: '3px', fontSize: '9px', fontWeight: '700',
+                                    background: isCharge ? 'rgba(243,156,18,0.15)' : row.detail === 'ESEWASTLMT' ? 'rgba(46,204,113,0.15)' : 'rgba(52,152,219,0.15)',
+                                    color: isCharge ? 'var(--orange)' : row.detail === 'ESEWASTLMT' ? 'var(--green)' : 'var(--blue)' }}>
+                                    {isCharge ? 'CHARGE' : row.detail || 'RBB'}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '700', color: isCharge ? 'var(--orange)' : 'var(--red)', fontSize: '14px' }}>
+                                Rs {row.amount.toLocaleString('en-IN')}
+                              </td>
+                              <td className="r"></td>
+                              {fonepayShowBalance && (
+                              <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '700',
+                                color: row.balance === 0 ? 'var(--green)' : row.balance > 0 ? 'var(--orange)' : 'var(--red)' }}>
+                                Rs {Math.abs(row.balance).toLocaleString('en-IN')}
+                              </td>
+                              )}
+                              <td style={{ fontSize: '11px', color: 'var(--t3)' }}>
+                                {isCharge ? (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ color: 'var(--orange)', fontStyle: 'italic' }}>Service Charge</span>
+                                    <button onClick={() => {
+                                        if (confirm('Delete this charge entry?')) {
+                                          deleteFonepayAdjustment(row.adjustmentId).then(() => fetchFonepay());
+                                        }
+                                      }}
+                                      style={{ padding: '1px 5px', borderRadius: '3px', fontSize: '9px', background: 'var(--red-g)', color: 'var(--red)', border: '1px solid var(--red)', cursor: 'pointer' }}>
+                                      x
+                                    </button>
+                                  </div>
+                                ) : (row.settlement || 'RBB Settlement')}
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        // Fonepay CR row
+                        const txn = row.txn;
+                        if (!txn) {
+                          // CR entry without matching txn — manual collection or unmatched
+                          const isManual = row.source === 'adjustment';
+                          return (
+                            <tr key={`cr-${index}`} style={{ background: isManual ? 'rgba(46,204,113,0.08)' : 'transparent' }}>
+                              <td></td>
+                              <td className="idx">{index + 1}</td>
+                              <td style={{ whiteSpace: 'nowrap' }}>
+                                <div style={{ fontWeight: '600' }}>{formatDate(row.date)}</div>
+                                <div style={{ fontSize: '10px', color: 'var(--t3)' }}>{(row.date || '').split(' ')[1] || ''}</div>
+                              </td>
+                              <td>
+                                <div style={{ fontWeight: '600', fontFamily: 'var(--mono)' }}>{row.description}</div>
+                                <div style={{ fontSize: '10px', color: 'var(--t3)' }}>
+                                  <span style={{ padding: '1px 5px', borderRadius: '3px', fontSize: '9px', fontWeight: '700',
+                                    background: isManual ? 'rgba(46,204,113,0.15)' : 'rgba(52,152,219,0.15)',
+                                    color: isManual ? 'var(--green)' : 'var(--blue)' }}>
+                                    {isManual ? 'MANUAL' : row.detail || 'Fonepay'}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="r"></td>
+                              <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--green)', fontSize: '14px' }}>
+                                Rs {row.amount.toLocaleString('en-IN')}
+                              </td>
+                              {fonepayShowBalance && (
+                              <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '700',
+                                color: row.balance === 0 ? 'var(--green)' : row.balance > 0 ? 'var(--orange)' : 'var(--red)' }}>
+                                Rs {Math.abs(row.balance).toLocaleString('en-IN')}
+                              </td>
+                              )}
+                              <td style={{ fontSize: '11px', color: 'var(--t3)' }}>
+                                {isManual ? (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{ color: 'var(--green)', fontStyle: 'italic' }}>Not in portal</span>
+                                    <button onClick={() => {
+                                        if (confirm('Delete this manual entry?')) {
+                                          deleteFonepayAdjustment(row.adjustmentId).then(() => fetchFonepay());
+                                        }
+                                      }}
+                                      style={{ padding: '1px 5px', borderRadius: '3px', fontSize: '9px', background: 'var(--red-g)', color: 'var(--red)', border: '1px solid var(--red)', cursor: 'pointer' }}>
+                                      x
+                                    </button>
+                                  </div>
+                                ) : null}
+                              </td>
+                            </tr>
+                          );
+                        }
+                        const isLinked = !!txn.voucher_number;
+                        const suggestion = suggestedMatches[txn.transaction_id];
+                        const isChecked = fonepaySelected.has(txn.transaction_id);
+                        return (
+                          <tr key={txn.id || `cr-${index}`} style={{ background: suggestion ? 'rgba(230,168,23,0.06)' : isLinked ? 'rgba(46,204,113,0.04)' : 'transparent' }}>
+                            <td>
+                              <input type="checkbox" checked={isChecked} onChange={(e) => {
+                                const next = new Set(fonepaySelected);
+                                e.target.checked ? next.add(txn.transaction_id) : next.delete(txn.transaction_id);
+                                setFonepaySelected(next);
+                              }} />
+                            </td>
+                            <td className="idx">{index + 1}</td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
+                              <div style={{ fontWeight: '600' }}>{formatDate(row.date)}</div>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)' }}>{row.date.split(' ')[1] || ''}</div>
+                            </td>
+                            <td>
+                              <div style={{ fontWeight: '600', fontFamily: 'var(--mono)' }}>{row.description}</div>
+                              {row.detail && <div style={{ color: 'var(--t3)', fontSize: '10px' }}>{row.detail}</div>}
+                            </td>
+                            <td className="r"></td>
+                            <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--green)', fontSize: '14px' }}>
+                              Rs {row.amount.toLocaleString('en-IN')}
+                            </td>
+                            {fonepayShowBalance && (
+                            <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '700',
+                              color: row.balance === 0 ? 'var(--green)' : row.balance > 0 ? 'var(--orange)' : 'var(--red)' }}>
+                              Rs {Math.abs(row.balance).toLocaleString('en-IN')}
+                            </td>
+                            )}
+                            <td style={{ minWidth: '150px' }}>
+                              {isLinked ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <div>
+                                    <div style={{ fontSize: '12px', fontWeight: '600', color: 'var(--green)' }}>{txn.party_name}</div>
+                                    <div style={{ fontSize: '10px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{txn.voucher_number}</div>
+                                  </div>
+                                  <button onClick={() => handleFonepayUnlink(txn.transaction_id)}
+                                    style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '9px', background: 'var(--red-g)', color: 'var(--red)', border: '1px solid var(--red)', cursor: 'pointer', marginLeft: 'auto' }}>
+                                    Unlink
+                                  </button>
+                                </div>
+                              ) : suggestion ? (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <div>
+                                    <div style={{ fontSize: '12px', fontWeight: '600', color: suggestion.confidence === 'high' ? 'var(--green)' : '#e6a817' }}>{suggestion.partyName}</div>
+                                    <div style={{ fontSize: '10px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{suggestion.voucherNumber}</div>
+                                  </div>
+                                  <span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '9px', fontWeight: '700', marginLeft: 'auto',
+                                    background: suggestion.confidence === 'high' ? 'rgba(46,204,113,0.15)' : 'rgba(230,168,23,0.15)',
+                                    color: suggestion.confidence === 'high' ? 'var(--green)' : '#e6a817' }}>
+                                    {suggestion.confidence === 'high' ? 'Phone Match' : 'Suggested'}
+                                  </span>
+                                </div>
+                              ) : (
+                                <button onClick={() => openFonepayLinkModal(txn)}
+                                  style={{ padding: '4px 10px', borderRadius: '5px', fontSize: '11px', fontWeight: '600', background: 'var(--blue-g)', color: 'var(--blue)', border: '1px solid var(--blue)', cursor: 'pointer' }}>
+                                  Link
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
+                    {/* Opening Balance row (last data row — oldest entry) */}
+                    {fonepayLedgerData && (fonepayLedgerData.openingBalance || 0) > 0 && (
+                      <tr style={{ background: 'rgba(52,152,219,0.06)', borderTop: '1px solid var(--border)' }}>
+                        <td></td>
+                        <td></td>
+                        <td></td>
+                        <td style={{ fontWeight: '700', color: 'var(--blue)' }}>Opening Balance</td>
+                        <td className="r"></td>
+                        <td className="r"></td>
+                        {fonepayShowBalance && (
+                        <td className="r" style={{ fontFamily: 'var(--mono)', fontWeight: '700', color: 'var(--blue)' }}>
+                          Rs {(fonepayLedgerData.openingBalance || 0).toLocaleString('en-IN')}
                         </td>
-                        <td className="party-cell">
-                          <div style={{ fontWeight: '600', fontFamily: 'var(--mono)' }}>{initiator}</div>
-                          {issuerName && <div style={{ color: 'var(--t3)', fontSize: '10px' }}>{issuerName}</div>}
-                        </td>
-                        <td className="r amt-cell" style={{ color: 'var(--green)', fontSize: '14px' }}>
-                          + Rs {Math.abs(txn.amount || 0).toLocaleString('en-IN')}
-                        </td>
-                        <td className="mono" style={{ fontSize: '10px', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{txn.transaction_id || '-'}</td>
-                        <td className="date-cell nepali">{toNepaliDate(dateTime)}</td>
-                        <td>
-                          <span className={`vt-badge receipt`}>
-                            {txn.status === 'success' ? 'Deposited' : txn.status || 'Pending'}
-                          </span>
-                        </td>
-                        <td className="age-cell">
-                          <span className={`age-badge ${formatDaysAgo(dateTime) === 'Today' ? 'today' : 'old'}`}>
-                            {formatDaysAgo(dateTime)}
-                          </span>
-                        </td>
+                        )}
+                        <td></td>
                       </tr>
-                    );
-                    })}
+                    )}
+                    {/* Totals row */}
+                    {fonepayLedgerData && (
+                      <tr style={{ background: 'var(--bg)', fontWeight: '700', borderTop: '2px solid var(--border)' }}>
+                        <td colSpan={4} style={{ fontWeight: '700' }}>TOTAL</td>
+                        <td className="r" style={{ color: 'var(--red)', fontFamily: 'var(--mono)' }}>Rs {(fonepayLedgerData.totalDR || 0).toLocaleString('en-IN')}</td>
+                        <td className="r" style={{ color: 'var(--green)', fontFamily: 'var(--mono)' }}>Rs {(fonepayLedgerData.totalCR || 0).toLocaleString('en-IN')}</td>
+                        {fonepayShowBalance && (
+                        <td className="r" style={{ fontFamily: 'var(--mono)',
+                          color: (fonepayLedgerData.balance || 0) === 0 ? 'var(--green)' : 'var(--orange)' }}>
+                          Rs {Math.abs(fonepayLedgerData.balance || 0).toLocaleString('en-IN')}
+                          {(fonepayLedgerData.balance || 0) === 0 && (
+                            <span style={{ marginLeft: '6px', fontSize: '9px', fontWeight: '700', color: 'var(--green)' }}>MATCHED</span>
+                          )}
+                        </td>
+                        )}
+                        <td></td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
 
-                {fonepayTxns.length === 0 && (
+                {fonepayTxns.length === 0 && !fonepayLedgerData?.entries?.length && (
                   <div className="empty-state" style={{ padding: '60px 20px' }}>
                     <div style={{ fontSize: '48px', marginBottom: '12px' }}>📱</div>
                     <div style={{ fontSize: '18px', fontWeight: '600', marginBottom: '8px' }}>No Fonepay Transactions</div>
@@ -5100,6 +6584,59 @@ export default function RushDashboard() {
                   </div>
                 )}
               </div>
+              )}
+
+              {/* Manual Link Modal */}
+              {fonepayLinkModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', justifyContent: 'center', alignItems: 'center' }}
+                  onClick={() => setFonepayLinkModal(null)}>
+                  <div style={{ background: 'var(--card)', borderRadius: '12px', width: '600px', maxHeight: '80vh', overflow: 'auto', padding: '24px', border: '1px solid var(--border)' }}
+                    onClick={e => e.stopPropagation()}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                      <div>
+                        <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)' }}>Link to Bill</div>
+                        <div style={{ fontSize: '12px', color: 'var(--t3)' }}>
+                          Fonepay Rs {Math.abs(fonepayLinkModal.amount || 0).toLocaleString('en-IN')} - {fonepayLinkModal.transaction_date}
+                        </div>
+                      </div>
+                      <button onClick={() => setFonepayLinkModal(null)}
+                        style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: 'var(--t3)' }}>x</button>
+                    </div>
+                    <input placeholder="Search party name..." value={fonepayLinkSearch}
+                      onChange={(e) => setFonepayLinkSearch(e.target.value)}
+                      style={{ width: '100%', padding: '8px 12px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--t1)', fontSize: '13px', marginBottom: '12px' }} />
+                    <div style={{ maxHeight: '400px', overflow: 'auto' }}>
+                      {fonepayLinkBills.filter(b => {
+                        if (!fonepayLinkSearch) return true;
+                        return b.party_name?.toLowerCase().includes(fonepayLinkSearch.toLowerCase()) ||
+                               b.bill_name?.toLowerCase().includes(fonepayLinkSearch.toLowerCase());
+                      }).map((bill, i) => {
+                        const amtMatch = Math.abs(bill.closing_balance) === Math.abs(fonepayLinkModal.amount);
+                        return (
+                          <div key={i} onClick={() => handleFonepayManualLink(fonepayLinkModal.transaction_id, bill)}
+                            style={{ padding: '10px 14px', borderRadius: '8px', marginBottom: '4px', cursor: 'pointer',
+                              border: amtMatch ? '2px solid var(--green)' : '1px solid var(--border)',
+                              background: amtMatch ? 'rgba(46,204,113,0.08)' : 'var(--bg)',
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div>
+                              <div style={{ fontWeight: '600', fontSize: '13px', color: 'var(--t1)' }}>{bill.party_name}</div>
+                              <div style={{ fontSize: '11px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{bill.bill_name} | {bill.bill_date || ''} | {bill.ageing_days || 0}d</div>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                              <div style={{ fontWeight: '700', fontFamily: 'var(--mono)', fontSize: '14px', color: amtMatch ? 'var(--green)' : 'var(--t1)' }}>
+                                Rs {Math.abs(bill.closing_balance || 0).toLocaleString('en-IN')}
+                              </div>
+                              {amtMatch && <div style={{ fontSize: '9px', color: 'var(--green)', fontWeight: '700' }}>EXACT MATCH</div>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {fonepayLinkBills.length === 0 && (
+                        <div style={{ padding: '30px', textAlign: 'center', color: 'var(--t3)' }}>No outstanding bills found</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
 
@@ -5529,7 +7066,7 @@ export default function RushDashboard() {
                   {outstandingTab === 'parties' && (
                     <div className="table-wrap">
                       <table className="data-table">
-                        <thead><tr><th>Party</th><th>Bills</th><th>Oldest Bill</th><th style={{ textAlign: 'right' }}>Total Outstanding</th></tr></thead>
+                        <thead><tr><th>Party</th><th>Bills</th><th>Oldest Bill</th><th style={{ textAlign: 'right' }}>Total Outstanding</th><th style={{ width: '40px' }}></th></tr></thead>
                         <tbody>
                           {outstandingParties.map((p, i) => (
                             <tr key={i}>
@@ -5537,6 +7074,26 @@ export default function RushDashboard() {
                               <td>{p.bill_count}</td>
                               <td>{p.oldest_bill_date || '-'}</td>
                               <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '700', color: 'var(--red)' }}>{formatCurrency(p.total_outstanding)}</td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button
+                                  title={`Send reminder to ${p.party_name}`}
+                                  style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '15px', padding: '2px 4px' }}
+                                  onClick={async (e) => {
+                                    const btn = e.currentTarget;
+                                    btn.disabled = true;
+                                    btn.textContent = '...';
+                                    try {
+                                      await sendWhatsAppReminder(p.party_name);
+                                      btn.textContent = '✓';
+                                      btn.style.color = 'var(--green)';
+                                    } catch (err) {
+                                      btn.textContent = '💬';
+                                      alert('WhatsApp send failed: ' + (err.response?.data?.error || err.message));
+                                    }
+                                    btn.disabled = false;
+                                  }}
+                                >💬</button>
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -6344,6 +7901,7 @@ export default function RushDashboard() {
                               <td style={{ padding: '6px 10px', fontWeight: '600' }}>
                                 <span style={{ marginRight: '4px', fontSize: '10px', color: 'var(--t3)' }}>{isExpanded ? '▼' : '▶'}</span>
                                 {row.party_name}
+                                {row.extra_parties_count > 0 && <span style={{ fontSize: '10px', color: 'var(--orange)', fontWeight: '700' }}> +{row.extra_parties_count}</span>}
                                 <span style={{ marginLeft: '6px', fontSize: '9px', color: 'var(--t3)' }}>
                                   {row.bill_count > 0 && `${row.bill_count} bill${row.bill_count > 1 ? 's' : ''}`}
                                   {row.pending_count > 0 && <span style={{ color: 'var(--amber)' }}>{row.bill_count > 0 ? ' + ' : ''}{row.pending_count} pending</span>}
@@ -6408,7 +7966,7 @@ export default function RushDashboard() {
                                                 <td style={{ padding: '4px 8px', fontWeight: '600', color: isReceipt ? '#e65100' : '#1565c0' }}>{v.voucher_type}</td>
                                                 <td style={{ padding: '4px 8px', color: 'var(--t3)' }}>{v.voucher_number || '-'}</td>
                                                 <td style={{ padding: '4px 8px', color: 'var(--t3)', fontFamily: 'var(--mono)', fontSize: '10px' }}>{v.tally_master_id || '-'}</td>
-                                                <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600' }}>{formatCurrency(Math.abs(v.amount))}</td>
+                                                <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600' }}>{formatCurrency(v.total_amount && v.total_amount > 0 ? v.total_amount : Math.abs(v.amount))}{v.extra_parties_count > 0 && <span style={{ fontSize: '9px', color: 'var(--orange)', marginLeft: '3px' }}>+{v.extra_parties_count}</span>}</td>
                                                 <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: '#2e7d32' }}>{v.pay_cash > 0 ? formatCurrency(v.pay_cash) : ''}</td>
                                                 <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: '#1565c0' }}>{v.pay_qr > 0 ? formatCurrency(v.pay_qr) : ''}</td>
                                                 <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', color: '#6a1b9a' }}>{v.pay_cheque > 0 ? formatCurrency(v.pay_cheque) : ''}</td>
@@ -7438,6 +8996,7 @@ export default function RushDashboard() {
                                 <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', width: '90px' }}>BS Date</th>
                                 <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', width: '120px' }}>AD Date</th>
                                 <th style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--t3)', fontWeight: '600', width: '110px' }}>Amount</th>
+                                <th style={{ padding: '4px 6px', textAlign: 'left', color: 'var(--t3)', fontWeight: '600', width: '120px' }}>Party</th>
                                 <th style={{ width: '30px' }}></th>
                               </tr>
                             </thead>
@@ -7517,6 +9076,12 @@ export default function RushDashboard() {
                                         }
                                       }}
                                       style={{ width: '100%', padding: '5px 6px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--t1)', fontSize: '12px', textAlign: 'right', fontFamily: 'var(--mono)' }} />
+                                  </td>
+                                  <td style={{ padding: '3px 4px' }}>
+                                    <input type="text" value={line.partyOverride || ''} onChange={e => cpUpdateLine(r.masterId, li, 'partyOverride', e.target.value)}
+                                      placeholder={form.odbcParty ? '= ' + form.odbcParty.substring(0, 12) : 'Party'}
+                                      title={line.partyOverride ? `Override: ${line.partyOverride}` : `Using: ${form.odbcParty || 'none'}`}
+                                      style={{ width: '100%', padding: '5px 6px', background: line.partyOverride ? 'rgba(230,81,0,0.08)' : 'var(--bg)', border: `1px solid ${line.partyOverride ? 'var(--orange)' : 'var(--border)'}`, borderRadius: '4px', color: line.partyOverride ? 'var(--orange)' : 'var(--t2)', fontSize: '11px' }} />
                                   </td>
                                   <td style={{ padding: '3px 4px', textAlign: 'center' }}>
                                     {form.chequeLines.length > 1 && (
@@ -7708,11 +9273,51 @@ export default function RushDashboard() {
                         Journal: {cpSyncResults.journalResult.success ? `Created (${cpSyncResults.journalResult.voucherNumber})` : `Failed: ${cpSyncResults.journalResult.error}`}
                       </div>
                     )}
-                    {cpSyncResults.odbcResults?.some(r => !r.success) && (
-                      <div style={{ marginTop: '8px', textAlign: 'left', fontSize: '11px' }}>
-                        {cpSyncResults.odbcResults.filter(r => !r.success).map((r, i) => (
-                          <div key={i} style={{ color: 'var(--red)', padding: '2px 0' }}>Failed: {r.partyName} - {r.error}</div>
-                        ))}
+                    {cpSyncResults.odbcResults?.length > 0 && (
+                      <div style={{ marginTop: '12px', textAlign: 'left' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                          <thead>
+                            <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                              <th style={{ padding: '6px 8px', textAlign: 'center', width: '30px' }}></th>
+                              <th style={{ padding: '6px 8px', textAlign: 'left', color: 'var(--t3)' }}>Party</th>
+                              <th style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                              <th style={{ padding: '6px 8px', textAlign: 'center', color: 'var(--t3)' }}>Chqs</th>
+                              <th style={{ padding: '6px 8px', textAlign: 'center', width: '40px' }}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {cpSyncResults.odbcResults.map((r, i) => (
+                              <tr key={i} style={{ borderBottom: '1px solid var(--border)', background: r.success ? 'transparent' : 'rgba(239,68,68,0.05)' }}>
+                                <td style={{ padding: '6px 8px', textAlign: 'center' }}>{r.success ? '✓' : '✗'}</td>
+                                <td style={{ padding: '6px 8px', color: 'var(--t1)', fontWeight: '500' }}>{r.partyName}{!r.success && <span style={{ color: 'var(--red)', fontSize: '11px', marginLeft: '6px' }}>{r.error}</span>}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600', color: r.success ? 'var(--green)' : 'var(--red)' }}>{formatCurrency(r.amount || 0)}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'center', color: 'var(--t2)' }}>{r.chequeCount || 0}</td>
+                                <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                  {r.success && (
+                                    <button
+                                      title={`Send WhatsApp to ${r.partyName}`}
+                                      style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '15px', padding: '2px 4px' }}
+                                      onClick={async (e) => {
+                                        const btn = e.currentTarget;
+                                        btn.disabled = true;
+                                        btn.textContent = '...';
+                                        try {
+                                          await sendWhatsAppReceipt({ partyName: r.partyName, receiptData: { voucherNumber: cpSyncResults.journalResult?.voucherNumber || '', amount: r.amount || 0, chequeCount: r.chequeCount || 0, date: cpDate } });
+                                          btn.textContent = '✓';
+                                          btn.style.color = 'var(--green)';
+                                        } catch (err) {
+                                          btn.textContent = '💬';
+                                          alert('WhatsApp failed: ' + (err.response?.data?.error || err.message));
+                                        }
+                                        btn.disabled = false;
+                                      }}
+                                    >💬</button>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
                       </div>
                     )}
                     <button onClick={() => { setCpSyncResults(null); setCpStep('entry'); setCpSelected({}); fetchChequePost(cpDate); }}
@@ -8127,7 +9732,7 @@ export default function RushDashboard() {
                                 </span>
                               </td>
                               <td style={{ padding: '8px', color: 'var(--t2)' }}>{v.voucherDate ? String(v.voucherDate).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '-'}</td>
-                              <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{v.partyName || '-'}</td>
+                              <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{v.partyName || '-'}{(() => { const ep = (v.ledgerEntries || []).filter(e => !e.isDebit && e.ledger !== v.partyName).length; return ep > 0 ? <span style={{ fontSize: '10px', color: 'var(--orange)', marginLeft: '4px', fontWeight: '700' }}>+{ep}</span> : null; })()}</td>
                               <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(v.amount)}</td>
                               <td style={{ padding: '8px', fontSize: '10px' }}>
                                 {modes.length > 0 ? (
@@ -8236,7 +9841,17 @@ export default function RushDashboard() {
                               <tr key={c.id} style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer', background: collSelected.has(c.id) ? 'rgba(99,102,241,0.08)' : 'transparent' }}
                                 onClick={() => { const s = new Set(collSelected); s.has(c.id) ? s.delete(c.id) : s.add(c.id); setCollSelected(s); }}>
                                 <td style={{ padding: '8px' }}><input type="checkbox" checked={collSelected.has(c.id)} readOnly /></td>
-                                <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{c.party_name}</td>
+                                <td style={{ padding: '8px' }}>
+                                  <div style={{ color: 'var(--t1)', fontWeight: '500' }}>{c.party_name}</div>
+                                  {(() => { const pb = collPartyBalances[c.party_name]; if (!pb) return null;
+                                    return <div style={{ fontSize: '10px', color: 'var(--t3)', marginTop: '2px' }}>
+                                      {pb.billing_balance ? <span>Bill: <b style={{ color: '#6366f1' }}>{formatCurrency(pb.billing_balance)}</b></span> : null}
+                                      {pb.billing_balance && pb.odbc_balance ? <span> | </span> : null}
+                                      {pb.odbc_balance ? <span>ODBC: <b style={{ color: '#0ea5e9' }}>{formatCurrency(pb.odbc_balance)}</b></span> : null}
+                                      {pb.overdue_amount ? <span> | <b style={{ color: '#ef4444' }}>Due: {formatCurrency(pb.overdue_amount)} ({pb.overdue_count})</b></span> : null}
+                                    </div>;
+                                  })()}
+                                </td>
                                 <td style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(c.amount)}</td>
                                 <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.cheque_number || '-'}</td>
                                 <td style={{ padding: '8px', color: 'var(--t2)' }}>{c.cheque_date || '-'}</td>
@@ -8329,7 +9944,17 @@ export default function RushDashboard() {
                               return (
                                 <tr key={item.id} style={{ borderBottom: '1px solid var(--border)', background: st === 'collected' ? 'rgba(34,197,94,0.05)' : st === 'returned' ? 'rgba(245,158,11,0.05)' : st === 'bounced' ? 'rgba(239,68,68,0.05)' : 'transparent' }}>
                                   <td style={{ padding: '8px', color: 'var(--t3)' }}>{idx + 1}</td>
-                                  <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500' }}>{item.party_name}</td>
+                                  <td style={{ padding: '8px' }}>
+                                    <div style={{ color: 'var(--t1)', fontWeight: '500' }}>{item.party_name}</div>
+                                    {(() => { const pb = collPartyBalances[item.party_name]; if (!pb) return null;
+                                      return <div style={{ fontSize: '10px', color: 'var(--t3)', marginTop: '2px' }}>
+                                        {pb.billing_balance ? <span>Bill: <b style={{ color: '#6366f1' }}>{formatCurrency(pb.billing_balance)}</b></span> : null}
+                                        {pb.billing_balance && pb.odbc_balance ? <span> | </span> : null}
+                                        {pb.odbc_balance ? <span>ODBC: <b style={{ color: '#0ea5e9' }}>{formatCurrency(pb.odbc_balance)}</b></span> : null}
+                                        {pb.overdue_amount ? <span> | <b style={{ color: '#ef4444' }}>Due: {formatCurrency(pb.overdue_amount)} ({pb.overdue_count})</b></span> : null}
+                                      </div>;
+                                    })()}
+                                  </td>
                                   <td style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: 'var(--t1)' }}>{formatCurrency(item.amount)}</td>
                                   <td style={{ padding: '8px', color: 'var(--t2)' }}>{item.cheque_number || '-'}</td>
                                   <td style={{ padding: '8px', color: 'var(--t2)' }}>{item.cheque_date || '-'}</td>
@@ -8672,18 +10297,25 @@ export default function RushDashboard() {
                           <th style={{ padding: '4px', textAlign: 'right' }}>Amount</th>
                           <th style={{ padding: '4px', textAlign: 'left' }}>Chq #</th>
                           <th style={{ padding: '4px', textAlign: 'left' }}>Bank</th>
+                          <th style={{ padding: '4px', textAlign: 'right' }}>Bill Bal</th>
+                          <th style={{ padding: '4px', textAlign: 'right' }}>ODBC Bal</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {(collPrintData.items || []).map((item, idx) => (
+                        {(collPrintData.items || []).map((item, idx) => {
+                          const pb = collPartyBalances[item.party_name] || {};
+                          return (
                           <tr key={idx} style={{ borderBottom: '1px solid #ccc' }}>
                             <td style={{ padding: '3px 4px' }}>{idx + 1}</td>
                             <td style={{ padding: '3px 4px' }}>{item.party_name}</td>
                             <td style={{ padding: '3px 4px', textAlign: 'right' }}>{Number(item.amount || 0).toLocaleString('en-IN')}</td>
                             <td style={{ padding: '3px 4px' }}>{item.cheque_number || '-'}</td>
                             <td style={{ padding: '3px 4px' }}>{item.bank_name || '-'}</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{pb.billing_balance ? Number(pb.billing_balance).toLocaleString('en-IN') : '-'}</td>
+                            <td style={{ padding: '3px 4px', textAlign: 'right' }}>{pb.odbc_balance ? Number(pb.odbc_balance).toLocaleString('en-IN') : '-'}</td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                     <div style={{ borderTop: '2px solid #000', marginTop: '8px', paddingTop: '8px', display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
@@ -8699,62 +10331,87 @@ export default function RushDashboard() {
               )}
             </div>
 
-            {/* BANK NAMES PAGE */}
+            {/* MAPPING SETTINGS PAGE */}
             <div className={`page ${currentPage === 'bank-names' ? 'active' : ''}`}>
               <div className="sec-head" style={{ marginBottom: '16px' }}>
-                <div className="sec-title" style={{ fontSize: '18px' }}>Bank Names</div>
+                <div className="sec-title" style={{ fontSize: '18px' }}>Mapping Settings</div>
               </div>
 
-              {/* Add New */}
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
-                <input type="text" placeholder="Short name (e.g. garima)" value={bnNewShort} onChange={e => setBnNewShort(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', width: '200px', fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && document.getElementById('bn-full-input')?.focus()} />
-                <input id="bn-full-input" type="text" placeholder="Full name (e.g. Garima Bikas Bank)" value={bnNewFull} onChange={e => setBnNewFull(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', flex: 1, fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && handleAddBankName()} />
-                <button className="btn btn-p" style={{ padding: '8px 16px', fontSize: '13px' }} onClick={handleAddBankName} disabled={!bnNewShort.trim() || !bnNewFull.trim()}>Add</button>
+              {/* Tabs */}
+              <div style={{ display: 'flex', gap: '4px', marginBottom: '20px', borderBottom: '1px solid var(--border)', paddingBottom: '0' }}>
+                {[['banks', 'Bank Mapping'], ['ledger', 'Ledger Mapping'], ['phones', 'Phone → Party']].map(([key, label]) => (
+                  <button key={key} onClick={() => setBnTab(key)} style={{ padding: '10px 20px', fontSize: '13px', fontWeight: bnTab === key ? '700' : '400', color: bnTab === key ? 'var(--accent)' : 'var(--t2)', background: 'none', border: 'none', borderBottom: bnTab === key ? '2px solid var(--accent)' : '2px solid transparent', cursor: 'pointer', marginBottom: '-1px', transition: 'all 0.2s' }}>{label}</button>
+                ))}
               </div>
 
-              {bankNamesLoading ? <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading...</div> : (
-                <div className="table-wrap">
-                  <table className="data-table">
-                    <thead><tr><th style={{ width: '200px' }}>Short Name</th><th>Full Name</th><th style={{ width: '120px', textAlign: 'center' }}>Actions</th></tr></thead>
-                    <tbody>
-                      {bankNamesList.map(b => (
-                        <tr key={b.id}>
-                          {bnEditId === b.id ? (
-                            <>
-                              <td><input type="text" value={bnEditShort} onChange={e => setBnEditShort(e.target.value)} style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} /></td>
-                              <td><input type="text" value={bnEditFull} onChange={e => setBnEditFull(e.target.value)} style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && handleUpdateBankName(b.id)} /></td>
-                              <td style={{ textAlign: 'center' }}>
-                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--green)', fontSize: '14px', marginRight: '8px' }} onClick={() => handleUpdateBankName(b.id)} title="Save">Save</button>
-                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--t3)', fontSize: '14px' }} onClick={() => setBnEditId(null)} title="Cancel">Cancel</button>
-                              </td>
-                            </>
-                          ) : (
-                            <>
-                              <td style={{ fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--blue)' }}>{b.short_name}</td>
-                              <td>{b.full_name || <span style={{ color: 'var(--amber)', fontStyle: 'italic', fontSize: '12px' }}>-- needs full name --</span>}</td>
-                              <td style={{ textAlign: 'center' }}>
-                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--blue)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setBnEditId(b.id); setBnEditShort(b.short_name); setBnEditFull(b.full_name); }} title="Edit">Edit</button>
-                                <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: '14px' }} onClick={() => handleDeleteBankName(b.id, b.short_name)} title="Delete">Del</button>
-                              </td>
-                            </>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {bankNamesList.length === 0 && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No bank names configured. Add your first bank name above.</div>}
-                  <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--t3)' }}>
-                    {bankNamesList.length} bank name{bankNamesList.length !== 1 ? 's' : ''}
-                    {bankNamesList.filter(b => !b.full_name).length > 0 && <span style={{ color: 'var(--amber)', marginLeft: '8px' }}>({bankNamesList.filter(b => !b.full_name).length} need full name)</span>}
+              {/* BANK MAPPING TAB */}
+              {bnTab === 'banks' && (
+                <>
+                  <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '12px' }}>Map bank short names (from cheque data) to full bank names.</div>
+
+                  {/* Add New */}
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
+                    <input type="text" placeholder="Short name (e.g. garima)" value={bnNewShort} onChange={e => setBnNewShort(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', width: '200px', fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && document.getElementById('bn-full-input')?.focus()} />
+                    <input id="bn-full-input" type="text" placeholder="Full name (e.g. Garima Bikas Bank)" value={bnNewFull} onChange={e => setBnNewFull(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', flex: 1, fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && handleAddBankName()} />
+                    <button className="btn btn-p" style={{ padding: '8px 16px', fontSize: '13px' }} onClick={handleAddBankName} disabled={!bnNewShort.trim() || !bnNewFull.trim()}>Add</button>
                   </div>
-                </div>
+
+                  {bankNamesLoading ? <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading...</div> : (
+                    <div className="table-wrap">
+                      <table className="data-table">
+                        <thead><tr><th style={{ width: '200px' }}>Short Name</th><th>Full Name</th><th style={{ width: '120px', textAlign: 'center' }}>Actions</th></tr></thead>
+                        <tbody>
+                          {bankNamesList.map(b => (
+                            <tr key={b.id}>
+                              {bnEditId === b.id ? (
+                                <>
+                                  <td><input type="text" value={bnEditShort} onChange={e => setBnEditShort(e.target.value)} style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} /></td>
+                                  <td><input type="text" value={bnEditFull} onChange={e => setBnEditFull(e.target.value)} style={{ padding: '4px 8px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '13px' }} onKeyDown={e => e.key === 'Enter' && handleUpdateBankName(b.id)} /></td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--green)', fontSize: '14px', marginRight: '8px' }} onClick={() => handleUpdateBankName(b.id)} title="Save">Save</button>
+                                    <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--t3)', fontSize: '14px' }} onClick={() => setBnEditId(null)} title="Cancel">Cancel</button>
+                                  </td>
+                                </>
+                              ) : (
+                                <>
+                                  <td style={{ fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--blue)' }}>{b.short_name}</td>
+                                  <td>{b.full_name || <span style={{ color: 'var(--amber)', fontStyle: 'italic', fontSize: '12px' }}>-- needs full name --</span>}</td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--blue)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setBnEditId(b.id); setBnEditShort(b.short_name); setBnEditFull(b.full_name); }} title="Edit">Edit</button>
+                                    <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: '14px' }} onClick={() => handleDeleteBankName(b.id, b.short_name)} title="Delete">Del</button>
+                                  </td>
+                                </>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {bankNamesList.length === 0 && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No bank names configured. Add your first bank name above.</div>}
+                      <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--t3)' }}>
+                        {bankNamesList.length} bank name{bankNamesList.length !== 1 ? 's' : ''}
+                        {bankNamesList.filter(b => !b.full_name).length > 0 && <span style={{ color: 'var(--amber)', marginLeft: '8px' }}>({bankNamesList.filter(b => !b.full_name).length} need full name)</span>}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
-              {/* Ledger Mapping Section */}
-              <div style={{ marginTop: '32px' }} onClick={() => setLmDropdown(null)}>
-                <div className="sec-head" style={{ marginBottom: '16px' }}>
-                  <div className="sec-title" style={{ fontSize: '18px' }}>Ledger Mapping (Billing → Cheque Company)</div>
-                  <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>Maps billing company party names to cheque company (ODBC) ledger names. Auto-saved when posting cheques.</div>
+              {/* LEDGER MAPPING TAB */}
+              {bnTab === 'ledger' && (
+              <div onClick={() => setLmDropdown(null)}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <div style={{ fontSize: '12px', color: 'var(--t3)' }}>Maps billing company party names to cheque company (ODBC) ledger names. Phone numbers auto-extracted from ODBC names.</div>
+                  <button className="btn" style={{ padding: '5px 12px', fontSize: '11px', whiteSpace: 'nowrap' }} onClick={async () => {
+                    let saved = 0;
+                    for (const m of ledgerMappings) {
+                      const phones = extractPhones(m.odbc_party);
+                      for (const phone of phones) {
+                        try { await savePhoneMapping({ phone, partyName: m.odbc_party }); saved++; } catch {}
+                      }
+                    }
+                    addToast('success', 'Extracted', `${saved} phone(s) extracted from ODBC party names`);
+                    fetchLedgerMappings();
+                  }}>Extract All Phones</button>
                 </div>
 
                 {/* Add New Mapping */}
@@ -8821,9 +10478,9 @@ export default function RushDashboard() {
 
                 <div className="table-wrap">
                   <table className="data-table">
-                    <thead><tr><th>Billing Company Party</th><th style={{ width: '40px', textAlign: 'center' }}></th><th>ODBC (Cheque) Company Party</th><th style={{ width: '120px', textAlign: 'center' }}>Actions</th></tr></thead>
+                    <thead><tr><th>Billing Company Party</th><th style={{ width: '40px', textAlign: 'center' }}></th><th>ODBC (Cheque) Company Party</th><th style={{ width: '180px' }}>Phone</th><th style={{ width: '120px', textAlign: 'center' }}>Actions</th></tr></thead>
                     <tbody>
-                      {ledgerMappings.filter(m => !lmSearch || m.billing_party.toLowerCase().includes(lmSearch.toLowerCase()) || m.odbc_party.toLowerCase().includes(lmSearch.toLowerCase())).map(m => (
+                      {ledgerMappings.filter(m => !lmSearch || m.billing_party.toLowerCase().includes(lmSearch.toLowerCase()) || m.odbc_party.toLowerCase().includes(lmSearch.toLowerCase()) || (m._phones || '').includes(lmSearch)).map(m => (
                         <tr key={m.id}>
                           {lmEditId === m.id ? (
                             <>
@@ -8862,6 +10519,7 @@ export default function RushDashboard() {
                                   </div>
                                 ) : null; })()}
                               </td>
+                              <td><span style={{ fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--t3)' }}>{m._phones || '—'}</span></td>
                               <td style={{ textAlign: 'center' }}>
                                 <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--green)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setLmDropdown(null); handleUpdateLedgerMapping(m.id); }}>Save</button>
                                 <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--t3)', fontSize: '14px' }} onClick={() => { setLmEditId(null); setLmDropdown(null); }}>Cancel</button>
@@ -8872,6 +10530,22 @@ export default function RushDashboard() {
                               <td style={{ fontWeight: '600' }}>{m.billing_party}</td>
                               <td style={{ textAlign: 'center', color: 'var(--t3)' }}>→</td>
                               <td style={{ fontFamily: 'var(--mono)', color: 'var(--blue)' }}>{m.odbc_party}</td>
+                              <td>
+                                {lmEditPhoneId === m.id ? (
+                                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                                    <input type="text" value={lmEditPhone} onChange={e => setLmEditPhone(e.target.value)} placeholder="98xxxxx, 97xxxxx" style={{ padding: '3px 6px', background: 'var(--bg)', border: '1px solid var(--blue)', borderRadius: '4px', color: 'var(--t1)', width: '100%', fontSize: '12px', fontFamily: 'var(--mono)' }} onKeyDown={e => { if (e.key === 'Enter') { handleSaveLedgerPhone(m, lmEditPhone); setLmEditPhoneId(null); } else if (e.key === 'Escape') setLmEditPhoneId(null); }} />
+                                    <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--green)', fontSize: '12px', whiteSpace: 'nowrap' }} onClick={() => { handleSaveLedgerPhone(m, lmEditPhone); setLmEditPhoneId(null); }}>OK</button>
+                                  </div>
+                                ) : (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }} onClick={() => { setLmEditPhoneId(m.id); setLmEditPhone(m._phones || ''); }}>
+                                    {m._phones ? (
+                                      <span style={{ fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--green)' }}>{m._phones}</span>
+                                    ) : (
+                                      <span style={{ fontSize: '11px', color: 'var(--t3)', fontStyle: 'italic' }}>+ add phone</span>
+                                    )}
+                                  </div>
+                                )}
+                              </td>
                               <td style={{ textAlign: 'center' }}>
                                 <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--blue)', fontSize: '14px', marginRight: '8px' }} onClick={() => { setLmEditId(m.id); setLmEditBilling(m.billing_party); setLmEditOdbc(m.odbc_party); setLmDropdown(null); }}>Edit</button>
                                 <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: '14px' }} onClick={() => handleDeleteLedgerMapping(m.id, m.billing_party)}>Del</button>
@@ -8886,6 +10560,2702 @@ export default function RushDashboard() {
                   <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--t3)' }}>{ledgerMappings.length} mapping{ledgerMappings.length !== 1 ? 's' : ''} configured</div>
                 </div>
               </div>
+              )}
+
+              {/* PHONE → PARTY MAPPINGS TAB */}
+              {bnTab === 'phones' && (
+              <div>
+                <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '12px' }}>Maps Fonepay initiator phone numbers to party names. Auto-saved when confirming matches. One party can have multiple phones.</div>
+
+                {/* Add New */}
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' }}>
+                  <input type="text" placeholder="Phone number" value={pmNewPhone} onChange={e => setPmNewPhone(e.target.value)}
+                    style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', width: '180px', fontSize: '13px', fontFamily: 'var(--mono)' }}
+                    onKeyDown={e => e.key === 'Enter' && document.getElementById('pm-party-input')?.focus()} />
+                  <span style={{ color: 'var(--t3)', fontSize: '16px' }}>→</span>
+                  <input id="pm-party-input" type="text" placeholder="Party name" value={pmNewParty} onChange={e => setPmNewParty(e.target.value)}
+                    style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', flex: 1, fontSize: '13px' }}
+                    onKeyDown={e => e.key === 'Enter' && handleAddPhoneMapping()} />
+                  <button className="btn btn-p" style={{ padding: '8px 16px', fontSize: '13px' }} onClick={handleAddPhoneMapping} disabled={!pmNewPhone.trim() || !pmNewParty.trim()}>Add</button>
+                </div>
+
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead><tr><th style={{ width: '180px' }}>Phone</th><th>Party Name</th><th style={{ width: '80px' }}>Source</th><th style={{ width: '80px', textAlign: 'center' }}>Actions</th></tr></thead>
+                    <tbody>
+                      {phoneMappings.map(pm => (
+                        <tr key={pm.id}>
+                          <td style={{ fontFamily: 'var(--mono)', fontWeight: '600' }}>{pm.phone}</td>
+                          <td>{pm.party_name}</td>
+                          <td><span style={{ padding: '2px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: '600',
+                            background: pm.source === 'auto' ? 'rgba(46,204,113,0.12)' : 'rgba(99,102,241,0.12)',
+                            color: pm.source === 'auto' ? 'var(--green)' : 'var(--accent)' }}>{pm.source}</span></td>
+                          <td style={{ textAlign: 'center' }}>
+                            <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: '14px' }} onClick={() => handleDeletePhoneMapping(pm.phone)}>Del</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {phoneMappings.length === 0 && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No phone mappings yet. Mappings are auto-saved when you confirm Fonepay matches.</div>}
+                  <div style={{ marginTop: '12px', fontSize: '12px', color: 'var(--t3)' }}>{phoneMappings.length} mapping{phoneMappings.length !== 1 ? 's' : ''} configured</div>
+                </div>
+              </div>
+              )}
+            </div>
+
+            {/* COLLECTION POST PAGE */}
+            <div className={`page ${currentPage === 'collection-post' ? 'active' : ''}`}>
+
+              {/* STEP: INVENTORY */}
+              {clpStep === 'inventory' && (() => {
+                const { inUse, ready, posted, inactive } = clpGroupedBooks();
+                return (
+                <div>
+                  <div className="sec-head" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                    <div className="sec-title" style={{ fontSize: '18px' }}>Receipt Books</div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button onClick={() => setClpStep('create')} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>Create Books</button>
+                      <button onClick={handleStartBlankPost} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px' }}>Quick Post</button>
+                      <button onClick={fetchReceiptBooks} disabled={clpBooksLoading} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px' }}>{clpBooksLoading ? '...' : 'Refresh'}</button>
+                    </div>
+                  </div>
+
+                  {/* Status summary strip */}
+                  <div style={{ display: 'flex', gap: '10px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                    {[
+                      { key: 'inactive', label: 'Inactive', color: 'var(--t3)', bg: 'var(--card)' },
+                      { key: 'ready', label: 'Ready', color: 'var(--blue)', bg: 'var(--blue-g)' },
+                      { key: 'assigned', label: 'Assigned', color: '#ef4444', bg: 'rgba(239,68,68,0.1)' },
+                      { key: 'returned', label: 'Returned', color: '#f59e0b', bg: 'rgba(245,158,11,0.1)' },
+                      { key: 'posted', label: 'Posted', color: 'var(--green)', bg: 'var(--green-g)' }
+                    ].map(s => (
+                      <div key={s.key} style={{ background: s.bg, borderRadius: '8px', padding: '10px 16px', minWidth: '80px', textAlign: 'center', border: `1px solid ${s.color}30` }}>
+                        <div style={{ fontSize: '20px', fontWeight: '700', color: s.color }}>{clpBookCounts[s.key] || 0}</div>
+                        <div style={{ fontSize: '11px', color: s.color, fontWeight: '600' }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Assign modal */}
+                  {clpAssignModal && (
+                    <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '16px', marginBottom: '16px', border: '2px solid var(--blue)' }}>
+                      <div style={{ fontWeight: '600', marginBottom: '10px', color: 'var(--t1)' }}>Assign {clpSelectedBooks.length} book(s) to staff</div>
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Staff Name</div>
+                          <input value={clpAssignStaff} onChange={e => setClpAssignStaff(e.target.value)} placeholder="Staff name" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '13px', width: '180px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Route (optional)</div>
+                          <input value={clpAssignRoute} onChange={e => setClpAssignRoute(e.target.value)} placeholder="Route name" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '13px', width: '150px' }} />
+                        </div>
+                        <button onClick={handleAssignBooks} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>Confirm Assign</button>
+                        <button onClick={() => { setClpAssignModal(false); setClpAssignStaff(''); setClpAssignRoute(''); }} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t3)', borderRadius: '6px', padding: '8px 12px', cursor: 'pointer', fontSize: '12px' }}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {clpBooksLoading ? <div style={{ color: 'var(--t3)', padding: '40px', textAlign: 'center' }}>Loading books...</div> : clpBooks.length === 0 ? (
+                    <div style={{ color: 'var(--t3)', padding: '40px', textAlign: 'center' }}>No receipt books yet. Click "Create Books" to get started.</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+                      {/* Currently In Use */}
+                      {inUse.length > 0 && (
+                        <div>
+                          <div style={{ fontWeight: '600', color: 'var(--t1)', marginBottom: '8px', fontSize: '14px', borderBottom: '2px solid #ef4444', paddingBottom: '4px' }}>Currently In Use ({inUse.length})</div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {inUse.map(b => (
+                              <div key={b.id} onClick={() => handleOpenBook(b)} style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', cursor: 'pointer', border: `2px solid ${b.status === 'assigned' ? '#ef4444' : '#f59e0b'}`, transition: 'all 0.2s' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                    <div style={{ fontWeight: '700', color: 'var(--t1)', fontSize: '14px' }}>{b.book_label || `Book #${b.book_number}`}</div>
+                                    <span style={{ fontSize: '12px', color: 'var(--t2)' }}>{b.page_start}—{b.page_end}</span>
+                                    <span style={{ fontSize: '11px', color: 'var(--t3)' }}>avail: {b.available_from || b.page_start}—{b.page_end}</span>
+                                  </div>
+                                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                    {b.assigned_to && <span style={{ fontSize: '12px', color: 'var(--t1)', fontWeight: '500' }}>{b.assigned_to}</span>}
+                                    {b.route_name && <span style={{ fontSize: '11px', color: 'var(--t3)' }}>{b.route_name}</span>}
+                                    <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '4px', fontWeight: '600', background: b.status === 'assigned' ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.1)', color: b.status === 'assigned' ? '#ef4444' : '#f59e0b' }}>{b.status.toUpperCase()}</span>
+                                    {b.currentCycleEntries > 0 && <span style={{ fontSize: '11px', color: 'var(--green)', fontWeight: '600' }}>{b.currentCycleSuccess}/{b.currentCycleEntries} posted</span>}
+                                    {b.status === 'assigned' && <button onClick={(e) => { e.stopPropagation(); handleReturnBook(b.id); }} style={{ background: 'rgba(245,158,11,0.1)', color: '#f59e0b', border: 'none', borderRadius: '4px', padding: '3px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>Return</button>}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Ready to Assign */}
+                      {ready.length > 0 && (
+                        <div>
+                          <div style={{ fontWeight: '600', color: 'var(--t1)', marginBottom: '8px', fontSize: '14px', borderBottom: '2px solid var(--blue)', paddingBottom: '4px' }}>Ready to Assign ({ready.length})</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+                            {ready.map(b => (
+                              <div key={b.id} onClick={() => clpToggleBook(b.id)} style={{ background: clpSelectedBooks.includes(b.id) ? 'var(--blue-g)' : 'var(--card)', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer', border: `1px solid ${clpSelectedBooks.includes(b.id) ? 'var(--blue)' : 'var(--border)'}`, display: 'flex', gap: '8px', alignItems: 'center', transition: 'all 0.2s' }}>
+                                <input type="checkbox" checked={clpSelectedBooks.includes(b.id)} onChange={() => clpToggleBook(b.id)} onClick={e => e.stopPropagation()} style={{ accentColor: 'var(--blue)' }} />
+                                <span style={{ fontWeight: '600', color: 'var(--t1)', fontSize: '13px' }}>{b.book_label || `#${b.book_number}`}</span>
+                                <span style={{ fontSize: '11px', color: 'var(--t3)' }}>({b.page_start}—{b.page_end})</span>
+                              </div>
+                            ))}
+                          </div>
+                          {clpSelectedBooks.filter(id => ready.some(b => b.id === id)).length > 0 && (
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <button onClick={() => setClpAssignModal(true)} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>Assign Selected</button>
+                              <button onClick={handleMarkInactive} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t3)', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px' }}>Mark Inactive</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Completed (Posted) */}
+                      {posted.length > 0 && (
+                        <div>
+                          <div style={{ fontWeight: '600', color: 'var(--t1)', marginBottom: '8px', fontSize: '14px', borderBottom: '2px solid var(--green)', paddingBottom: '4px' }}>Completed ({posted.length})</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+                            {posted.map(b => (
+                              <div key={b.id} style={{ background: 'var(--green-g)', borderRadius: '8px', padding: '8px 12px', border: '1px solid var(--green)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                <span style={{ color: 'var(--green)', fontSize: '14px' }}>&#10003;</span>
+                                <span style={{ fontWeight: '600', color: 'var(--t1)', fontSize: '13px' }}>{b.book_label || `#${b.book_number}`}</span>
+                                <span style={{ fontSize: '11px', color: 'var(--t3)' }}>({b.page_start}—{b.page_end})</span>
+                                <span style={{ fontSize: '11px', color: 'var(--green)', fontWeight: '600' }}>{b.currentCycleSuccess || '?'} entries</span>
+                                {b.currentCycleTotal > 0 && <span style={{ fontSize: '11px', color: 'var(--green)' }}>₹{b.currentCycleTotal.toLocaleString('en-IN')}</span>}
+                                {(b.available_from || b.page_start) <= b.page_end && (
+                                  <button onClick={() => handleRereadyBook(b.id)} style={{ background: 'var(--blue-g)', color: 'var(--blue)', border: 'none', borderRadius: '4px', padding: '3px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>Make Ready</button>
+                                )}
+                                <button onClick={() => handleOpenBook(b)} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '4px', padding: '3px 8px', cursor: 'pointer', fontSize: '11px' }}>View</button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Inactive */}
+                      {inactive.length > 0 && (
+                        <div>
+                          <div style={{ fontWeight: '600', color: 'var(--t3)', marginBottom: '8px', fontSize: '14px', borderBottom: '1px solid var(--border)', paddingBottom: '4px' }}>Inactive ({inactive.length})</div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+                            {inactive.map(b => (
+                              <div key={b.id} onClick={() => clpToggleBook(b.id)} style={{ background: clpSelectedBooks.includes(b.id) ? 'var(--card)' : 'var(--bg)', borderRadius: '6px', padding: '6px 10px', cursor: 'pointer', border: `1px solid ${clpSelectedBooks.includes(b.id) ? 'var(--t3)' : 'var(--border)'}`, display: 'flex', gap: '6px', alignItems: 'center', opacity: 0.7 }}>
+                                <input type="checkbox" checked={clpSelectedBooks.includes(b.id)} onChange={() => clpToggleBook(b.id)} onClick={e => e.stopPropagation()} />
+                                <span style={{ fontSize: '12px', color: 'var(--t2)' }}>{b.book_label || `#${b.book_number}`}</span>
+                                <span style={{ fontSize: '10px', color: 'var(--t3)' }}>({b.page_start}—{b.page_end})</span>
+                              </div>
+                            ))}
+                          </div>
+                          {clpSelectedBooks.filter(id => inactive.some(b => b.id === id)).length > 0 && (
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <button onClick={handleMarkReady} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>Mark Ready</button>
+                              <button onClick={handleDeleteBooks} style={{ background: 'var(--red-g)', color: 'var(--red)', border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px' }}>Delete</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                );
+              })()}
+
+              {/* STEP: CREATE */}
+              {clpStep === 'create' && (
+                <div>
+                  <div className="sec-head" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div className="sec-title" style={{ fontSize: '18px' }}>Create Receipt Books</div>
+                    <button onClick={() => setClpStep('inventory')} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '13px' }}>Back</button>
+                  </div>
+
+                  {/* Mode toggle */}
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+                    <button onClick={() => setClpCreateMode('bulk')} style={{ background: clpCreateMode === 'bulk' ? 'var(--blue)' : 'var(--card)', color: clpCreateMode === 'bulk' ? '#fff' : 'var(--t2)', border: `1px solid ${clpCreateMode === 'bulk' ? 'var(--blue)' : 'var(--border)'}`, borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>Bulk Create</button>
+                    <button onClick={() => setClpCreateMode('single')} style={{ background: clpCreateMode === 'single' ? 'var(--blue)' : 'var(--card)', color: clpCreateMode === 'single' ? '#fff' : 'var(--t2)', border: `1px solid ${clpCreateMode === 'single' ? 'var(--blue)' : 'var(--border)'}`, borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>Single Book</button>
+                  </div>
+
+                  {clpCreateMode === 'bulk' ? (
+                    <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '16px', border: '1px solid var(--border)' }}>
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '16px' }}>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Range Start</div>
+                          <input type="number" value={clpCreateForm.rangeStart} onChange={e => setClpCreateForm(p => ({ ...p, rangeStart: e.target.value }))} placeholder="1" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '100px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Range End</div>
+                          <input type="number" value={clpCreateForm.rangeEnd} onChange={e => setClpCreateForm(p => ({ ...p, rangeEnd: e.target.value }))} placeholder="2000" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '100px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Pages/Book</div>
+                          <input type="number" value={clpCreateForm.pagesPerBook} onChange={e => setClpCreateForm(p => ({ ...p, pagesPerBook: e.target.value }))} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '80px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Numbering</div>
+                          <select value={clpCreateForm.numberingMode} onChange={e => setClpCreateForm(p => ({ ...p, numberingMode: e.target.value }))} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px' }}>
+                            <option value="sequential">Sequential (1-50, 51-100...)</option>
+                            <option value="restart">Restart (sets with letters)</option>
+                          </select>
+                        </div>
+                        {clpCreateForm.numberingMode === 'restart' && (
+                          <div>
+                            <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Restart Every</div>
+                            <input type="number" value={clpCreateForm.restartEvery} onChange={e => setClpCreateForm(p => ({ ...p, restartEvery: e.target.value }))} placeholder={clpCreateForm.pagesPerBook || '50'} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '80px' }} />
+                          </div>
+                        )}
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Label (optional)</div>
+                          <input value={clpCreateForm.batchLabel} onChange={e => setClpCreateForm(p => ({ ...p, batchLabel: e.target.value }))} placeholder="Jan 2026" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '120px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Start Book # (optional)</div>
+                          <input type="number" value={clpCreateForm.startBookNumber} onChange={e => setClpCreateForm(p => ({ ...p, startBookNumber: e.target.value }))} placeholder="Auto" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '80px' }} />
+                        </div>
+                      </div>
+                      {/* Preview */}
+                      {clpCreateForm.rangeStart && clpCreateForm.rangeEnd && (() => {
+                        const s = parseInt(clpCreateForm.rangeStart);
+                        const e = parseInt(clpCreateForm.rangeEnd);
+                        const ppb = parseInt(clpCreateForm.pagesPerBook) || 50;
+                        const toLetter = (i) => { let l='', n=i; do { l = String.fromCharCode(65+(n%26))+l; n=Math.floor(n/26)-1; } while(n>=0); return l; };
+                        const prefix = clpCreateForm.batchLabel || '';
+                        const pfx = prefix ? prefix + '-' : '';
+                        if (e >= s && ppb > 0) {
+                          if (clpCreateForm.numberingMode === 'restart') {
+                            const setSize = parseInt(clpCreateForm.restartEvery) || ppb;
+                            const totalRange = e - s + 1;
+                            const numSets = Math.ceil(totalRange / setSize);
+                            const booksPerSet = Math.ceil(setSize / ppb);
+                            const totalBooks = numSets * booksPerSet;
+                            // Build preview examples: show first set fully + second set start
+                            const examples = [];
+                            for (let bi = 0; bi < Math.min(booksPerSet, 4); bi++) {
+                              const ps = bi * ppb + 1;
+                              const pe = Math.min(ps + ppb - 1, setSize);
+                              examples.push(`${pfx}A (${ps}-${pe})`);
+                            }
+                            let preview = examples.join(', ');
+                            if (booksPerSet > 4) preview += ', ...';
+                            if (numSets > 1) {
+                              preview += ` | ${pfx}B (1-${Math.min(ppb, setSize)})`;
+                              if (numSets > 2) preview += ` | ... ${pfx}${toLetter(numSets-1)}`;
+                            }
+                            return <div style={{ fontSize: '13px', color: 'var(--blue)', marginBottom: '12px', fontWeight: '500' }}>
+                              <strong>{numSets}</strong> sets × <strong>{booksPerSet}</strong> books = <strong>{totalBooks}</strong> total books.
+                              Restart every {setSize}: {preview}
+                            </div>;
+                          } else {
+                            const count = Math.ceil((e - s + 1) / ppb);
+                            const examples = [];
+                            for (let i = 0; i < Math.min(count, 3); i++) {
+                              const ps = s + i * ppb;
+                              const pe = Math.min(ps + ppb - 1, e);
+                              examples.push(`${pfx}${toLetter(i)} (${ps}-${pe})`);
+                            }
+                            return <div style={{ fontSize: '13px', color: 'var(--blue)', marginBottom: '12px', fontWeight: '500' }}>
+                              <strong>{count}</strong> books: {examples.join(', ')}{count > 3 ? `, ... ${pfx}${toLetter(count-1)} (${s+(count-1)*ppb}-${e})` : ''}
+                            </div>;
+                          }
+                        }
+                        return null;
+                      })()}
+                      <button onClick={handleBulkCreate} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px 24px', cursor: 'pointer', fontSize: '14px', fontWeight: '700' }}>Create Books</button>
+                    </div>
+                  ) : (
+                    <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '16px', border: '1px solid var(--border)' }}>
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '16px' }}>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Page Start</div>
+                          <input type="number" value={clpSingleForm.pageStart} onChange={e => setClpSingleForm(p => ({ ...p, pageStart: e.target.value }))} placeholder="1" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '100px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Page End</div>
+                          <input type="number" value={clpSingleForm.pageEnd} onChange={e => setClpSingleForm(p => ({ ...p, pageEnd: e.target.value }))} placeholder="50" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '100px' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Label (optional)</div>
+                          <input value={clpSingleForm.label} onChange={e => setClpSingleForm(p => ({ ...p, label: e.target.value }))} placeholder="Book name" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px', fontSize: '13px', width: '150px' }} />
+                        </div>
+                      </div>
+                      <button onClick={handleSingleCreate} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px 24px', cursor: 'pointer', fontSize: '14px', fontWeight: '700' }}>Create Book</button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* STEP: SUMMARY */}
+              {clpStep === 'summary' && clpActiveBook && (
+                <div>
+                  <div className="sec-head" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                    <div>
+                      <div className="sec-title" style={{ fontSize: '18px' }}>Enter Summary</div>
+                      <div style={{ fontSize: '13px', color: 'var(--t3)', marginTop: '4px' }}>
+                        Book #{clpActiveBook.book_number} ({clpActiveBook.page_start}—{clpActiveBook.page_end})
+                        {clpActiveBook.assigned_to && ` — ${clpActiveBook.assigned_to}`}
+                        {clpActiveBook.route_name && ` — ${clpActiveBook.route_name}`}
+                        {clpActiveBook.current_cycle > 0 && ` — Cycle ${clpActiveBook.current_cycle}`}
+                        {` — Available: ${clpActiveBook.available_from || clpActiveBook.page_start}—${clpActiveBook.page_end}`}
+                      </div>
+                    </div>
+                    <button onClick={clpReset} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '13px' }}>Back</button>
+                  </div>
+
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '20px', border: '1px solid var(--border)', maxWidth: '600px' }}>
+                    <div style={{ fontWeight: '600', marginBottom: '16px', color: 'var(--t1)' }}>Enter expected totals from the receipt book</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                      <div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Total Entries</div>
+                        <input type="number" value={clpSummary.entryCount} onChange={e => setClpSummary(p => ({ ...p, entryCount: e.target.value }))} disabled={clpSummaryLocked} placeholder="0" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '14px', width: '100%', fontWeight: '600' }} />
+                      </div>
+                      <div></div>
+                      {['cash', 'fonepay', 'cheque', 'bankDeposit', 'discount'].map(f => (
+                        <div key={f}>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>{f === 'bankDeposit' ? 'Bank Deposit' : f.charAt(0).toUpperCase() + f.slice(1)}</div>
+                          <input type="number" value={clpSummary[f]} onChange={e => setClpSummary(p => ({ ...p, [f]: e.target.value }))} disabled={clpSummaryLocked} placeholder="0" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '13px', width: '100%' }} />
+                        </div>
+                      ))}
+                      <div style={{ gridColumn: '1 / -1', borderTop: '1px solid var(--border)', paddingTop: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontWeight: '600', color: 'var(--t1)' }}>Total</span>
+                        <span style={{ fontSize: '18px', fontWeight: '700', color: 'var(--green)' }}>₹{clpSummaryTotal().toLocaleString('en-IN')}</span>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: '16px', display: 'flex', gap: '8px' }}>
+                      {clpSummaryLocked ? (
+                        <>
+                          <button onClick={() => setClpSummaryLocked(false)} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px' }}>Edit Summary</button>
+                          <button onClick={() => {
+                            const availStart = clpActiveBook.available_from || clpActiveBook.page_start;
+                            setClpEntries([{ receiptNumber: String(availStart), partyName: '', cash: '', fonepay: '', cheque: '', bankDeposit: '', discount: '' }]);
+                            setClpStep('entry');
+                          }} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 20px', cursor: 'pointer', fontSize: '14px', fontWeight: '700' }}>Continue Entering</button>
+                        </>
+                      ) : (
+                        <button onClick={handleSaveSummary} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px 24px', cursor: 'pointer', fontSize: '14px', fontWeight: '700' }}>Save & Enter Receipts</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* STEP: ENTRY */}
+              {clpStep === 'entry' && (
+                <div>
+                  {/* Header */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: clpSummaryLocked ? '8px' : '16px', flexWrap: 'wrap', gap: '10px' }}>
+                    <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                      <button onClick={() => setClpStep(clpActiveBook ? 'summary' : 'inventory')} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '13px' }}>Back</button>
+                      <input type="date" value={clpDate} onChange={e => setClpDate(e.target.value)} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 10px', fontSize: '13px' }} />
+                      {clpActiveBook ? (
+                        <span style={{ fontSize: '12px', color: 'var(--t2)', background: 'var(--bg)', padding: '4px 10px', borderRadius: '4px', border: '1px solid var(--border)' }}>
+                          Book #{clpActiveBook.book_number} ({clpActiveBook.page_start}—{clpActiveBook.page_end})
+                          {clpActiveBook.current_cycle > 0 && ` · Cycle ${clpActiveBook.current_cycle}`}
+                        </span>
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--t3)' }}>Book #</span>
+                          <input value={clpBookNumber} onChange={e => setClpBookNumber(e.target.value)} placeholder="e.g. 46-50" style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 10px', fontSize: '13px', width: '100px' }} />
+                        </div>
+                      )}
+                      {clpStaffName && <span style={{ fontSize: '12px', color: 'var(--t3)', background: 'var(--blue-g)', padding: '4px 10px', borderRadius: '4px' }}>Staff: {clpStaffName}</span>}
+                      <button onClick={() => setClpEnterNav(v => !v)} style={{ background: clpEnterNav ? 'var(--green-g)' : 'var(--bg)', border: `1px solid ${clpEnterNav ? 'var(--green)' : 'var(--border)'}`, color: clpEnterNav ? 'var(--green)' : 'var(--t3)', borderRadius: '6px', padding: '4px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: '600' }}>{clpEnterNav ? 'Enter Nav: ON' : 'Enter Nav: OFF'}</button>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      {clpPostedEntries.length > 0 && <div style={{ fontSize: '12px', color: 'var(--t3)' }}>Posted: ₹{clpPostedEntries.reduce((s, e) => s + (e.total || 0), 0).toLocaleString('en-IN')}</div>}
+                      <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)' }}>New: ₹{clpEntries.reduce((s, e) => s + clpRowTotal(e), 0).toLocaleString('en-IN')}</div>
+                      <button onClick={clpGoToConfirm} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 20px', cursor: 'pointer', fontSize: '14px', fontWeight: '700' }}>Next →</button>
+                    </div>
+                  </div>
+
+                  {/* Summary Comparison Bar */}
+                  {clpSummaryLocked && (() => {
+                    const entered = {
+                      count: clpValidEntries().length,
+                      cash: clpEntries.reduce((s, e) => s + (parseFloat(e.cash) || 0), 0),
+                      fonepay: clpEntries.reduce((s, e) => s + (parseFloat(e.fonepay) || 0), 0),
+                      cheque: clpEntries.reduce((s, e) => s + (parseFloat(e.cheque) || 0), 0),
+                      bankDeposit: clpEntries.reduce((s, e) => s + (parseFloat(e.bankDeposit) || 0), 0),
+                      discount: clpEntries.reduce((s, e) => s + (parseFloat(e.discount) || 0), 0),
+                    };
+                    entered.total = entered.cash + entered.fonepay + entered.cheque + entered.bankDeposit + entered.discount;
+                    const summary = {
+                      count: parseInt(clpSummary.entryCount) || 0,
+                      cash: parseFloat(clpSummary.cash) || 0,
+                      fonepay: parseFloat(clpSummary.fonepay) || 0,
+                      cheque: parseFloat(clpSummary.cheque) || 0,
+                      bankDeposit: parseFloat(clpSummary.bankDeposit) || 0,
+                      discount: parseFloat(clpSummary.discount) || 0,
+                      total: clpSummaryTotal()
+                    };
+                    const fields = [
+                      { label: 'Entries', sVal: summary.count, eVal: entered.count, fmt: v => v },
+                      { label: 'Cash', sVal: summary.cash, eVal: entered.cash, fmt: v => `₹${v.toLocaleString('en-IN')}` },
+                      { label: 'Fonepay', sVal: summary.fonepay, eVal: entered.fonepay, fmt: v => `₹${v.toLocaleString('en-IN')}` },
+                      { label: 'Cheque', sVal: summary.cheque, eVal: entered.cheque, fmt: v => `₹${v.toLocaleString('en-IN')}` },
+                      { label: 'Bank', sVal: summary.bankDeposit, eVal: entered.bankDeposit, fmt: v => `₹${v.toLocaleString('en-IN')}` },
+                      { label: 'Discount', sVal: summary.discount, eVal: entered.discount, fmt: v => `₹${v.toLocaleString('en-IN')}` },
+                      { label: 'Total', sVal: summary.total, eVal: entered.total, fmt: v => `₹${v.toLocaleString('en-IN')}` },
+                    ];
+                    const allMatch = fields.every(f => f.sVal === f.eVal);
+                    return (
+                      <div style={{ background: allMatch ? 'rgba(34,197,94,0.08)' : 'rgba(234,179,8,0.08)', borderRadius: '8px', padding: '8px 12px', marginBottom: '12px', border: `1px solid ${allMatch ? 'var(--green)' : 'rgba(234,179,8,0.3)'}`, display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center', fontSize: '12px' }}>
+                        <span style={{ fontWeight: '700', color: allMatch ? 'var(--green)' : '#eab308', minWidth: '80px' }}>{allMatch ? '✓ Matched' : '⚠ Summary'}</span>
+                        {fields.map(f => {
+                          const diff = f.sVal - f.eVal;
+                          const match = diff === 0;
+                          return (
+                            <div key={f.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: '70px' }}>
+                              <span style={{ color: 'var(--t3)', fontSize: '10px' }}>{f.label}</span>
+                              <span style={{ color: match ? 'var(--green)' : 'var(--t1)', fontWeight: '600' }}>{f.fmt(f.eVal)}/{f.fmt(f.sVal)}</span>
+                              {!match && <span style={{ color: diff > 0 ? 'var(--red)' : '#eab308', fontSize: '10px' }}>rem: {f.fmt(diff)}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Entry Table */}
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', border: '1px solid var(--border)', overflow: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '900px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                          <th style={{ textAlign: 'left', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '70px' }}>Rcpt #</th>
+                          <th style={{ textAlign: 'left', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', minWidth: '200px' }}>Party Name</th>
+                          <th style={{ textAlign: 'right', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '90px' }}>Cash</th>
+                          <th style={{ textAlign: 'right', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '90px' }}>Fonepay</th>
+                          <th style={{ textAlign: 'right', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '90px' }}>Cheque</th>
+                          <th style={{ textAlign: 'right', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '90px' }}>Bank Dep.</th>
+                          <th style={{ textAlign: 'right', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '80px' }}>Discount</th>
+                          <th style={{ textAlign: 'right', padding: '10px 6px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '90px' }}>Total</th>
+                          <th style={{ width: '36px' }}></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {/* Previously posted entries (locked/read-only) */}
+                        {clpPostedEntries.map((pe, idx) => (
+                          <tr key={`posted-${idx}`} style={{ borderBottom: '1px solid var(--border)', background: 'rgba(34,197,94,0.06)', opacity: 0.8 }}>
+                            <td style={{ padding: '6px 6px', textAlign: 'center', color: 'var(--t3)', fontSize: '13px' }}>{pe.receipt_number || '-'}</td>
+                            <td style={{ padding: '6px 6px', color: 'var(--t1)', fontSize: '13px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span style={{ color: 'var(--green)', fontSize: '12px' }}>&#10003;</span>
+                                {pe.party_name}
+                                {pe.tally_master_id && <span style={{ fontSize: '10px', color: 'var(--t3)', background: 'var(--bg)', padding: '1px 5px', borderRadius: '3px' }}>ID:{pe.tally_master_id}</span>}
+                              </div>
+                            </td>
+                            <td style={{ padding: '6px 6px', textAlign: 'right', color: 'var(--t2)', fontSize: '13px' }}>{pe.cash > 0 ? pe.cash.toLocaleString('en-IN') : ''}</td>
+                            <td style={{ padding: '6px 6px', textAlign: 'right', color: 'var(--t2)', fontSize: '13px' }}>{pe.fonepay > 0 ? pe.fonepay.toLocaleString('en-IN') : ''}</td>
+                            <td style={{ padding: '6px 6px', textAlign: 'right', color: 'var(--t2)', fontSize: '13px' }}>{pe.cheque > 0 ? pe.cheque.toLocaleString('en-IN') : ''}</td>
+                            <td style={{ padding: '6px 6px', textAlign: 'right', color: 'var(--t2)', fontSize: '13px' }}>{pe.bank_deposit > 0 ? pe.bank_deposit.toLocaleString('en-IN') : ''}</td>
+                            <td style={{ padding: '6px 6px', textAlign: 'right', color: 'var(--t2)', fontSize: '13px' }}>{pe.discount > 0 ? pe.discount.toLocaleString('en-IN') : ''}</td>
+                            <td style={{ padding: '6px 6px', textAlign: 'right', fontWeight: '600', color: 'var(--green)', fontSize: '13px', whiteSpace: 'nowrap' }}>₹{pe.total.toLocaleString('en-IN')}</td>
+                            <td style={{ padding: '4px 2px', textAlign: 'center', color: 'var(--green)', fontSize: '11px' }}>&#128274;</td>
+                          </tr>
+                        ))}
+                        {clpPostedEntries.length > 0 && (
+                          <tr style={{ borderBottom: '2px solid var(--blue)', background: 'transparent' }}>
+                            <td colSpan={9} style={{ padding: '4px 8px', fontSize: '11px', color: 'var(--t3)', textAlign: 'center' }}>&#9650; Posted ({clpPostedEntries.length}) — New entries below &#9660;</td>
+                          </tr>
+                        )}
+                        {/* New editable entries */}
+                        {clpEntries.map((entry, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '4px 4px' }}>
+                              <input data-clp={`rcpt-${idx}`} value={entry.receiptNumber} onChange={e => clpUpdateEntry(idx, 'receiptNumber', e.target.value)} onKeyDown={e => clpKeyNav(e, idx, 'rcpt')} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px', fontSize: '13px', width: '100%', textAlign: 'center' }} />
+                            </td>
+                            <td style={{ padding: '4px 4px', position: 'relative' }}>
+                              <input data-clp={`party-${idx}`} value={entry.partyName} onChange={e => clpHandlePartySearch(idx, e.target.value)} onFocus={() => setClpActiveRow(idx)} placeholder="Type party name..." onKeyDown={e => { if (e.key === 'Enter' && clpSuggestions.length > 0) { clpSelectParty(idx, clpSuggestions[0].name); } else { clpKeyNav(e, idx, 'party'); } }} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px 8px', fontSize: '13px', width: '100%' }} />
+                              {clpActiveRow === idx && clpSuggestions.length > 0 && (
+                                <div style={{ position: 'absolute', top: '100%', left: '4px', right: '4px', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '6px', maxHeight: '200px', overflowY: 'auto', zIndex: 100, boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
+                                  {clpSuggestions.map((s, si) => (
+                                    <div key={si} onClick={() => clpSelectParty(idx, s.name)} style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '13px', color: 'var(--t1)', borderBottom: si < clpSuggestions.length - 1 ? '1px solid var(--border)' : 'none' }} onMouseEnter={e => e.target.style.background = 'var(--blue-g)'} onMouseLeave={e => e.target.style.background = 'transparent'}>{s.name}</div>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ padding: '4px 4px' }}>
+                              <input type="number" data-clp={`cash-${idx}`} value={entry.cash} onChange={e => clpUpdateEntry(idx, 'cash', e.target.value)} placeholder="0" onKeyDown={e => clpKeyNav(e, idx, 'cash')} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px', fontSize: '13px', width: '100%', textAlign: 'right' }} />
+                            </td>
+                            <td style={{ padding: '4px 4px' }}>
+                              <input type="number" data-clp={`fonepay-${idx}`} value={entry.fonepay} onChange={e => clpUpdateEntry(idx, 'fonepay', e.target.value)} placeholder="0" onKeyDown={e => clpKeyNav(e, idx, 'fonepay')} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px', fontSize: '13px', width: '100%', textAlign: 'right' }} />
+                            </td>
+                            <td style={{ padding: '4px 4px' }}>
+                              <input type="number" data-clp={`cheque-${idx}`} value={entry.cheque} onChange={e => clpUpdateEntry(idx, 'cheque', e.target.value)} placeholder="0" onKeyDown={e => clpKeyNav(e, idx, 'cheque')} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px', fontSize: '13px', width: '100%', textAlign: 'right' }} />
+                            </td>
+                            <td style={{ padding: '4px 4px' }}>
+                              <input type="number" data-clp={`bankdep-${idx}`} value={entry.bankDeposit} onChange={e => clpUpdateEntry(idx, 'bankDeposit', e.target.value)} placeholder="0" onKeyDown={e => clpKeyNav(e, idx, 'bankdep')} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px', fontSize: '13px', width: '100%', textAlign: 'right' }} />
+                            </td>
+                            <td style={{ padding: '4px 4px' }}>
+                              <input type="number" data-clp={`discount-${idx}`} value={entry.discount} onChange={e => clpUpdateEntry(idx, 'discount', e.target.value)} placeholder="0" onKeyDown={e => clpKeyNav(e, idx, 'discount')} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '4px', padding: '6px', fontSize: '13px', width: '100%', textAlign: 'right' }} />
+                            </td>
+                            <td style={{ padding: '6px 4px', textAlign: 'right', fontWeight: '600', color: clpRowTotal(entry) > 0 ? 'var(--green)' : 'var(--t3)', fontSize: '13px', whiteSpace: 'nowrap' }}>
+                              ₹{clpRowTotal(entry).toLocaleString('en-IN')}
+                            </td>
+                            <td style={{ padding: '4px 2px', textAlign: 'center' }}>
+                              {clpEntries.length > 1 && <button onClick={() => clpRemoveEntry(idx)} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: '16px', padding: '4px' }}>×</button>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      {/* Column totals */}
+                      <tfoot>
+                        <tr style={{ borderTop: '2px solid var(--border)', fontWeight: '700' }}>
+                          <td style={{ padding: '10px 6px', color: 'var(--t3)', fontSize: '12px' }}>{clpValidEntries().length} items</td>
+                          <td style={{ padding: '10px 6px' }}></td>
+                          <td style={{ padding: '10px 6px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>₹{clpEntries.reduce((s, e) => s + (parseFloat(e.cash) || 0), 0).toLocaleString('en-IN')}</td>
+                          <td style={{ padding: '10px 6px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>₹{clpEntries.reduce((s, e) => s + (parseFloat(e.fonepay) || 0), 0).toLocaleString('en-IN')}</td>
+                          <td style={{ padding: '10px 6px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>₹{clpEntries.reduce((s, e) => s + (parseFloat(e.cheque) || 0), 0).toLocaleString('en-IN')}</td>
+                          <td style={{ padding: '10px 6px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>₹{clpEntries.reduce((s, e) => s + (parseFloat(e.bankDeposit) || 0), 0).toLocaleString('en-IN')}</td>
+                          <td style={{ padding: '10px 6px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>₹{clpEntries.reduce((s, e) => s + (parseFloat(e.discount) || 0), 0).toLocaleString('en-IN')}</td>
+                          <td style={{ padding: '10px 6px', textAlign: 'right', color: 'var(--green)', fontSize: '14px' }}>₹{clpEntries.reduce((s, e) => s + clpRowTotal(e), 0).toLocaleString('en-IN')}</td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* STEP: CONFIRM */}
+              {clpStep === 'confirm' && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <div>
+                      <div className="sec-title" style={{ fontSize: '18px' }}>Confirm Collection Post</div>
+                      <div style={{ fontSize: '13px', color: 'var(--t3)', marginTop: '4px' }}>
+                        Date: {clpDate}
+                        {clpActiveBook ? ` | Book #${clpActiveBook.book_number} (${clpActiveBook.page_start}—${clpActiveBook.page_end})` : clpBookNumber ? ` | Book: ${clpBookNumber}` : ''}
+                        {clpStaffName ? ` | Staff: ${clpStaffName}` : ''}
+                        {clpActiveBook?.route_name ? ` | Route: ${clpActiveBook.route_name}` : ''}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button onClick={() => setClpStep('entry')} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px' }}>← Back</button>
+                      <button onClick={clpHandleSubmit} disabled={clpSubmitting} style={{ background: clpSubmitting ? 'var(--t3)' : 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 20px', cursor: clpSubmitting ? 'default' : 'pointer', fontSize: '14px', fontWeight: '700' }}>{clpSubmitting ? 'Submitting...' : 'Submit to Tally'}</button>
+                    </div>
+                  </div>
+
+                  {/* Summary Validation Block */}
+                  {clpSummaryLocked && (() => {
+                    const valid = clpValidEntries();
+                    const entered = {
+                      count: valid.length,
+                      cash: valid.reduce((s, e) => s + (parseFloat(e.cash) || 0), 0),
+                      fonepay: valid.reduce((s, e) => s + (parseFloat(e.fonepay) || 0), 0),
+                      cheque: valid.reduce((s, e) => s + (parseFloat(e.cheque) || 0), 0),
+                      bankDeposit: valid.reduce((s, e) => s + (parseFloat(e.bankDeposit) || 0), 0),
+                      discount: valid.reduce((s, e) => s + (parseFloat(e.discount) || 0), 0),
+                    };
+                    entered.total = entered.cash + entered.fonepay + entered.cheque + entered.bankDeposit + entered.discount;
+                    const summary = { count: parseInt(clpSummary.entryCount) || 0, total: clpSummaryTotal() };
+                    const countMatch = entered.count === summary.count;
+                    const totalMatch = entered.total === summary.total;
+                    const allMatch = countMatch && totalMatch;
+                    return (
+                      <div style={{ background: allMatch ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', border: `1px solid ${allMatch ? 'var(--green)' : 'var(--red)'}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ fontSize: '18px' }}>{allMatch ? '✓' : '⚠'}</span>
+                          <span style={{ fontWeight: '700', color: allMatch ? 'var(--green)' : 'var(--red)', fontSize: '14px' }}>
+                            {allMatch ? 'Summary matches — ready to submit' : 'Summary mismatch — check entries'}
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '20px', fontSize: '13px' }}>
+                          <span style={{ color: countMatch ? 'var(--green)' : 'var(--red)' }}>Entries: {entered.count}/{summary.count}</span>
+                          <span style={{ color: totalMatch ? 'var(--green)' : 'var(--red)' }}>Total: ₹{entered.total.toLocaleString('en-IN')}/₹{summary.total.toLocaleString('en-IN')}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Summary Cards */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+                    <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Entries</div>
+                      <div style={{ fontSize: '20px', fontWeight: '700', color: 'var(--t1)' }}>{clpValidEntries().length}</div>
+                    </div>
+                    <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Total Amount</div>
+                      <div style={{ fontSize: '20px', fontWeight: '700', color: 'var(--green)' }}>₹{clpValidEntries().reduce((s, e) => s + clpRowTotal(e), 0).toLocaleString('en-IN')}</div>
+                    </div>
+                    <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Cash</div>
+                      <div style={{ fontSize: '16px', fontWeight: '600', color: 'var(--t1)' }}>₹{clpValidEntries().reduce((s, e) => s + (parseFloat(e.cash) || 0), 0).toLocaleString('en-IN')}</div>
+                    </div>
+                    <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Fonepay</div>
+                      <div style={{ fontSize: '16px', fontWeight: '600', color: 'var(--t1)' }}>₹{clpValidEntries().reduce((s, e) => s + (parseFloat(e.fonepay) || 0), 0).toLocaleString('en-IN')}</div>
+                    </div>
+                    <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Discount</div>
+                      <div style={{ fontSize: '16px', fontWeight: '600', color: 'var(--t1)' }}>₹{clpValidEntries().reduce((s, e) => s + (parseFloat(e.discount) || 0), 0).toLocaleString('en-IN')}</div>
+                    </div>
+                  </div>
+
+                  {/* Confirmation Table */}
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', border: '1px solid var(--border)', overflow: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>#</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Rcpt</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Party Name</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Cash</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Fonepay</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Cheque</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Bank</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Disc.</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {clpValidEntries().map((entry, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '12px' }}>{idx + 1}</td>
+                            <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '13px' }}>{entry.receiptNumber || '-'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500', fontSize: '13px' }}>{entry.partyName}</td>
+                            <td style={{ padding: '8px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>{(parseFloat(entry.cash) || 0) > 0 ? `₹${(parseFloat(entry.cash)).toLocaleString('en-IN')}` : ''}</td>
+                            <td style={{ padding: '8px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>{(parseFloat(entry.fonepay) || 0) > 0 ? `₹${(parseFloat(entry.fonepay)).toLocaleString('en-IN')}` : ''}</td>
+                            <td style={{ padding: '8px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>{(parseFloat(entry.cheque) || 0) > 0 ? `₹${(parseFloat(entry.cheque)).toLocaleString('en-IN')}` : ''}</td>
+                            <td style={{ padding: '8px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>{(parseFloat(entry.bankDeposit) || 0) > 0 ? `₹${(parseFloat(entry.bankDeposit)).toLocaleString('en-IN')}` : ''}</td>
+                            <td style={{ padding: '8px', textAlign: 'right', color: 'var(--t1)', fontSize: '13px' }}>{(parseFloat(entry.discount) || 0) > 0 ? `₹${(parseFloat(entry.discount)).toLocaleString('en-IN')}` : ''}</td>
+                            <td style={{ padding: '8px', textAlign: 'right', fontWeight: '700', color: 'var(--green)', fontSize: '13px' }}>₹{clpRowTotal(entry).toLocaleString('en-IN')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* STEP: RESULTS */}
+              {clpStep === 'results' && clpResults && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                    <div>
+                      <div className="sec-title" style={{ fontSize: '18px' }}>Collection Post Results</div>
+                      <div style={{ fontSize: '13px', color: 'var(--t3)', marginTop: '4px' }}>{clpResults.successCount}/{clpResults.totalCount} receipts created successfully</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      {clpResults.successCount > 0 && (
+                        <button
+                          disabled={clpWaSending || clpWaChecked.size === 0}
+                          onClick={async () => {
+                            const checkedSuccessful = clpResults.results
+                              .map((r, i) => ({ ...r, _idx: i }))
+                              .filter((r, i) => r.success && clpWaChecked.has(i) && !r._waSent);
+                            if (!checkedSuccessful.length) {
+                              setClpWaProgress('All sent');
+                              return;
+                            }
+                            setClpWaSending(true);
+                            let sent = 0, failed = 0;
+                            for (const r of checkedSuccessful) {
+                              setClpWaProgress(`Sending ${sent + 1}/${checkedSuccessful.length}...`);
+                              try {
+                                const res = await sendWhatsAppReceipt({
+                                  partyName: r.partyName,
+                                  receiptData: { voucherNumber: r.receiptNumber, amount: r.total, date: new Date().toISOString().slice(0, 10) }
+                                });
+                                r._waSent = true;
+                                if (res.data?.sentToAdmin) r._sentToAdmin = true;
+                                sent++;
+                              } catch {
+                                failed++;
+                              }
+                            }
+                            setClpWaProgress(`Sent ${sent}/${checkedSuccessful.length}${failed ? ` (${failed} failed)` : ''}`);
+                            setClpWaSending(false);
+                            setClpResults({ ...clpResults });
+                          }}
+                          style={{ background: clpWaSending ? '#666' : '#25d366', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 16px', cursor: clpWaSending ? 'wait' : 'pointer', fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap', opacity: clpWaChecked.size === 0 ? 0.5 : 1 }}
+                        >
+                          {clpWaSending ? clpWaProgress : clpWaProgress && !clpWaSending ? clpWaProgress : `Send WhatsApp (${clpWaChecked.size})`}
+                        </button>
+                      )}
+                      <button onClick={clpReset} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 20px', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}>Back to Books</button>
+                    </div>
+                  </div>
+
+                  {/* Unused pages info */}
+                  {clpActiveBook && (() => {
+                    const usedCount = clpResults.successCount + (clpPostedEntries?.length || 0);
+                    const totalPages = clpActiveBook.page_end - (clpActiveBook.available_from || clpActiveBook.page_start) + 1;
+                    const unusedPages = totalPages - usedCount;
+                    if (unusedPages > 0) {
+                      return (
+                        <div style={{ background: 'rgba(59,130,246,0.08)', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', border: '1px solid rgba(59,130,246,0.3)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
+                          <span style={{ fontSize: '16px' }}>i</span>
+                          <span style={{ color: 'var(--t1)' }}>
+                            Book #{clpActiveBook.book_number} has <strong>{unusedPages} unused page{unusedPages > 1 ? 's' : ''}</strong> remaining.
+                            You can re-assign this book later from the inventory.
+                          </span>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', border: '1px solid var(--border)', overflow: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                          <th style={{ textAlign: 'center', padding: '10px 8px', width: '36px' }}>
+                            <input
+                              type="checkbox"
+                              checked={(() => { const successIdxs = clpResults.results.map((r, i) => r.success ? i : -1).filter(i => i >= 0); return successIdxs.length > 0 && successIdxs.every(i => clpWaChecked.has(i)); })()}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setClpWaChecked(new Set(clpResults.results.map((r, i) => r.success ? i : -1).filter(i => i >= 0)));
+                                } else {
+                                  setClpWaChecked(new Set());
+                                }
+                              }}
+                              style={{ cursor: 'pointer', width: '16px', height: '16px' }}
+                              title="Select all / Deselect all"
+                            />
+                          </th>
+                          <th style={{ textAlign: 'center', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '40px' }}>Status</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Rcpt</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Party Name</th>
+                          <th style={{ textAlign: 'right', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Total</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Tally ID</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Error</th>
+                          <th style={{ textAlign: 'center', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '50px' }}>WA</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {clpResults.results.map((r, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid var(--border)', background: r.success ? (clpWaChecked.has(idx) ? 'rgba(37,211,102,0.04)' : 'transparent') : 'rgba(239,68,68,0.05)' }}>
+                            <td style={{ padding: '8px', textAlign: 'center' }}>
+                              {r.success && (
+                                <input
+                                  type="checkbox"
+                                  checked={clpWaChecked.has(idx)}
+                                  disabled={r._waSent}
+                                  onChange={() => {
+                                    setClpWaChecked(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(idx)) next.delete(idx);
+                                      else next.add(idx);
+                                      return next;
+                                    });
+                                  }}
+                                  style={{ cursor: r._waSent ? 'default' : 'pointer', width: '16px', height: '16px' }}
+                                />
+                              )}
+                            </td>
+                            <td style={{ padding: '8px', textAlign: 'center', fontSize: '16px' }}>{r.success ? '✓' : '✗'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '13px' }}>{r.receiptNumber || '-'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t1)', fontWeight: '500', fontSize: '13px' }}>
+                              {r.partyName}
+                              {r._sentToAdmin && <span style={{ fontSize: '10px', color: '#eab308', marginLeft: '6px' }}>(admin)</span>}
+                            </td>
+                            <td style={{ padding: '8px', textAlign: 'right', fontWeight: '600', color: r.success ? 'var(--green)' : 'var(--red)', fontSize: '13px' }}>₹{(r.total || 0).toLocaleString('en-IN')}</td>
+                            <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '12px' }}>{r.tallyMasterId || '-'}</td>
+                            <td style={{ padding: '8px', color: 'var(--red)', fontSize: '12px' }}>{r.error || ''}</td>
+                            <td style={{ padding: '8px', textAlign: 'center', fontSize: '14px', color: r._waSent ? 'var(--green)' : 'var(--t3)' }}>
+                              {r.success && (r._waSent ? '✓' : '-')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+            {/* WHATSAPP PAGE */}
+            <div className={`page ${currentPage === 'whatsapp' ? 'active' : ''}`}>
+              {/* Tab bar */}
+              <div style={{ display: 'flex', gap: '4px', marginBottom: '16px', borderBottom: '2px solid var(--border)', paddingBottom: '8px' }}>
+                {['status', 'send', 'contacts', 'log'].map(t => (
+                  <button key={t} onClick={() => setWaTab(t)} style={{ background: waTab === t ? 'var(--blue)' : 'var(--card)', color: waTab === t ? '#fff' : 'var(--t2)', border: `1px solid ${waTab === t ? 'var(--blue)' : 'var(--border)'}`, borderRadius: '6px', padding: '8px 16px', cursor: 'pointer', fontSize: '13px', fontWeight: '600', textTransform: 'capitalize' }}>{t}</button>
+                ))}
+              </div>
+
+              {/* STATUS TAB */}
+              {waTab === 'status' && (
+                <div style={{ maxWidth: '500px' }}>
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '24px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', marginBottom: '16px' }}>
+                      <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: waStatus === 'ready' ? 'var(--green)' : waStatus === 'qr_pending' ? '#eab308' : waStatus === 'connecting' ? 'var(--blue)' : 'var(--red)' }}></div>
+                      <span style={{ fontSize: '18px', fontWeight: '700', color: 'var(--t1)', textTransform: 'capitalize' }}>{waStatus.replace('_', ' ')}</span>
+                      {waTestMode && <span style={{ fontSize: '10px', fontWeight: '700', background: '#eab308', color: '#000', padding: '2px 8px', borderRadius: '4px' }}>TEST MODE</span>}
+                    </div>
+
+                    {waStatus === 'qr_pending' && waQRCode && (
+                      <div style={{ marginBottom: '16px' }}>
+                        <div style={{ fontSize: '13px', color: 'var(--t3)', marginBottom: '8px' }}>Scan this QR code with WhatsApp on your phone</div>
+                        <img src={waQRCode} alt="WhatsApp QR Code" style={{ width: '256px', height: '256px', borderRadius: '8px', border: '1px solid var(--border)' }} />
+                      </div>
+                    )}
+
+                    {waStatus === 'ready' && waClientInfo && (
+                      <div style={{ marginBottom: '16px' }}>
+                        <div style={{ fontSize: '14px', color: 'var(--t1)', fontWeight: '600' }}>{waClientInfo.pushname || 'Connected'}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--t3)', marginTop: '4px' }}>{waClientInfo.wid || ''}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '2px' }}>{waClientInfo.platform || ''}</div>
+                      </div>
+                    )}
+
+                    {waStatus === 'error' && (
+                      <div style={{ fontSize: '13px', color: 'var(--red)', marginBottom: '16px' }}>Connection error. Try initializing again.</div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                      {waStatus !== 'ready' && waStatus !== 'connecting' && waStatus !== 'qr_pending' && (
+                        <button onClick={async () => { try { await initializeWhatsApp(); addToast('info', 'WhatsApp', 'Initializing... check for QR code'); } catch (e) { addToast('error', 'WhatsApp', e.response?.data?.error || e.message); } }} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px 24px', cursor: 'pointer', fontSize: '14px', fontWeight: '700' }}>Connect WhatsApp</button>
+                      )}
+                      {waStatus === 'ready' && (
+                        <button onClick={async () => { try { await logoutWhatsApp(); setWaStatus('disconnected'); setWaClientInfo(null); addToast('info', 'WhatsApp', 'Disconnected'); } catch (e) { addToast('error', 'WhatsApp', e.message); } }} style={{ background: 'var(--red)', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px 24px', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}>Disconnect</button>
+                      )}
+                    </div>
+                  </div>
+
+                  {waStats && (
+                    <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                      <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: '700', color: 'var(--t1)' }}>{waStats.today}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Today</div>
+                      </div>
+                      <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: '700', color: 'var(--t1)' }}>{waStats.thisWeek}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)' }}>This Week</div>
+                      </div>
+                      <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: '700', color: 'var(--t1)' }}>{waStats.total}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Total Sent</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* SEND TAB */}
+              {waTab === 'send' && (
+                <div style={{ maxWidth: '600px' }}>
+                  {waStatus !== 'ready' ? (
+                    <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '24px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                      <div style={{ fontSize: '14px', color: 'var(--t3)' }}>WhatsApp not connected. Go to Status tab to connect.</div>
+                    </div>
+                  ) : (
+                    <div style={{ background: 'var(--card)', borderRadius: '10px', padding: '20px', border: '1px solid var(--border)' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Party Name (optional)</div>
+                          <input value={waSendParty} onChange={e => setWaSendParty(e.target.value)} placeholder="Type party name..." style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '13px', width: '100%' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Phone Number</div>
+                          <input value={waSendPhone} onChange={e => setWaSendPhone(e.target.value)} placeholder="98XXXXXXXX" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '13px', width: '100%' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Template</div>
+                          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                            {['Custom', 'Payment Reminder', 'Outstanding Report'].map(t => (
+                              <button key={t} onClick={() => {
+                                if (t === 'Payment Reminder' && waSendParty) {
+                                  setWaSendMessage(`*Payment Reminder*\n\nDear ${waSendParty},\n\nKindly arrange your pending payment at your earliest convenience.\n\nThank you,\n_Rush Wholesale_`);
+                                } else if (t === 'Outstanding Report' && waSendParty) {
+                                  setWaSendMessage(`*Outstanding Statement*\n\nDear ${waSendParty},\n\nPlease find your pending bills summary. Contact us for details.\n\nThank you,\n_Rush Wholesale_`);
+                                } else if (t === 'Custom') {
+                                  setWaSendMessage('');
+                                }
+                              }} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '11px' }}>{t}</button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Message</div>
+                          <textarea value={waSendMessage} onChange={e => setWaSendMessage(e.target.value)} placeholder="Type your message..." rows={5} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '8px 12px', fontSize: '13px', width: '100%', resize: 'vertical', fontFamily: 'inherit' }} />
+                        </div>
+                        <button disabled={waSending || !waSendPhone || !waSendMessage} onClick={async () => {
+                          setWaSending(true);
+                          try {
+                            await sendWhatsAppMessage(waSendPhone, waSendMessage, waSendParty || undefined);
+                            addToast('success', 'WhatsApp', `Message sent to ${waSendPhone}`);
+                            setWaSendMessage('');
+                            getWhatsAppMessages({ limit: 50 }).then(r => setWaMessages(r.data.messages || [])).catch(() => {});
+                          } catch (e) { addToast('error', 'WhatsApp', e.response?.data?.error || e.message); }
+                          setWaSending(false);
+                        }} style={{ background: waSending || !waSendPhone || !waSendMessage ? 'var(--t3)' : 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px 24px', cursor: waSending ? 'default' : 'pointer', fontSize: '14px', fontWeight: '700', alignSelf: 'flex-start' }}>{waSending ? 'Sending...' : 'Send Message'}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* CONTACTS TAB */}
+              {waTab === 'contacts' && (
+                <div>
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <input value={waContactSearch} onChange={e => setWaContactSearch(e.target.value)} placeholder="Search contacts..." style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 12px', fontSize: '13px', flex: '1', minWidth: '200px' }} />
+                    <button onClick={async () => {
+                      setWaLoading(true);
+                      try {
+                        const r = await importWhatsAppContacts();
+                        addToast('success', 'Import', `${r.data.imported} contacts imported from Tally`);
+                        getWhatsAppContacts().then(r => setWaContacts(r.data.contacts || [])).catch(() => {});
+                      } catch (e) { addToast('error', 'Import', e.response?.data?.error || e.message); }
+                      setWaLoading(false);
+                    }} disabled={waLoading} style={{ background: 'var(--blue)', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>{waLoading ? 'Importing...' : 'Import from Tally'}</button>
+                    <button onClick={() => getWhatsAppContacts().then(r => setWaContacts(r.data.contacts || [])).catch(() => {})} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px' }}>Refresh</button>
+                  </div>
+
+                  {/* Add contact form */}
+                  <div style={{ background: 'var(--card)', borderRadius: '8px', padding: '12px', border: '1px solid var(--border)', marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                    <div>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Party Name</div>
+                      <input value={waContactForm.partyName} onChange={e => setWaContactForm(p => ({ ...p, partyName: e.target.value }))} placeholder="Party name" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 10px', fontSize: '13px', width: '200px' }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Phone</div>
+                      <input value={waContactForm.phone} onChange={e => setWaContactForm(p => ({ ...p, phone: e.target.value }))} placeholder="98XXXXXXXX" style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 10px', fontSize: '13px', width: '150px' }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', marginBottom: '4px' }}>Label</div>
+                      <select value={waContactForm.label} onChange={e => setWaContactForm(p => ({ ...p, label: e.target.value }))} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 10px', fontSize: '13px' }}>
+                        <option value="primary">Primary</option>
+                        <option value="secondary">Secondary</option>
+                        <option value="owner">Owner</option>
+                        <option value="manager">Manager</option>
+                      </select>
+                    </div>
+                    <button onClick={async () => {
+                      if (!waContactForm.partyName || !waContactForm.phone) return addToast('error', 'Error', 'Party name and phone required');
+                      try {
+                        await saveWhatsAppContact(waContactForm);
+                        addToast('success', 'Saved', 'Contact saved');
+                        setWaContactForm({ partyName: '', phone: '', label: 'primary' });
+                        getWhatsAppContacts().then(r => setWaContacts(r.data.contacts || [])).catch(() => {});
+                      } catch (e) { addToast('error', 'Error', e.response?.data?.error || e.message); }
+                    }} style={{ background: 'var(--green)', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 14px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>Add</button>
+                  </div>
+
+                  {/* Contact table */}
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', border: '1px solid var(--border)', overflow: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Party Name</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Phone</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Label</th>
+                          <th style={{ textAlign: 'center', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Verified</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Source</th>
+                          <th style={{ textAlign: 'center', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600', width: '120px' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {waContacts.filter(c => !waContactSearch || c.party_name?.toLowerCase().includes(waContactSearch.toLowerCase()) || c.phone?.includes(waContactSearch)).map(c => (
+                          <tr key={c.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '8px', color: 'var(--t1)', fontSize: '13px', fontWeight: '500' }}>{c.party_name}</td>
+                            <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '13px' }}>{c.phone}</td>
+                            <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '12px' }}>{c.label}</td>
+                            <td style={{ padding: '8px', textAlign: 'center', fontSize: '14px' }}>{c.is_verified ? '\u2713' : '\u2014'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '12px' }}>{c.source}</td>
+                            <td style={{ padding: '8px', textAlign: 'center' }}>
+                              <div style={{ display: 'flex', gap: '4px', justifyContent: 'center' }}>
+                                {waStatus === 'ready' && (
+                                  <button onClick={async () => {
+                                    try {
+                                      const r = await verifyWhatsAppContact(c.id);
+                                      addToast(r.data.registered ? 'success' : 'warning', 'Verify', r.data.registered ? `${c.phone} is on WhatsApp` : `${c.phone} not on WhatsApp`);
+                                      getWhatsAppContacts().then(r => setWaContacts(r.data.contacts || [])).catch(() => {});
+                                    } catch (e) { addToast('error', 'Error', e.message); }
+                                  }} style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px' }}>Verify</button>
+                                )}
+                                <button onClick={() => { setWaSendPhone(c.phone); setWaSendParty(c.party_name); setWaTab('send'); }} style={{ background: 'var(--blue-g)', color: 'var(--blue)', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px' }}>Send</button>
+                                <button onClick={async () => {
+                                  try { await deleteWhatsAppContact(c.id); getWhatsAppContacts().then(r => setWaContacts(r.data.contacts || [])).catch(() => {}); } catch (e) { addToast('error', 'Error', e.message); }
+                                }} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: '14px', padding: '2px 4px' }}>{'\u00d7'}</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                        {waContacts.length === 0 && (
+                          <tr><td colSpan={6} style={{ padding: '24px', textAlign: 'center', color: 'var(--t3)', fontSize: '13px' }}>No contacts yet. Import from Tally or add manually.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* LOG TAB */}
+              {waTab === 'log' && (
+                <div>
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+                    <button onClick={() => getWhatsAppMessages({ limit: 50 }).then(r => setWaMessages(r.data.messages || [])).catch(() => {})} style={{ background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--t2)', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer', fontSize: '12px' }}>Refresh</button>
+                    <span style={{ fontSize: '13px', color: 'var(--t3)', alignSelf: 'center' }}>{waMessages.length} messages</span>
+                  </div>
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', border: '1px solid var(--border)', overflow: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Date</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Party</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Phone</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Template</th>
+                          <th style={{ textAlign: 'left', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Message</th>
+                          <th style={{ textAlign: 'center', padding: '10px 8px', color: 'var(--t3)', fontSize: '11px', fontWeight: '600' }}>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {waMessages.map(m => (
+                          <tr key={m.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                            <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '12px', whiteSpace: 'nowrap' }}>{m.sent_at ? new Date(m.sent_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t1)', fontSize: '13px', fontWeight: '500' }}>{m.party_name || '-'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '12px' }}>{m.phone}</td>
+                            <td style={{ padding: '8px', color: 'var(--t3)', fontSize: '12px' }}>{m.template_name || '-'}</td>
+                            <td style={{ padding: '8px', color: 'var(--t2)', fontSize: '12px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.message_body || '-'}</td>
+                            <td style={{ padding: '8px', textAlign: 'center' }}>
+                              <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '4px', fontWeight: '600', background: m.status === 'sent' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', color: m.status === 'sent' ? 'var(--green)' : 'var(--red)' }}>{m.status}</span>
+                            </td>
+                          </tr>
+                        ))}
+                        {waMessages.length === 0 && (
+                          <tr><td colSpan={6} style={{ padding: '24px', textAlign: 'center', color: 'var(--t3)', fontSize: '13px' }}>No messages yet.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* LEDGER (BOTH) PAGE */}
+            <div className={`page ${currentPage === 'ledger-both' ? 'active' : ''}`}>
+              <div className="sec-head" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="sec-title" style={{ fontSize: '18px' }}>Ledger (Both) — Combined Customer View</div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button className="btn btn-p" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={fetchLedgerBoth} disabled={lbLoading}>
+                    {lbLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                  <button className="btn btn-o" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={() => {
+                    const printW = window.open('', '_blank');
+                    const search = lbSearch.toLowerCase();
+                    const filtered = lbRows.filter(r => {
+                      if (lbFilter !== 'all' && r.type !== lbFilter) return false;
+                      if (search && !(r.billing_party || '').toLowerCase().includes(search) && !(r.odbc_party || '').toLowerCase().includes(search) && !(r.group || '').toLowerCase().includes(search)) return false;
+                      return true;
+                    });
+                    printW.document.write(`<html><head><title>Ledger (Both) - Collection Sheet</title><style>
+                      body { font-family: Arial, sans-serif; margin: 20px; font-size: 12px; }
+                      h2 { margin-bottom: 4px; } .sub { color: #666; margin-bottom: 12px; }
+                      table { width: 100%; border-collapse: collapse; } th, td { border: 1px solid #ccc; padding: 5px 8px; text-align: left; }
+                      th { background: #f0f0f0; font-weight: 700; } .r { text-align: right; font-family: monospace; }
+                      .overdue { color: red; font-weight: 700; } .total-row { font-weight: 700; background: #f5f5f5; }
+                    </style></head><body>
+                    <h2>Ledger (Both) — Collection Sheet</h2>
+                    <div class="sub">${new Date().toLocaleDateString('en-IN')} | ${filtered.length} parties${lbFilter !== 'all' ? ' (filtered: ' + lbFilter + ')' : ''}</div>
+                    <table><thead><tr><th>#</th><th>Billing Party</th><th>Group</th><th>ODBC Party</th><th class="r">Billing Bal</th><th class="r">Cheque Total</th><th class="r">Cheque Overdue</th><th class="r">Grand Total</th></tr></thead><tbody>
+                    ${filtered.map((r, i) => `<tr>
+                      <td>${i + 1}</td>
+                      <td>${r.billing_party || '-'}</td>
+                      <td>${r.group || '-'}</td>
+                      <td>${r.odbc_party || '-'}</td>
+                      <td class="r">${r.billing_balance ? formatCurrency(r.billing_balance) : '-'}</td>
+                      <td class="r">${r.cheque_total ? formatCurrency(r.cheque_total) : '-'}</td>
+                      <td class="r ${r.cheque_overdue > 0 ? 'overdue' : ''}">${r.cheque_overdue ? formatCurrency(r.cheque_overdue) : '-'}</td>
+                      <td class="r">${formatCurrency(r.billing_balance + r.cheque_total)}</td>
+                    </tr>`).join('')}
+                    <tr class="total-row"><td colspan="4">TOTAL (${filtered.length} parties)</td>
+                      <td class="r">${formatCurrency(filtered.reduce((s, r) => s + r.billing_balance, 0))}</td>
+                      <td class="r">${formatCurrency(filtered.reduce((s, r) => s + r.cheque_total, 0))}</td>
+                      <td class="r overdue">${formatCurrency(filtered.reduce((s, r) => s + r.cheque_overdue, 0))}</td>
+                      <td class="r">${formatCurrency(filtered.reduce((s, r) => s + r.billing_balance + r.cheque_total, 0))}</td>
+                    </tr></tbody></table></body></html>`);
+                    printW.document.close();
+                    printW.print();
+                  }}>
+                    Print
+                  </button>
+                </div>
+              </div>
+
+              {/* Summary Cards */}
+              {lbSummary && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+                  <div style={{ padding: '14px', background: 'var(--blue-g, rgba(59,130,246,0.1))', borderRadius: '12px', border: '1px solid var(--blue)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Billing Total</div>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: 'var(--blue)', fontFamily: 'var(--mono)', marginTop: '4px' }}>{formatCurrency(lbSummary.total_billing)}</div>
+                  </div>
+                  <div style={{ padding: '14px', background: 'var(--card)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Cheque Total</div>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: 'var(--cyan, #06b6d4)', fontFamily: 'var(--mono)', marginTop: '4px' }}>{formatCurrency(lbSummary.total_cheque)}</div>
+                  </div>
+                  <div style={{ padding: '14px', background: 'var(--red-g, rgba(239,68,68,0.1))', borderRadius: '12px', border: '1px solid var(--red)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Cheque Overdue</div>
+                    <div style={{ fontSize: '22px', fontWeight: '700', color: 'var(--red)', fontFamily: 'var(--mono)', marginTop: '4px' }}>{formatCurrency(lbSummary.total_cheque_overdue)}</div>
+                  </div>
+                  <div style={{ padding: '14px', background: 'var(--card)', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                    <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Parties</div>
+                    <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--t1)', marginTop: '6px' }}>
+                      <span style={{ color: 'var(--green)' }}>{lbSummary.mapped_count} mapped</span> · <span style={{ color: 'var(--blue)' }}>{lbSummary.billing_only_count} billing</span> · <span style={{ color: 'var(--cyan, #06b6d4)' }}>{lbSummary.cheque_only_count} cheque</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Filters & Search */}
+              <div style={{ display: 'flex', gap: '10px', marginBottom: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <input type="text" placeholder="Search party name..." value={lbSearch} onChange={e => setLbSearch(e.target.value)} style={{ padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', width: '260px', fontSize: '13px' }} />
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  {[['all', 'All'], ['both', 'Mapped'], ['billing', 'Billing Only'], ['cheque', 'Cheque Only']].map(([val, label]) => (
+                    <button key={val} className={`btn ${lbFilter === val ? 'btn-p' : 'btn-o'}`} style={{ padding: '6px 12px', fontSize: '11px' }} onClick={() => setLbFilter(val)}>{label}</button>
+                  ))}
+                </div>
+                <select value={lbSort} onChange={e => setLbSort(e.target.value)} style={{ padding: '7px 10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--t1)', fontSize: '12px' }}>
+                  <option value="total">Sort: Grand Total</option>
+                  <option value="billing_balance">Sort: Billing Balance</option>
+                  <option value="cheque_total">Sort: Cheque Total</option>
+                  <option value="cheque_overdue">Sort: Cheque Overdue</option>
+                  <option value="billing_party">Sort: Name (Billing)</option>
+                  <option value="group">Sort: Group</option>
+                  <option value="odbc_party">Sort: Name (ODBC)</option>
+                </select>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px' }}>
+                  {lbBulkMode ? (<>
+                    <span style={{ fontSize: '12px', color: 'var(--t2)', alignSelf: 'center' }}>{Object.values(lbBulkMappings).filter(Boolean).length} selected</span>
+                    <button className="btn btn-p" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={saveLbBulkMappings} disabled={lbBulkSaving || Object.values(lbBulkMappings).filter(Boolean).length === 0}>{lbBulkSaving ? 'Saving...' : 'Save All'}</button>
+                    <button className="btn btn-o" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={() => { setLbBulkMode(false); setLbBulkMappings({}); }}>Cancel</button>
+                  </>) : (
+                    <button className="btn btn-o" style={{ padding: '6px 14px', fontSize: '12px' }} onClick={() => setLbBulkMode(true)} disabled={lbRows.length === 0}>Bulk Map</button>
+                  )}
+                </div>
+              </div>
+
+              {lbLoading ? <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading from Tally...</div> : (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '40px' }}>#</th>
+                        <th>Billing Party</th>
+                        <th>Group</th>
+                        <th>ODBC Party</th>
+                        <th style={{ textAlign: 'right' }}>Billing Bal</th>
+                        <th style={{ textAlign: 'right' }}>Cheque Total</th>
+                        <th style={{ textAlign: 'right' }}>Cheque Overdue</th>
+                        <th style={{ textAlign: 'right' }}>Grand Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        const search = lbSearch.toLowerCase();
+                        let filtered = lbRows.filter(r => {
+                          if (lbFilter !== 'all' && r.type !== lbFilter) return false;
+                          if (search && !(r.billing_party || '').toLowerCase().includes(search) && !(r.odbc_party || '').toLowerCase().includes(search) && !(r.group || '').toLowerCase().includes(search)) return false;
+                          return true;
+                        });
+                        // Sort
+                        filtered.sort((a, b) => {
+                          if (lbSort === 'total') return (b.billing_balance + b.cheque_total) - (a.billing_balance + a.cheque_total);
+                          if (lbSort === 'billing_balance') return b.billing_balance - a.billing_balance;
+                          if (lbSort === 'cheque_total') return b.cheque_total - a.cheque_total;
+                          if (lbSort === 'cheque_overdue') return b.cheque_overdue - a.cheque_overdue;
+                          if (lbSort === 'billing_party') return (a.billing_party || '').localeCompare(b.billing_party || '');
+                          if (lbSort === 'group') return (a.group || '').localeCompare(b.group || '');
+                          if (lbSort === 'odbc_party') return (a.odbc_party || '').localeCompare(b.odbc_party || '');
+                          return 0;
+                        });
+                        return filtered.map((r, i) => {
+                          const rowKey = r.billing_party || r.odbc_party || i;
+                          const bulkKey = r.type === 'billing' ? `billing:${r.billing_party}` : r.type === 'cheque' ? `cheque:${r.odbc_party}` : null;
+                          const dropdownStyle = { width: '100%', padding: '4px 6px', fontSize: '12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--t1)' };
+                          return (
+                          <tr key={rowKey} style={{ background: r.type === 'both' ? 'var(--green-g, rgba(34,197,94,0.05))' : lbBulkMode && bulkKey && lbBulkMappings[bulkKey] ? 'rgba(59,130,246,0.06)' : undefined }}>
+                            <td style={{ color: 'var(--t3)', fontSize: '11px' }}>{i + 1}</td>
+                            <td>
+                              {lbBulkMode && r.type === 'cheque' ? (
+                                <select value={lbBulkMappings[bulkKey] || ''} onChange={e => setLbBulkMappings(prev => ({ ...prev, [bulkKey]: e.target.value }))} style={dropdownStyle}>
+                                  <option value="">— select billing party —</option>
+                                  {lbBillingParties.map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                              ) : (
+                                <>
+                                  <div style={{ fontWeight: '600' }}>{r.billing_party || <span style={{ color: 'var(--t3)' }}>—</span>}</div>
+                                  {r.type !== 'both' && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '3px', background: r.type === 'billing' ? 'var(--blue-g, rgba(59,130,246,0.15))' : 'var(--cyan-g, rgba(6,182,212,0.15))', color: r.type === 'billing' ? 'var(--blue)' : 'var(--cyan, #06b6d4)' }}>{r.type === 'billing' ? 'billing only' : 'cheque only'}</span>}
+                                </>
+                              )}
+                            </td>
+                            <td style={{ fontSize: '11px', color: 'var(--t3)' }}>{r.group || '—'}</td>
+                            <td>
+                              {lbBulkMode && r.type === 'billing' ? (
+                                <select value={lbBulkMappings[bulkKey] || ''} onChange={e => setLbBulkMappings(prev => ({ ...prev, [bulkKey]: e.target.value }))} style={dropdownStyle}>
+                                  <option value="">— select ODBC party —</option>
+                                  {lbOdbcParties.map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                              ) : (
+                                <span style={{ color: r.odbc_party ? 'var(--t1)' : 'var(--t3)' }}>{r.odbc_party || '—'}</span>
+                              )}
+                            </td>
+                            <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: r.billing_balance > 0 ? '600' : '400', color: r.billing_balance > 0 ? 'var(--t1)' : 'var(--t3)' }}>{r.billing_balance > 0 ? formatCurrency(r.billing_balance) : '—'}</td>
+                            <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: r.cheque_total > 0 ? '600' : '400', color: r.cheque_total > 0 ? 'var(--t1)' : 'var(--t3)' }}>{r.cheque_total > 0 ? formatCurrency(r.cheque_total) : '—'}</td>
+                            <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: r.cheque_overdue > 0 ? '700' : '400', color: r.cheque_overdue > 0 ? 'var(--red)' : 'var(--t3)' }}>{r.cheque_overdue > 0 ? formatCurrency(r.cheque_overdue) : '—'}{r.cheque_overdue_count > 0 && <span style={{ fontSize: '10px', color: 'var(--red)', marginLeft: '4px' }}>({r.cheque_overdue_count})</span>}</td>
+                            <td style={{ textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '700', fontSize: '13px' }}>{formatCurrency(r.billing_balance + r.cheque_total)}</td>
+                          </tr>
+                          );
+                        });
+                      })()}
+                    </tbody>
+                  </table>
+                  {lbRows.length === 0 && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--t3)' }}>No data. Click "Refresh" to fetch from Tally.</div>}
+                </div>
+              )}
+            </div>
+
+            {/* DATA COMPLETENESS PAGE */}
+            <div className={`page ${currentPage === 'data-completeness' ? 'active' : ''}`}>
+              <div className="sec-head" style={{ marginBottom: '16px' }}>
+                <div className="sec-title" style={{ fontSize: '18px' }}>📋 Data Quality Tracking</div>
+                <button
+                  className="btn btn-p"
+                  style={{ padding: '6px 14px', fontSize: '11px' }}
+                  onClick={() => {
+                    setCompletenessLoading(true);
+                    setCompletenessData(null);
+                    getDataCompleteness().then(r => setCompletenessData(r.data)).catch(() => {}).finally(() => setCompletenessLoading(false));
+                  }}
+                  disabled={completenessLoading}
+                >
+                  {completenessLoading ? '⟳ Loading...' : '🔄 Refresh'}
+                </button>
+              </div>
+
+              {completenessLoading && !completenessData && (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading completeness data...</div>
+              )}
+
+              {completenessData && (() => {
+                const d = completenessData;
+                const scoreColor = (s) => s >= 90 ? 'var(--green)' : s >= 75 ? 'var(--amber)' : s >= 60 ? '#F59E0B' : 'var(--red)';
+                const scoreBar = (s) => (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ width: '80px', height: '6px', background: 'var(--bg3)', borderRadius: '3px', overflow: 'hidden' }}>
+                      <div style={{ width: `${s}%`, height: '100%', background: scoreColor(s), borderRadius: '3px', transition: 'width .3s' }}></div>
+                    </div>
+                    <span style={{ fontSize: '11px', fontWeight: '700', color: scoreColor(s), fontFamily: 'var(--mono)', minWidth: '32px' }}>{s}%</span>
+                  </div>
+                );
+
+                return (
+                  <>
+                    {/* Overall Score */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+                      <div className="s-card" style={{ padding: '16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '36px', fontWeight: '800', color: scoreColor(d.overallScore), fontFamily: 'var(--mono)' }}>{d.overallScore}%</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>Overall Score</div>
+                      </div>
+                      <div className="s-card" style={{ padding: '16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '36px', fontWeight: '800', color: 'var(--blue)', fontFamily: 'var(--mono)' }}>{d.totalComponents}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>Components Tracked</div>
+                      </div>
+                      <div className="s-card" style={{ padding: '16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '36px', fontWeight: '800', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{d.categories.length}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>Categories</div>
+                      </div>
+                      <div className="s-card" style={{ padding: '16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '14px', fontWeight: '600', color: 'var(--t2)' }}>{new Date(d.lastUpdated).toLocaleString()}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>Last Checked</div>
+                      </div>
+                    </div>
+
+                    {/* DB Stats + Action Breakdown (expandable) */}
+                    <div className="s-card" style={{ marginBottom: '12px', overflow: 'hidden' }}>
+                      <div
+                        onClick={() => setDcExpanded(prev => ({ ...prev, dbstats: !prev.dbstats }))}
+                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 18px', cursor: 'pointer', userSelect: 'none' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontSize: '10px', color: 'var(--t3)', transition: 'transform .2s', transform: dcExpanded.dbstats ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>&#9654;</span>
+                          <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t1)' }}>Database Stats</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '12px', fontSize: '11px' }}>
+                          {[['Bills', d.dbStats.totalBills], ['ODBC', d.dbStats.odbcVouchers], ['Fonepay', d.dbStats.fonepayTxns], ['RBB', d.dbStats.rbbTxns]].map(([k, v]) => (
+                            <span key={k} style={{ color: 'var(--t3)' }}>{k}: <span style={{ fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{(v||0).toLocaleString()}</span></span>
+                          ))}
+                        </div>
+                      </div>
+                      {dcExpanded.dbstats && (
+                        <div style={{ padding: '0 18px 14px' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '8px', fontSize: '11px' }}>
+                            {[
+                              ['Bills (Active)', d.dbStats.totalBills, 'var(--blue)'],
+                              ['Bills (Deleted)', d.dbStats.deletedBills, 'var(--red)'],
+                              ['ODBC Vouchers', d.dbStats.odbcVouchers, 'var(--amber)'],
+                              ['With Timestamp', d.dbStats.withTimestamp, 'var(--green)'],
+                              ['With Action', d.dbStats.withAction, 'var(--green)'],
+                              ['With Entered By', d.dbStats.withEnteredBy, 'var(--green)'],
+                              ['Audited', d.dbStats.withAuditStatus, 'var(--purple)'],
+                              ['Critical Flagged', d.dbStats.withCriticalFlag, 'var(--red)'],
+                              ['Parties', d.dbStats.totalParties, 'var(--blue)'],
+                              ['Stock Items', d.dbStats.totalStockItems, 'var(--blue)'],
+                              ['Fonepay Txns', d.dbStats.fonepayTxns, 'var(--green)'],
+                              ['Fonepay Linked', d.dbStats.fonepayLinked, 'var(--green)'],
+                              ['RBB Txns', d.dbStats.rbbTxns, 'var(--blue)'],
+                              ['Cheques', d.dbStats.totalCheques, 'var(--amber)'],
+                              ['Outstanding', d.dbStats.outstandingBills, 'var(--amber)'],
+                              ['Change Log', d.dbStats.changeLogEntries, 'var(--purple)'],
+                              ['Phone Maps', d.dbStats.phoneMappings, 'var(--green)'],
+                              ['Ledger Maps', d.dbStats.ledgerMappings, 'var(--green)'],
+                              ['Collection Batches', d.dbStats.collectionBatches, 'var(--blue)'],
+                            ].map(([label, val, clr]) => (
+                              <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--bg3)', borderRadius: '6px' }}>
+                                <span style={{ color: 'var(--t3)' }}>{label}</span>
+                                <span style={{ fontWeight: '700', fontFamily: 'var(--mono)', color: clr }}>{(val || 0).toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {d.actionBreakdown && Object.keys(d.actionBreakdown).length > 0 && (
+                            <div style={{ marginTop: '12px', padding: '10px', background: 'var(--bg3)', borderRadius: '6px' }}>
+                              <div style={{ fontSize: '10px', fontWeight: '700', color: 'var(--t3)', textTransform: 'uppercase', marginBottom: '8px' }}>Voucher Action Breakdown</div>
+                              <div style={{ display: 'flex', gap: '16px', fontSize: '12px' }}>
+                                {Object.entries(d.actionBreakdown).map(([action, count]) => (
+                                  <div key={action} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <span style={{
+                                      padding: '2px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: '700',
+                                      background: action === 'Create' ? 'var(--green-g)' : action === 'Alter' ? 'var(--amber-g)' : 'var(--blue-g)',
+                                      color: action === 'Create' ? 'var(--green)' : action === 'Alter' ? 'var(--amber)' : 'var(--blue)'
+                                    }}>{action}</span>
+                                    <span style={{ fontWeight: '700', fontFamily: 'var(--mono)' }}>{count.toLocaleString()}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Category Summary (expandable) */}
+                    <div className="s-card" style={{ marginBottom: '12px', overflow: 'hidden' }}>
+                      <div
+                        onClick={() => setDcExpanded(prev => ({ ...prev, summary: !prev.summary }))}
+                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 18px', cursor: 'pointer', userSelect: 'none' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontSize: '10px', color: 'var(--t3)', transition: 'transform .2s', transform: dcExpanded.summary ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>&#9654;</span>
+                          <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t1)' }}>Category Summary</span>
+                          <span style={{ fontSize: '10px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{d.categorySummary.length} categories</span>
+                        </div>
+                      </div>
+                      {dcExpanded.summary && (
+                        <div style={{ padding: '0 18px 14px' }}>
+                          <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', color: 'var(--t3)', fontWeight: '600', fontSize: '10px', textTransform: 'uppercase' }}>Category</th>
+                                <th style={{ textAlign: 'center', padding: '6px 8px', color: 'var(--t3)', fontWeight: '600', fontSize: '10px', textTransform: 'uppercase' }}>Components</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', color: 'var(--t3)', fontWeight: '600', fontSize: '10px', textTransform: 'uppercase', width: '180px' }}>Score</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {d.categorySummary.map((cat, i) => (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer' }} onClick={() => setDcExpanded(prev => ({ ...prev, [i]: !prev[i] }))}>
+                                  <td style={{ padding: '8px', fontWeight: '600', color: 'var(--t1)' }}>
+                                    <span style={{ fontSize: '9px', color: 'var(--t3)', marginRight: '6px' }}>{dcExpanded[i] ? '▼' : '▶'}</span>
+                                    {cat.name}
+                                  </td>
+                                  <td style={{ padding: '8px', textAlign: 'center', fontFamily: 'var(--mono)', color: 'var(--t2)' }}>{cat.components}</td>
+                                  <td style={{ padding: '8px' }}>{scoreBar(cat.avgScore)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Detailed Categories (Expandable) */}
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px', gap: '6px' }}>
+                      <button
+                        style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '6px', padding: '4px 10px', fontSize: '10px', color: 'var(--t3)', cursor: 'pointer', fontFamily: 'var(--font)' }}
+                        onClick={() => { const all = {}; d.categories.forEach((_, i) => all[i] = true); setDcExpanded(all); }}
+                      >Expand All</button>
+                      <button
+                        style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '6px', padding: '4px 10px', fontSize: '10px', color: 'var(--t3)', cursor: 'pointer', fontFamily: 'var(--font)' }}
+                        onClick={() => setDcExpanded({})}
+                      >Collapse All</button>
+                    </div>
+                    {d.categories.map((cat, ci) => {
+                      const catScore = Math.round(cat.components.reduce((s, c) => s + c.score, 0) / cat.components.length);
+                      const isOpen = dcExpanded[ci];
+                      return (
+                        <div key={ci} className="s-card" style={{ marginBottom: '8px', overflow: 'hidden' }}>
+                          <div
+                            onClick={() => setDcExpanded(prev => ({ ...prev, [ci]: !prev[ci] }))}
+                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 18px', cursor: 'pointer', userSelect: 'none' }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <span style={{ fontSize: '10px', color: 'var(--t3)', transition: 'transform .2s', transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>&#9654;</span>
+                              <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t1)' }}>{cat.name}</span>
+                              <span style={{ fontSize: '10px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{cat.components.length} items</span>
+                            </div>
+                            {scoreBar(catScore)}
+                          </div>
+                          {isOpen && (
+                            <div style={{ padding: '0 18px 14px' }}>
+                              <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse' }}>
+                                <thead>
+                                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                                    <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase' }}>Component</th>
+                                    <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase' }}>Source</th>
+                                    <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase' }}>Method</th>
+                                    <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase' }}>Refresh</th>
+                                    <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase', width: '140px' }}>Score</th>
+                                    <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase' }}>Detail</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {cat.components.map((comp, j) => (
+                                    <tr key={j} style={{ borderBottom: '1px solid var(--border)' }}>
+                                      <td style={{ padding: '6px', fontWeight: '600', color: 'var(--t1)' }}>{comp.name}</td>
+                                      <td style={{ padding: '6px', color: 'var(--t2)', fontSize: '10px' }}>{comp.source}</td>
+                                      <td style={{ padding: '6px', color: 'var(--t3)', fontSize: '10px', fontFamily: 'var(--mono)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={comp.method}>{comp.method}</td>
+                                      <td style={{ padding: '6px', color: 'var(--t3)', fontSize: '10px' }}>{comp.refresh}</td>
+                                      <td style={{ padding: '6px' }}>{scoreBar(comp.score)}</td>
+                                      <td style={{ padding: '6px', color: 'var(--t2)', fontSize: '10px' }}>
+                                        {comp.count !== null && comp.count !== undefined && (
+                                          <span style={{ fontFamily: 'var(--mono)', color: 'var(--blue)', fontWeight: '600', marginRight: '6px' }}>{comp.count.toLocaleString()}</span>
+                                        )}
+                                        {comp.detail}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* Priority Improvements (expandable) */}
+                    <div className="s-card" style={{ marginBottom: '20px', overflow: 'hidden' }}>
+                      <div
+                        onClick={() => setDcExpanded(prev => ({ ...prev, priorities: !prev.priorities }))}
+                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 18px', cursor: 'pointer', userSelect: 'none' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontSize: '10px', color: 'var(--t3)', transition: 'transform .2s', transform: dcExpanded.priorities ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>&#9654;</span>
+                          <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t1)' }}>Priority Improvements</span>
+                          <span style={{ fontSize: '10px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{d.priorityImprovements.length} items</span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          {['HIGH', 'MED', 'LOW'].map(p => {
+                            const cnt = d.priorityImprovements.filter(i => i.priority === p).length;
+                            return cnt > 0 ? (
+                              <span key={p} style={{
+                                padding: '2px 8px', borderRadius: '4px', fontSize: '9px', fontWeight: '700',
+                                background: p === 'HIGH' ? 'var(--red-g)' : p === 'MED' ? 'var(--amber-g)' : 'var(--blue-g)',
+                                color: p === 'HIGH' ? 'var(--red)' : p === 'MED' ? 'var(--amber)' : 'var(--blue)'
+                              }}>{cnt} {p}</span>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
+                      {dcExpanded.priorities && (
+                        <div style={{ padding: '0 18px 14px' }}>
+                          <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                                <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase', width: '60px' }}>Priority</th>
+                                <th style={{ textAlign: 'left', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase' }}>Improvement</th>
+                                <th style={{ textAlign: 'center', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase', width: '80px' }}>Current</th>
+                                <th style={{ textAlign: 'center', padding: '5px 6px', color: 'var(--t3)', fontWeight: '600', fontSize: '9px', textTransform: 'uppercase', width: '80px' }}>Target</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {d.priorityImprovements.map((imp, i) => (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                  <td style={{ padding: '6px' }}>
+                                    <span style={{
+                                      padding: '2px 8px', borderRadius: '4px', fontSize: '9px', fontWeight: '700',
+                                      background: imp.priority === 'HIGH' ? 'var(--red-g)' : imp.priority === 'MED' ? 'var(--amber-g)' : 'var(--blue-g)',
+                                      color: imp.priority === 'HIGH' ? 'var(--red)' : imp.priority === 'MED' ? 'var(--amber)' : 'var(--blue)'
+                                    }}>{imp.priority}</span>
+                                  </td>
+                                  <td style={{ padding: '6px', color: 'var(--t1)', fontWeight: '500' }}>{imp.item}</td>
+                                  <td style={{ padding: '6px', textAlign: 'center' }}>{scoreBar(imp.current)}</td>
+                                  <td style={{ padding: '6px', textAlign: 'center' }}>{scoreBar(imp.target)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+
+            {/* LEDGER HIERARCHY PAGE */}
+            <div className={`page ${currentPage === 'ledger-hierarchy' ? 'active' : ''}`}>
+              <div className="sec-head" style={{ marginBottom: '16px' }}>
+                <div className="sec-title" style={{ fontSize: '18px' }}>Ledger Hierarchy</div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <button
+                    className="btn btn-p"
+                    style={{ padding: '6px 14px', fontSize: '11px' }}
+                    onClick={() => handleHierarchySync(hierarchyActiveCompany)}
+                    disabled={hierarchySyncing || !hierarchyActiveCompany}
+                  >
+                    {hierarchySyncing ? 'Syncing...' : 'Refresh'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Company Tabs */}
+              {hierarchyCompanies.length > 0 && (
+                <div style={{ display: 'flex', gap: '0', marginBottom: '16px', borderBottom: '2px solid var(--border)', overflowX: 'auto' }}>
+                  {hierarchyCompanies.map(company => (
+                    <div
+                      key={company}
+                      onClick={() => handleHierarchyTabSwitch(company)}
+                      style={{
+                        padding: '10px 20px',
+                        cursor: 'pointer',
+                        fontSize: '13px',
+                        fontWeight: hierarchyActiveCompany === company ? 700 : 400,
+                        color: hierarchyActiveCompany === company ? 'var(--acc)' : 'var(--muted)',
+                        borderBottom: hierarchyActiveCompany === company ? '3px solid var(--acc)' : '3px solid transparent',
+                        marginBottom: '-2px',
+                        whiteSpace: 'nowrap',
+                        transition: 'all 0.2s'
+                      }}
+                    >
+                      {company}
+                      {hierarchyDataByCompany[company] && (
+                        <span style={{ fontSize: '10px', marginLeft: '6px', opacity: 0.6 }}>
+                          ({(hierarchyDataByCompany[company].ledgers || []).length})
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {hierarchyLoading && hierarchyCompanies.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>Loading companies from Tally...</div>
+              ) : hierarchySyncing && !hierarchyDataByCompany[hierarchyActiveCompany] ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>Syncing {hierarchyActiveCompany}...</div>
+              ) : hierarchyDataByCompany[hierarchyActiveCompany] ? (() => {
+                const companyData = hierarchyDataByCompany[hierarchyActiveCompany];
+                const allLedgers = companyData.ledgers || [];
+                const allGroups = companyData.groups || [];
+
+                // Filter ledgers
+                let filteredLedgers = allLedgers;
+                if (hierarchySearch) {
+                  const s = hierarchySearch.toLowerCase();
+                  filteredLedgers = allLedgers.filter(l =>
+                    l.name.toLowerCase().includes(s) ||
+                    (l.parent || '').toLowerCase().includes(s) ||
+                    (l.hierarchy_path || '').toLowerCase().includes(s)
+                  );
+                }
+                if (hierarchyGroupFilter) {
+                  filteredLedgers = filteredLedgers.filter(l =>
+                    l.parent === hierarchyGroupFilter ||
+                    (l.hierarchy_path || '').includes(hierarchyGroupFilter)
+                  );
+                }
+
+                // Group filtered ledgers by parent
+                const ledgersByGroup = {};
+                for (const l of filteredLedgers) {
+                  const group = l.parent || 'Ungrouped';
+                  if (!ledgersByGroup[group]) ledgersByGroup[group] = [];
+                  ledgersByGroup[group].push(l);
+                }
+                const groupNames = Object.keys(ledgersByGroup).sort();
+
+                // Calculate totals
+                const totalDr = filteredLedgers.filter(l => l.balance_type === 'Dr').reduce((s, l) => s + (l.abs_balance || 0), 0);
+                const totalCr = filteredLedgers.filter(l => l.balance_type === 'Cr').reduce((s, l) => s + (l.abs_balance || 0), 0);
+
+                // Get unique parent groups for filter dropdown
+                const uniqueGroups = [...new Set(allLedgers.map(l => l.parent).filter(Boolean))].sort();
+
+                return (
+                  <>
+                    {/* Summary cards */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+                      <div className="s-card" style={{ padding: '12px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--acc)' }}>{allLedgers.length}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Total Ledgers</div>
+                      </div>
+                      <div className="s-card" style={{ padding: '12px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--acc)' }}>{allGroups.length}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Account Groups</div>
+                      </div>
+                      <div className="s-card" style={{ padding: '12px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: 700, color: '#4caf50' }}>{formatCurrency(totalDr)}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Total Dr</div>
+                      </div>
+                      <div className="s-card" style={{ padding: '12px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px', fontWeight: 700, color: '#f44336' }}>{formatCurrency(totalCr)}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--muted)' }}>Total Cr</div>
+                      </div>
+                    </div>
+
+                    {/* Search and Filter */}
+                    <div style={{ display: 'flex', gap: '10px', marginBottom: '14px', flexWrap: 'wrap' }}>
+                      <input
+                        type="text"
+                        placeholder="Search ledger name, group..."
+                        value={hierarchySearch}
+                        onChange={e => setHierarchySearch(e.target.value)}
+                        className="input"
+                        style={{ flex: 1, minWidth: '200px', padding: '8px 12px', fontSize: '12px' }}
+                      />
+                      <select
+                        value={hierarchyGroupFilter}
+                        onChange={e => setHierarchyGroupFilter(e.target.value)}
+                        className="input"
+                        style={{ minWidth: '180px', padding: '8px 12px', fontSize: '12px' }}
+                      >
+                        <option value="">All Groups ({allLedgers.length})</option>
+                        {uniqueGroups.map(g => (
+                          <option key={g} value={g}>{g} ({allLedgers.filter(l => l.parent === g).length})</option>
+                        ))}
+                      </select>
+                      <div style={{ fontSize: '11px', color: 'var(--muted)', alignSelf: 'center' }}>
+                        Showing {filteredLedgers.length} of {allLedgers.length}
+                      </div>
+                    </div>
+
+                    {/* Ledgers grouped by parent */}
+                    {groupNames.map(groupName => {
+                      const groupLedgers = ledgersByGroup[groupName];
+                      const isExpanded = hierarchyExpandedGroups[groupName] !== false; // default expanded
+                      const groupDr = groupLedgers.filter(l => l.balance_type === 'Dr').reduce((s, l) => s + (l.abs_balance || 0), 0);
+                      const groupCr = groupLedgers.filter(l => l.balance_type === 'Cr').reduce((s, l) => s + (l.abs_balance || 0), 0);
+                      const hierarchyPath = groupLedgers[0]?.hierarchy_path || groupName;
+
+                      return (
+                        <div key={groupName} className="s-card" style={{ marginBottom: '8px', padding: 0, overflow: 'hidden' }}>
+                          <div
+                            style={{
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                              padding: '10px 14px', cursor: 'pointer', background: 'var(--bg2)',
+                              borderBottom: isExpanded ? '1px solid var(--border)' : 'none'
+                            }}
+                            onClick={() => setHierarchyExpandedGroups(prev => ({ ...prev, [groupName]: !isExpanded }))}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '10px', color: 'var(--muted)' }}>{isExpanded ? '▼' : '▶'}</span>
+                              <span style={{ fontWeight: 600, fontSize: '13px' }}>{groupName}</span>
+                              <span style={{ fontSize: '11px', color: 'var(--muted)', background: 'var(--bg)', padding: '1px 8px', borderRadius: '10px' }}>
+                                {groupLedgers.length}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '16px', fontSize: '11px' }}>
+                              <span style={{ color: 'var(--muted)', fontSize: '10px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {hierarchyPath}
+                              </span>
+                              {groupDr > 0 && <span style={{ color: '#4caf50' }}>Dr: {formatCurrency(groupDr)}</span>}
+                              {groupCr > 0 && <span style={{ color: '#f44336' }}>Cr: {formatCurrency(groupCr)}</span>}
+                            </div>
+                          </div>
+                          {isExpanded && (
+                            <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                              <table className="tbl" style={{ fontSize: '11px', width: '100%' }}>
+                                <thead>
+                                  <tr>
+                                    <th style={{ textAlign: 'left', padding: '6px 10px' }}>Ledger Name</th>
+                                    <th style={{ textAlign: 'right', padding: '6px 10px', width: '120px' }}>Closing Balance</th>
+                                    <th style={{ textAlign: 'center', padding: '6px 10px', width: '50px' }}>Dr/Cr</th>
+                                    <th style={{ textAlign: 'right', padding: '6px 10px', width: '120px' }}>Opening Balance</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {groupLedgers.sort((a, b) => (b.abs_balance || 0) - (a.abs_balance || 0)).map((l, i) => (
+                                    <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                      <td style={{ padding: '5px 10px' }}>
+                                        <span
+                                          onClick={(e) => { e.stopPropagation(); handleLedgerClick(l.name, hierarchyActiveCompany); }}
+                                          style={{ cursor: 'pointer', color: 'var(--acc)', textDecoration: 'underline', textDecorationStyle: 'dotted' }}
+                                        >{l.name}</span>
+                                      </td>
+                                      <td style={{ padding: '5px 10px', textAlign: 'right', fontWeight: 600 }}>
+                                        {formatCurrency(l.abs_balance || 0)}
+                                      </td>
+                                      <td style={{ padding: '5px 10px', textAlign: 'center' }}>
+                                        <span style={{
+                                          color: l.balance_type === 'Dr' ? '#4caf50' : '#f44336',
+                                          fontWeight: 600, fontSize: '10px'
+                                        }}>
+                                          {l.balance_type}
+                                        </span>
+                                      </td>
+                                      <td style={{ padding: '5px 10px', textAlign: 'right', color: 'var(--muted)' }}>
+                                        {formatCurrency(Math.abs(l.opening_balance || 0))}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })() : hierarchyActiveCompany ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>
+                  Select a company tab above to load ledgers.
+                </div>
+              ) : (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>
+                  No companies found. Make sure Tally is connected.
+                </div>
+              )}
+
+              {/* Ledger Detail Modal */}
+              {ledgerDetail && (
+                <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}
+                  onClick={() => setLedgerDetail(null)}>
+                  <div style={{ background: 'var(--card)', borderRadius: '12px', width: '90%', maxWidth: '700px', maxHeight: '85vh', overflow: 'auto', padding: '24px', boxShadow: '0 8px 32px rgba(0,0,0,0.3)' }}
+                    onClick={e => e.stopPropagation()}>
+                    {/* Header */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+                      <div>
+                        <div style={{ fontSize: '18px', fontWeight: 700 }}>{ledgerDetail.name}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--muted)' }}>{ledgerDetail.parent} {ledgerDetail.company ? `| ${ledgerDetail.company}` : ''}</div>
+                      </div>
+                      <button onClick={() => setLedgerDetail(null)} style={{ background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: 'var(--muted)', padding: '0 4px' }}>x</button>
+                    </div>
+
+                    {ledgerDetail.loading ? (
+                      <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>Fetching details from Tally...</div>
+                    ) : ledgerDetail.error ? (
+                      <div style={{ textAlign: 'center', padding: '40px', color: '#f44336' }}>{ledgerDetail.error}</div>
+                    ) : (
+                      <>
+                        {/* Balance cards */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+                          <div className="s-card" style={{ padding: '10px', textAlign: 'center' }}>
+                            <div style={{ fontSize: '18px', fontWeight: 700, color: ledgerDetail.balance_type === 'Dr' ? '#4caf50' : '#f44336' }}>
+                              {formatCurrency(ledgerDetail.abs_balance || 0)}
+                            </div>
+                            <div style={{ fontSize: '10px', color: 'var(--muted)' }}>Closing ({ledgerDetail.balance_type})</div>
+                          </div>
+                          <div className="s-card" style={{ padding: '10px', textAlign: 'center' }}>
+                            <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text)' }}>
+                              {formatCurrency(Math.abs(ledgerDetail.opening_balance || 0))}
+                            </div>
+                            <div style={{ fontSize: '10px', color: 'var(--muted)' }}>Opening ({(ledgerDetail.opening_balance || 0) >= 0 ? 'Dr' : 'Cr'})</div>
+                          </div>
+                          {ledgerDetail.credit_limit > 0 && (
+                            <div className="s-card" style={{ padding: '10px', textAlign: 'center' }}>
+                              <div style={{ fontSize: '18px', fontWeight: 700 }}>{formatCurrency(ledgerDetail.credit_limit)}</div>
+                              <div style={{ fontSize: '10px', color: 'var(--muted)' }}>Credit Limit</div>
+                            </div>
+                          )}
+                          {ledgerDetail.bill_count > 0 && (
+                            <div className="s-card" style={{ padding: '10px', textAlign: 'center' }}>
+                              <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--acc)' }}>{ledgerDetail.bill_count}</div>
+                              <div style={{ fontSize: '10px', color: 'var(--muted)' }}>Bills</div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Contact Info */}
+                        {(ledgerDetail.address || ledgerDetail.phone || ledgerDetail.email || ledgerDetail.gstin || ledgerDetail.pan) && (
+                          <div className="s-card" style={{ padding: '12px', marginBottom: '16px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px' }}>Contact & Tax Info</div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', fontSize: '11px' }}>
+                              {ledgerDetail.address && <div><span style={{ color: 'var(--muted)' }}>Address:</span> {ledgerDetail.address}</div>}
+                              {ledgerDetail.state && <div><span style={{ color: 'var(--muted)' }}>State:</span> {ledgerDetail.state}</div>}
+                              {ledgerDetail.phone && <div><span style={{ color: 'var(--muted)' }}>Phone:</span> {ledgerDetail.phone}</div>}
+                              {ledgerDetail.contact && <div><span style={{ color: 'var(--muted)' }}>Contact:</span> {ledgerDetail.contact}</div>}
+                              {ledgerDetail.email && <div><span style={{ color: 'var(--muted)' }}>Email:</span> {ledgerDetail.email}</div>}
+                              {ledgerDetail.gstin && <div><span style={{ color: 'var(--muted)' }}>GSTIN:</span> {ledgerDetail.gstin}</div>}
+                              {ledgerDetail.gst_type && <div><span style={{ color: 'var(--muted)' }}>GST Type:</span> {ledgerDetail.gst_type}</div>}
+                              {ledgerDetail.pan && <div><span style={{ color: 'var(--muted)' }}>PAN:</span> {ledgerDetail.pan}</div>}
+                              {ledgerDetail.credit_days > 0 && <div><span style={{ color: 'var(--muted)' }}>Credit Days:</span> {ledgerDetail.credit_days}</div>}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Bill Allocations */}
+                        {ledgerDetail.bills && ledgerDetail.bills.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: '12px', fontWeight: 600, marginBottom: '8px' }}>Outstanding Bills ({ledgerDetail.bills.length})</div>
+                            <div style={{ maxHeight: '300px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '8px' }}>
+                              <table className="tbl" style={{ fontSize: '11px', width: '100%' }}>
+                                <thead>
+                                  <tr>
+                                    <th style={{ textAlign: 'left', padding: '6px 10px' }}>Bill Name</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 10px', width: '90px' }}>Date</th>
+                                    <th style={{ textAlign: 'right', padding: '6px 10px', width: '110px' }}>Balance</th>
+                                    <th style={{ textAlign: 'center', padding: '6px 10px', width: '45px' }}>Dr/Cr</th>
+                                    <th style={{ textAlign: 'left', padding: '6px 10px', width: '90px' }}>Due Date</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {ledgerDetail.bills.sort((a, b) => (b.abs_balance || 0) - (a.abs_balance || 0)).map((b, i) => (
+                                    <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                      <td style={{ padding: '5px 10px' }}>{b.name}</td>
+                                      <td style={{ padding: '5px 10px', color: 'var(--muted)' }}>{b.date || '-'}</td>
+                                      <td style={{ padding: '5px 10px', textAlign: 'right', fontWeight: 600 }}>{formatCurrency(b.abs_balance)}</td>
+                                      <td style={{ padding: '5px 10px', textAlign: 'center' }}>
+                                        <span style={{ color: b.balance_type === 'Dr' ? '#4caf50' : '#f44336', fontWeight: 600, fontSize: '10px' }}>{b.balance_type}</span>
+                                      </td>
+                                      <td style={{ padding: '5px 10px', color: 'var(--muted)' }}>{b.credit_period || '-'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {(!ledgerDetail.bills || ledgerDetail.bills.length === 0) && !ledgerDetail.address && !ledgerDetail.phone && !ledgerDetail.gstin && (
+                          <div style={{ textAlign: 'center', padding: '20px', color: 'var(--muted)', fontSize: '12px' }}>
+                            No additional details available for this ledger.
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* LEDGER ACCOUNT PAGE */}
+            <div className={`page ${currentPage === 'ledger-account' ? 'active' : ''}`}>
+              <div className="sec-head la-no-print" style={{ marginBottom: '16px' }}>
+                <div className="sec-title" style={{ fontSize: '18px' }}>📒 Ledger Account</div>
+              </div>
+
+              {/* Search bar + date filter */}
+              <div className="la-no-print" style={{ display: 'flex', gap: '10px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div style={{ flex: 1, minWidth: '200px', position: 'relative' }} ref={laSearchRef}>
+                  <label style={{ fontSize: '11px', fontWeight: '600', color: 'var(--t3)', display: 'block', marginBottom: '4px' }}>Ledger Name</label>
+                  <input
+                    type="text"
+                    placeholder="Search party name..."
+                    value={laSearch}
+                    onChange={e => handleLaSearchChange(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && laSearch.trim()) { setLaShowSuggestions(false); fetchLedgerAccount(laSearch.trim()); }
+                      if (e.key === 'Escape') setLaShowSuggestions(false);
+                    }}
+                    onFocus={() => { if (laSuggestions.length > 0) setLaShowSuggestions(true); }}
+                    style={{ width: '100%', padding: '8px 12px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)', boxSizing: 'border-box' }}
+                  />
+                  {laShowSuggestions && laSuggestions.length > 0 && (
+                    <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '0 0 8px 8px', maxHeight: '250px', overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.2)' }}>
+                      {laSuggestions.map((s, i) => (
+                        <div key={i} style={{ padding: '8px 12px', fontSize: '13px', color: 'var(--t1)', cursor: 'pointer', borderBottom: '1px solid var(--border)' }}
+                          onMouseDown={() => selectLaSuggestion(s.name)}
+                          onMouseEnter={e => e.target.style.background = 'var(--bg)'}
+                          onMouseLeave={e => e.target.style.background = 'transparent'}>
+                          {s.name}
+                          {s.parent && <span style={{ fontSize: '11px', color: 'var(--t3)', marginLeft: '8px' }}>({s.parent})</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: '600', color: 'var(--t3)', display: 'block', marginBottom: '4px' }}>From</label>
+                  <input type="date" value={laFromDate} onChange={e => setLaFromDate(e.target.value)}
+                    style={{ padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: '600', color: 'var(--t3)', display: 'block', marginBottom: '4px' }}>To</label>
+                  <input type="date" value={laToDate} onChange={e => setLaToDate(e.target.value)}
+                    style={{ padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--bg)', color: 'var(--t1)' }} />
+                </div>
+                <button className="btn btn-p" style={{ padding: '8px 16px', fontSize: '13px' }}
+                  onClick={() => laSearch.trim() && fetchLedgerAccount(laSearch.trim())} disabled={laLoading || !laSearch.trim()}>
+                  {laLoading ? 'Loading...' : 'View'}
+                </button>
+              </div>
+
+              {laError && <div className="la-no-print" style={{ background: '#fef2f2', color: '#dc2626', padding: '10px 14px', borderRadius: '8px', fontSize: '13px', marginBottom: '12px' }}>{laError}</div>}
+
+              {laLoading && <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading ledger transactions...</div>}
+
+              {laData && !laLoading && (
+                <div className="la-print-area">
+                  {/* Print header (visible only in print) */}
+                  <div className="la-print-header" style={{ display: 'none' }}>
+                    <div className="la-print-title">{laData.ledgerName}</div>
+                    <div className="la-print-subtitle">
+                      Group: {laData.parent}
+                      {laFromDate || laToDate ? ` | Period: ${laFromDate || 'Start'} to ${laToDate || 'Today'}` : ''}
+                    </div>
+                  </div>
+
+                  {/* Ledger header info + Print button */}
+                  <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                    <div className="la-no-print" style={{ background: 'var(--card)', borderRadius: '10px', padding: '14px 20px', flex: 1, minWidth: '150px' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600' }}>Ledger</div>
+                      <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)', marginTop: '2px' }}>{laData.ledgerName}</div>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Group: {laData.parent}</div>
+                    </div>
+                    <div className="la-no-print" style={{ background: 'var(--card)', borderRadius: '10px', padding: '14px 20px', textAlign: 'center', minWidth: '120px' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600' }}>Opening Balance</div>
+                      <div style={{ fontSize: '16px', fontWeight: '700', color: laData.openingBalance >= 0 ? 'var(--blue)' : 'var(--green)', marginTop: '2px' }}>
+                        {formatCurrency(laData.openingBalance)} {laData.openingBalance >= 0 ? 'Dr' : 'Cr'}
+                      </div>
+                    </div>
+                    <div className="la-no-print" style={{ background: 'var(--card)', borderRadius: '10px', padding: '14px 20px', textAlign: 'center', minWidth: '120px' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600' }}>Closing Balance</div>
+                      <div style={{ fontSize: '16px', fontWeight: '700', color: laData.closingBalance >= 0 ? 'var(--blue)' : 'var(--green)', marginTop: '2px' }}>
+                        {formatCurrency(laData.closingBalance)} {laData.closingBalance >= 0 ? 'Dr' : 'Cr'}
+                      </div>
+                    </div>
+                    <div className="la-no-print" style={{ background: 'var(--card)', borderRadius: '10px', padding: '14px 20px', textAlign: 'center', minWidth: '100px' }}>
+                      <div style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: '600' }}>Transactions</div>
+                      <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)', marginTop: '2px' }}>{laData.transactionCount}</div>
+                    </div>
+                    <button className="btn la-no-print" style={{ padding: '10px 16px', fontSize: '13px', background: 'var(--card)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--t1)', cursor: 'pointer', alignSelf: 'center' }}
+                      onClick={() => window.print()}>
+                      🖨️ Print
+                    </button>
+                  </div>
+
+                  {/* Transactions table */}
+                  <div style={{ background: 'var(--card)', borderRadius: '10px', overflow: 'hidden' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                      <thead>
+                        <tr style={{ background: 'var(--bg)', borderBottom: '2px solid var(--border)' }}>
+                          <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: 'var(--t2)' }}>Date</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: 'var(--t2)' }}>Particulars</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: 'var(--t2)' }}>Vch Type</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'left', fontWeight: '600', color: 'var(--t2)' }}>Vch No.</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '600', color: 'var(--t2)' }}>Debit</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '600', color: 'var(--t2)' }}>Credit</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '600', color: 'var(--t2)' }}>Balance</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {/* Opening balance row */}
+                        <tr style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
+                          <td style={{ padding: '8px 12px', color: 'var(--t3)', fontStyle: 'italic' }}></td>
+                          <td style={{ padding: '8px 12px', fontWeight: '600', color: 'var(--t1)' }} colSpan={3}>Opening Balance</td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: '600', color: 'var(--blue)' }}>
+                            {laData.openingBalance > 0 ? formatCurrency(laData.openingBalance) : ''}
+                          </td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: '600', color: 'var(--green)' }}>
+                            {laData.openingBalance < 0 ? formatCurrency(laData.openingBalance) : ''}
+                          </td>
+                          <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: '600', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>
+                            {formatCurrency(laData.openingBalance)} {laData.openingBalance >= 0 ? 'Dr' : 'Cr'}
+                          </td>
+                        </tr>
+                        {laData.transactions.map((t, i) => {
+                          const d = t.date;
+                          const dateStr = d ? `${d.substring(6,8)}/${d.substring(4,6)}/${d.substring(0,4)}` : '';
+                          return (
+                            <tr key={i} style={{ borderBottom: '1px solid var(--border)', cursor: t.masterId ? 'pointer' : 'default' }}
+                              onClick={() => t.masterId && fetchLaVoucherDetail(t.masterId)}
+                              className={t.masterId ? 'la-clickable-row' : ''}>
+                              <td style={{ padding: '8px 12px', color: 'var(--t2)', whiteSpace: 'nowrap' }}>{dateStr}</td>
+                              <td style={{ padding: '8px 12px', color: 'var(--t1)', maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={t.narration || t.particulars}>{t.particulars}</td>
+                              <td style={{ padding: '8px 12px', color: 'var(--t2)' }}>{t.voucherType}</td>
+                              <td style={{ padding: '8px 12px', color: 'var(--t2)', fontFamily: 'var(--mono)', fontSize: '11px' }}>{t.voucherNumber}</td>
+                              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', color: t.debit > 0 ? 'var(--blue)' : 'var(--t3)' }}>
+                                {t.debit > 0 ? formatCurrency(t.debit) : ''}
+                              </td>
+                              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', color: t.credit > 0 ? 'var(--green)' : 'var(--t3)' }}>
+                                {t.credit > 0 ? formatCurrency(t.credit) : ''}
+                              </td>
+                              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', fontWeight: '600', color: 'var(--t1)', whiteSpace: 'nowrap' }}>
+                                {formatCurrency(t.runningBalance)} {t.runningBalance >= 0 ? 'Dr' : 'Cr'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {/* Closing balance row */}
+                        <tr style={{ borderTop: '2px solid var(--border)', background: 'var(--bg)' }}>
+                          <td style={{ padding: '10px 12px' }}></td>
+                          <td style={{ padding: '10px 12px', fontWeight: '700', color: 'var(--t1)' }} colSpan={3}>Closing Balance</td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--blue)' }}>
+                            {laData.closingBalance > 0 ? formatCurrency(laData.closingBalance) : ''}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--green)' }}>
+                            {laData.closingBalance < 0 ? formatCurrency(laData.closingBalance) : ''}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>
+                            {formatCurrency(laData.closingBalance)} {laData.closingBalance >= 0 ? 'Dr' : 'Cr'}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Totals summary */}
+                  {laData.transactions.length > 0 && (() => {
+                    const totals = laData.transactions.reduce((acc, t) => ({ dr: acc.dr + t.debit, cr: acc.cr + t.credit }), { dr: 0, cr: 0 });
+                    return (
+                      <div style={{ display: 'flex', gap: '12px', marginTop: '12px', justifyContent: 'flex-end' }}>
+                        <div style={{ background: 'var(--blue-g)', borderRadius: '8px', padding: '10px 16px', textAlign: 'center' }}>
+                          <div style={{ fontSize: '11px', color: 'var(--blue)', fontWeight: '600' }}>Total Debit</div>
+                          <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--blue)' }}>{formatCurrency(totals.dr)}</div>
+                        </div>
+                        <div style={{ background: '#dcfce7', borderRadius: '8px', padding: '10px 16px', textAlign: 'center' }}>
+                          <div style={{ fontSize: '11px', color: 'var(--green)', fontWeight: '600' }}>Total Credit</div>
+                          <div style={{ fontSize: '15px', fontWeight: '700', color: 'var(--green)' }}>{formatCurrency(totals.cr)}</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {!laData && !laLoading && !laError && (
+                <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--t3)' }}>
+                  <div style={{ fontSize: '40px', marginBottom: '12px' }}>📒</div>
+                  <div style={{ fontSize: '14px', fontWeight: '600' }}>Ledger Account View</div>
+                  <div style={{ fontSize: '12px', marginTop: '4px' }}>Type a ledger name above and press Enter to view transactions</div>
+                </div>
+              )}
+
+              {/* Voucher Detail Modal */}
+              {(laVchDetail || laVchDetailLoading) && (
+                <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}
+                  onClick={() => { setLaVchDetail(null); setLaVchDetailLoading(false); }}>
+                  <div style={{ background: 'var(--card)', borderRadius: '12px', maxWidth: '700px', width: '100%', maxHeight: '80vh', overflow: 'auto', padding: '24px', position: 'relative' }}
+                    onClick={e => e.stopPropagation()}>
+                    <button style={{ position: 'absolute', top: '12px', right: '12px', background: 'none', border: 'none', fontSize: '20px', cursor: 'pointer', color: 'var(--t3)', lineHeight: 1 }}
+                      onClick={() => { setLaVchDetail(null); setLaVchDetailLoading(false); }}>✕</button>
+
+                    {laVchDetailLoading && (
+                      <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading voucher details...</div>
+                    )}
+
+                    {laVchDetail && laVchDetail.error && (
+                      <div style={{ color: '#dc2626', padding: '20px' }}>Error: {laVchDetail.error}</div>
+                    )}
+
+                    {laVchDetail && !laVchDetail.error && (() => {
+                      const v = laVchDetail.voucher || laVchDetail;
+                      const ledgerEntries = v?.ALLLEDGERENTRIES?.LIST || v?.ledgerEntries || [];
+                      const inventoryEntries = v?.ALLINVENTORYENTRIES?.LIST || v?.inventoryEntries || [];
+                      const entries = Array.isArray(ledgerEntries) ? ledgerEntries : [ledgerEntries];
+                      const invEntries = Array.isArray(inventoryEntries) ? inventoryEntries : inventoryEntries ? [inventoryEntries] : [];
+                      const vchDate = v?.DATE || v?.date || '';
+                      const dateDisplay = vchDate ? `${vchDate.substring(6,8)}/${vchDate.substring(4,6)}/${vchDate.substring(0,4)}` : '';
+                      return (
+                        <div>
+                          <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)', marginBottom: '4px' }}>
+                            {v?.VOUCHERTYPENAME || v?.voucherTypeName || 'Voucher'} #{v?.VOUCHERNUMBER || v?.voucherNumber || ''}
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--t3)', marginBottom: '16px' }}>
+                            Date: {dateDisplay}
+                            {(v?.NARRATION || v?.narration) ? ` | ${v.NARRATION || v.narration}` : ''}
+                          </div>
+
+                          {/* Ledger entries */}
+                          {entries.length > 0 && (
+                            <div style={{ marginBottom: '16px' }}>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t2)', marginBottom: '8px' }}>Ledger Entries</div>
+                              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                                <thead>
+                                  <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                                    <th style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--t3)' }}>Ledger</th>
+                                    <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--t3)' }}>Debit</th>
+                                    <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--t3)' }}>Credit</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {entries.map((e, idx) => {
+                                    const amt = parseFloat(e?.AMOUNT || e?.amount || 0);
+                                    return (
+                                      <tr key={idx} style={{ borderBottom: '1px solid var(--border)' }}>
+                                        <td style={{ padding: '6px 10px', color: 'var(--t1)' }}>{e?.LEDGERNAME || e?.ledgerName || '-'}</td>
+                                        <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--blue)' }}>
+                                          {amt < 0 ? formatCurrency(Math.abs(amt)) : ''}
+                                        </td>
+                                        <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--green)' }}>
+                                          {amt > 0 ? formatCurrency(amt) : ''}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* Inventory entries */}
+                          {invEntries.length > 0 && (
+                            <div>
+                              <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t2)', marginBottom: '8px' }}>Inventory Entries</div>
+                              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                                <thead>
+                                  <tr style={{ borderBottom: '2px solid var(--border)' }}>
+                                    <th style={{ padding: '8px 10px', textAlign: 'left', color: 'var(--t3)' }}>Item</th>
+                                    <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--t3)' }}>Qty</th>
+                                    <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--t3)' }}>Rate</th>
+                                    <th style={{ padding: '8px 10px', textAlign: 'right', color: 'var(--t3)' }}>Amount</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {invEntries.map((e, idx) => {
+                                    const qty = e?.ACTUALQTY || e?.BILLEDQTY || e?.actualQty || e?.billedQty || '';
+                                    const rate = e?.RATE || e?.rate || '';
+                                    const amt = e?.AMOUNT || e?.amount || '';
+                                    return (
+                                      <tr key={idx} style={{ borderBottom: '1px solid var(--border)' }}>
+                                        <td style={{ padding: '6px 10px', color: 'var(--t1)' }}>{e?.STOCKITEMNAME || e?.stockItemName || '-'}</td>
+                                        <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--t2)' }}>{qty}</td>
+                                        <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--t2)' }}>{rate}</td>
+                                        <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--t1)' }}>{formatCurrency(Math.abs(parseFloat(amt) || 0))}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* EOD RECONCILIATION PAGE */}
+            <div className={`page ${currentPage === 'eod-recon' ? 'active' : ''}`}>
+              <div className="sec-head" style={{ marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                <div className="sec-title" style={{ fontSize: '18px' }}>EOD Reconciliation</div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <input
+                    type="date"
+                    value={eodDate.length === 8 ? `${eodDate.slice(0,4)}-${eodDate.slice(4,6)}-${eodDate.slice(6,8)}` : eodDate}
+                    onChange={(e) => {
+                      const d = e.target.value.replace(/-/g, '');
+                      setEodDate(d);
+                      setEodData(null);
+                      fetchEODRecon(d);
+                    }}
+                    style={{ padding: '6px 10px', fontSize: '12px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--bg)', color: 'var(--t1)' }}
+                  />
+                  <button
+                    className="btn btn-p"
+                    style={{ padding: '6px 14px', fontSize: '11px' }}
+                    onClick={() => fetchEODRecon()}
+                    disabled={eodLoading}
+                  >
+                    {eodLoading ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+              </div>
+
+              {eodLoading && !eodData && (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--t3)' }}>Loading reconciliation data...</div>
+              )}
+
+              {eodData && (() => {
+                const d = eodData;
+                const fc = (amt) => formatCurrency(amt);
+
+                return (
+                  <>
+                    {/* SALES SUMMARY */}
+                    <div style={{ marginBottom: '20px' }}>
+                      <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Sales Summary</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+                        {Object.entries(d.billing?.sales || {}).map(([type, data]) => (
+                          <div key={type} className="s-card" style={{ padding: '14px', textAlign: 'center' }}>
+                            <div style={{ fontSize: '18px', fontWeight: '800', color: 'var(--blue)', fontFamily: 'var(--mono)' }}>{fc(data.total)}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>{type}</div>
+                            <div style={{ fontSize: '10px', color: 'var(--t4)' }}>{data.count} bill{data.count !== 1 ? 's' : ''}</div>
+                          </div>
+                        ))}
+                        <div className="s-card" style={{ padding: '14px', textAlign: 'center', background: 'var(--bg3)' }}>
+                          <div style={{ fontSize: '18px', fontWeight: '800', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{fc(d.billing?.totalSales || 0)}</div>
+                          <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>Total Sales</div>
+                          <div style={{ fontSize: '10px', color: 'var(--t4)' }}>{d.billing?.salesCount || 0} bills</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* PAYMENTS RECEIVED (BILLING) */}
+                    <div style={{ marginBottom: '20px' }}>
+                      <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Payments Received (Billing)</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+                        {Object.entries(d.billing?.receipts || {}).filter(([, v]) => v > 0).map(([ledger, amount]) => (
+                          <div key={ledger} className="s-card" style={{ padding: '14px', textAlign: 'center' }}>
+                            <div style={{ fontSize: '18px', fontWeight: '800', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(amount)}</div>
+                            <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>{ledger}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ marginTop: '8px', display: 'flex', gap: '16px', fontSize: '12px', color: 'var(--t3)' }}>
+                        <span>Total: <strong style={{ color: 'var(--green)' }}>{fc(d.billing?.totalReceipts || 0)}</strong></span>
+                        <span>{d.billing?.receiptCount || 0} receipt{(d.billing?.receiptCount || 0) !== 1 ? 's' : ''}</span>
+                      </div>
+                    </div>
+
+                    {/* RECONCILIATION CHECKS */}
+                    <div style={{ marginBottom: '20px' }}>
+                      <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Reconciliation Checks</div>
+                      <div style={{ display: 'grid', gap: '8px' }}>
+                        {/* Check 1: QR System vs Fonepay Portal */}
+                        {(() => {
+                          const c = d.checks?.qrVsFonepay;
+                          if (!c || (c.system === 0 && c.external === 0)) return null;
+                          return (
+                            <div className="s-card" style={{
+                              padding: '12px 16px',
+                              borderLeft: `3px solid ${c.match ? 'var(--green)' : 'var(--red)'}`,
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px'
+                            }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ fontSize: '16px' }}>{c.match ? '\u2705' : '\u274C'}</span>
+                                <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t1)' }}>QR vs Fonepay Portal</span>
+                              </div>
+                              <div style={{ display: 'flex', gap: '16px', fontSize: '12px' }}>
+                                <span style={{ color: 'var(--t3)' }}>Tally QR: <strong style={{ color: 'var(--t1)' }}>{fc(c.system)}</strong></span>
+                                <span style={{ color: 'var(--t3)' }}>Portal: <strong style={{ color: 'var(--t1)' }}>{fc(c.external)}</strong></span>
+                                {!c.match && <span style={{ color: 'var(--red)', fontWeight: '700' }}>Diff: {fc(c.diff)}</span>}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* Check 2: Fonepay Portal vs RBB Settlement */}
+                        {(() => {
+                          const c = d.checks?.fonepayVsRbb;
+                          if (!c || (c.system === 0 && c.external === 0)) return null;
+                          return (
+                            <div className="s-card" style={{
+                              padding: '12px 16px',
+                              borderLeft: `3px solid ${c.match ? 'var(--green)' : 'var(--red)'}`,
+                            }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <span style={{ fontSize: '16px' }}>{c.match ? '\u2705' : '\u274C'}</span>
+                                  <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t1)' }}>Fonepay vs RBB Settlement</span>
+                                </div>
+                                <div style={{ display: 'flex', gap: '16px', fontSize: '12px' }}>
+                                  <span style={{ color: 'var(--t3)' }}>Portal: <strong style={{ color: 'var(--t1)' }}>{fc(c.system)}</strong></span>
+                                  <span style={{ color: 'var(--t3)' }}>RBB: <strong style={{ color: 'var(--t1)' }}>{fc(c.external)}</strong></span>
+                                  {!c.match && <span style={{ color: 'var(--red)', fontWeight: '700' }}>Diff: {fc(c.diff)}</span>}
+                                </div>
+                              </div>
+                              {c.externalDetail && (
+                                <div style={{ fontSize: '10px', color: 'var(--t4)', marginTop: '6px', paddingLeft: '28px' }}>
+                                  ESEWASTLMT: {fc(c.externalDetail.esewastlmt)} + FONEPAY: {fc(c.externalDetail.fonepay)}
+                                </div>
+                              )}
+                              {c.note && (
+                                <div style={{ fontSize: '11px', color: 'var(--amber)', marginTop: '4px', paddingLeft: '28px' }}>{c.note}</div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        {/* Check 3: Esewa — display only */}
+                        {d.checks?.esewa?.system > 0 && (
+                          <div className="s-card" style={{ padding: '12px 16px', borderLeft: '3px solid var(--t4)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '14px', color: 'var(--t3)' }}>i</span>
+                              <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t1)' }}>Esewa (Direct Personal)</span>
+                            </div>
+                            <span style={{ fontSize: '14px', fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{fc(d.checks.esewa.system)}</span>
+                          </div>
+                        )}
+
+                        {/* Check 4: Bank Deposit — display only */}
+                        {d.checks?.bankDeposit?.system > 0 && (
+                          <div className="s-card" style={{ padding: '12px 16px', borderLeft: '3px solid var(--t4)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontSize: '14px', color: 'var(--t3)' }}>i</span>
+                              <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--t1)' }}>Bank Deposit</span>
+                            </div>
+                            <span style={{ fontSize: '14px', fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{fc(d.checks.bankDeposit.system)}</span>
+                          </div>
+                        )}
+
+                        {(!d.checks?.qrVsFonepay?.system && !d.checks?.qrVsFonepay?.external && !d.checks?.fonepayVsRbb?.system && !d.checks?.fonepayVsRbb?.external && !d.checks?.esewa?.system && !d.checks?.bankDeposit?.system) && (
+                          <div style={{ fontSize: '12px', color: 'var(--t4)', padding: '10px' }}>No QR/Esewa/Bank data for this date</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* SFL vs RECEIPT STATUS */}
+                    {d.sflVsReceipt && d.sflVsReceipt.totalSflBills > 0 && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>SFL vs Receipt Status</div>
+                        <div className="s-card" style={{ padding: '14px' }}>
+                          <div style={{ display: 'flex', gap: '16px', fontSize: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                            <span style={{ color: 'var(--t3)' }}>Bills with SFL: <strong style={{ color: 'var(--t1)' }}>{d.sflVsReceipt.totalSflBills}</strong></span>
+                            <span style={{ color: 'var(--t3)' }}>Receipts: <strong style={{ color: 'var(--t1)' }}>{d.sflVsReceipt.totalDashReceipts}</strong></span>
+                            <span style={{ color: 'var(--t3)' }}>Matched: <strong style={{ color: 'var(--green)' }}>{d.sflVsReceipt.matched}</strong></span>
+                          </div>
+                          {d.sflVsReceipt.sflOnly?.length > 0 && (
+                            <div style={{ marginBottom: '10px' }}>
+                              <div style={{ fontSize: '11px', fontWeight: '700', color: 'var(--red)', marginBottom: '6px' }}>
+                                No Receipt Created ({d.sflVsReceipt.sflOnly.length} bills)
+                              </div>
+                              {d.sflVsReceipt.sflOnly.slice(0, 15).map((b, i) => (
+                                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '11px', borderBottom: '1px solid var(--border)' }}>
+                                  <span style={{ color: 'var(--t2)' }}>{b.party_name}</span>
+                                  <div style={{ display: 'flex', gap: '8px' }}>
+                                    <span style={{ color: 'var(--t3)', fontFamily: 'var(--mono)', fontSize: '10px' }}>#{b.voucher_number}</span>
+                                    <span style={{ fontWeight: '600', color: 'var(--red)', fontFamily: 'var(--mono)' }}>{fc(b.udf_payment_total)}</span>
+                                  </div>
+                                </div>
+                              ))}
+                              {d.sflVsReceipt.sflOnly.length > 15 && (
+                                <div style={{ fontSize: '10px', color: 'var(--t4)', marginTop: '4px' }}>+{d.sflVsReceipt.sflOnly.length - 15} more</div>
+                              )}
+                            </div>
+                          )}
+                          {d.sflVsReceipt.amountMismatch?.length > 0 && (
+                            <div style={{ marginBottom: '10px' }}>
+                              <div style={{ fontSize: '11px', fontWeight: '700', color: 'var(--amber)', marginBottom: '6px' }}>
+                                Amount Mismatch ({d.sflVsReceipt.amountMismatch.length})
+                              </div>
+                              {d.sflVsReceipt.amountMismatch.map((m, i) => (
+                                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '11px', borderBottom: '1px solid var(--border)' }}>
+                                  <span style={{ color: 'var(--t2)' }}>{m.party_name}</span>
+                                  <div style={{ display: 'flex', gap: '8px' }}>
+                                    <span style={{ color: 'var(--t3)' }}>SFL: {fc(m.sfl_amount)}</span>
+                                    <span style={{ color: 'var(--t3)' }}>Rcpt: {fc(m.receipt_amount)}</span>
+                                    <span style={{ fontWeight: '600', color: 'var(--amber)', fontFamily: 'var(--mono)' }}>Diff: {fc(m.diff)}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {d.sflVsReceipt.sflOnly?.length === 0 && d.sflVsReceipt.amountMismatch?.length === 0 && (
+                            <div style={{ fontSize: '12px', color: 'var(--green)', fontWeight: '600' }}>All paid bills have matching receipts</div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* COUNTER CASH */}
+                    <div style={{ marginBottom: '20px' }}>
+                      <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Counter Cash</div>
+                      <div className="s-card" style={{ padding: '16px' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' }}>
+                          {d.combinedCash?.billingCashTeller1 > 0 && (
+                            <div>
+                              <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Cash Teller 1</div>
+                              <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{fc(d.combinedCash.billingCashTeller1)}</div>
+                            </div>
+                          )}
+                          {d.combinedCash?.billingCashTeller2 > 0 && (
+                            <div>
+                              <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Cash Teller 2</div>
+                              <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{fc(d.combinedCash.billingCashTeller2)}</div>
+                            </div>
+                          )}
+                          {d.combinedCash?.odbcCash > 0 && (
+                            <div>
+                              <div style={{ fontSize: '11px', color: 'var(--t3)' }}>ODBC Cash</div>
+                              <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--t1)', fontFamily: 'var(--mono)' }}>{fc(d.combinedCash.odbcCash)}</div>
+                            </div>
+                          )}
+                          <div>
+                            <div style={{ fontSize: '11px', color: 'var(--t3)' }}>Total Expected</div>
+                            <div style={{ fontSize: '18px', fontWeight: '800', color: 'var(--blue)', fontFamily: 'var(--mono)' }}>{fc(d.combinedCash?.totalExpectedCash || 0)}</div>
+                          </div>
+                        </div>
+                        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '12px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--t3)' }}>Actual Cash:</span>
+                          <input
+                            type="number"
+                            value={eodActualCash}
+                            onChange={(e) => setEodActualCash(e.target.value)}
+                            placeholder="Enter count"
+                            style={{ width: '140px', padding: '8px 10px', fontSize: '13px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--bg)', color: 'var(--t1)', fontFamily: 'var(--mono)' }}
+                          />
+                          {eodActualCash !== '' && (() => {
+                            const diff = parseFloat(eodActualCash) - (d.combinedCash?.totalExpectedCash || 0);
+                            const match = Math.abs(diff) < 1;
+                            return (
+                              <span style={{ fontSize: '13px', fontWeight: '700', color: match ? 'var(--green)' : 'var(--red)' }}>
+                                {match ? '\u2705 Match' : `\u274C Diff: ${diff > 0 ? '+' : ''}${fc(Math.abs(diff))}`}
+                              </span>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* DISCOUNTS */}
+                    {(d.billing?.discountDetails?.length > 0) && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          Discounts ({fc(d.billing.discountDetails.reduce((s, v) => s + (v.amount || 0), 0))} — {d.billing.discountDetails.length} voucher{d.billing.discountDetails.length !== 1 ? 's' : ''})
+                        </div>
+                        <div className="s-card" style={{ padding: '12px' }}>
+                          <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr style={{ color: 'var(--t3)', borderBottom: '1px solid var(--border)' }}>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: '600' }}>Party</th>
+                                <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: '600' }}>Amount</th>
+                                <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: '600' }}>Voucher</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {d.billing.discountDetails.map((disc, i) => (
+                                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                  <td style={{ padding: '6px 8px', color: 'var(--t1)' }}>{disc.party_name}</td>
+                                  <td style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--red)', fontWeight: '600', fontFamily: 'var(--mono)' }}>{fc(disc.amount)}</td>
+                                  <td style={{ padding: '6px 8px', color: 'var(--t3)', fontFamily: 'var(--mono)' }}>{disc.voucher_number}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* CHEQUES DUE */}
+                    {(d.cheques?.dueToday?.length > 0 || d.cheques?.overdue?.length > 0 || d.cheques?.depositedToday?.length > 0) && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Cheques</div>
+                        <div className="s-card" style={{ padding: '12px' }}>
+                          {d.cheques.dueToday?.length > 0 && (
+                            <>
+                              <div style={{ fontSize: '11px', fontWeight: '700', color: 'var(--amber)', marginBottom: '6px' }}>Due Today ({d.cheques.dueToday.length})</div>
+                              {d.cheques.dueToday.map((ch, i) => (
+                                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: '12px' }}>
+                                  <span style={{ color: 'var(--t1)' }}>{ch.party_name}</span>
+                                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                    <span style={{ color: 'var(--t3)', fontFamily: 'var(--mono)', fontSize: '10px' }}>{ch.cheque_number || ''}</span>
+                                    <span style={{ fontWeight: '700', fontFamily: 'var(--mono)', color: 'var(--amber)' }}>{fc(ch.amount)}</span>
+                                    <span style={{
+                                      fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
+                                      background: ch.status === 'deposited' ? 'rgba(76,175,80,0.15)' : ch.status === 'pending' ? 'rgba(255,193,7,0.15)' : 'rgba(244,67,54,0.15)',
+                                      color: ch.status === 'deposited' ? 'var(--green)' : ch.status === 'pending' ? 'var(--amber)' : 'var(--red)'
+                                    }}>{ch.status}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </>
+                          )}
+                          {d.cheques.overdue?.length > 0 && (
+                            <>
+                              <div style={{ fontSize: '11px', fontWeight: '700', color: 'var(--red)', marginTop: '12px', marginBottom: '6px' }}>
+                                Overdue ({d.cheques.overdue.length}) — {fc(d.cheques.overdue.reduce((s, c) => s + (c.amount || 0), 0))}
+                              </div>
+                              {d.cheques.overdue.slice(0, 10).map((ch, i) => (
+                                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', fontSize: '11px', color: 'var(--t3)' }}>
+                                  <span>{ch.party_name}</span>
+                                  <div style={{ display: 'flex', gap: '8px' }}>
+                                    <span style={{ fontFamily: 'var(--mono)' }}>{ch.cheque_date}</span>
+                                    <span style={{ fontWeight: '600', color: 'var(--red)', fontFamily: 'var(--mono)' }}>{fc(ch.amount)}</span>
+                                  </div>
+                                </div>
+                              ))}
+                              {d.cheques.overdue.length > 10 && (
+                                <div style={{ fontSize: '10px', color: 'var(--t4)', marginTop: '4px' }}>+{d.cheques.overdue.length - 10} more</div>
+                              )}
+                            </>
+                          )}
+                          {d.cheques.depositedToday?.length > 0 && (
+                            <>
+                              <div style={{ fontSize: '11px', fontWeight: '700', color: 'var(--green)', marginTop: '12px', marginBottom: '6px' }}>Deposited Today ({d.cheques.depositedToday.length})</div>
+                              {d.cheques.depositedToday.map((ch, i) => (
+                                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '11px' }}>
+                                  <span style={{ color: 'var(--t2)' }}>{ch.party_name}</span>
+                                  <span style={{ fontWeight: '600', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(ch.amount)}</span>
+                                </div>
+                              ))}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ODBC ACTIVITY */}
+                    {d.odbc?.voucherCount > 0 && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>ODBC Activity ({d.odbc.voucherCount} voucher{d.odbc.voucherCount !== 1 ? 's' : ''})</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '10px' }}>
+                          {Object.entries(d.odbc?.receipts || {}).filter(([, v]) => v > 0).map(([ledger, amount]) => (
+                            <div key={ledger} className="s-card" style={{ padding: '14px', textAlign: 'center' }}>
+                              <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--purple, #9C27B0)', fontFamily: 'var(--mono)' }}>{fc(amount)}</div>
+                              <div style={{ fontSize: '11px', color: 'var(--t3)', marginTop: '4px' }}>{ledger}</div>
+                            </div>
+                          ))}
+                        </div>
+                        {d.odbc.totalReceipts > 0 && (
+                          <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--t3)' }}>
+                            Total: <strong style={{ color: 'var(--purple, #9C27B0)' }}>{fc(d.odbc.totalReceipts)}</strong>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* FONEPAY TRANSACTIONS */}
+                    {d.fonepay?.count > 0 && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          Fonepay Transactions ({d.fonepay.count}) — {fc(d.fonepay.total)}
+                        </div>
+                        <div className="s-card" style={{ padding: '12px', maxHeight: '200px', overflowY: 'auto' }}>
+                          {d.fonepay.transactions.map((txn, i) => (
+                            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid var(--border)', fontSize: '11px' }}>
+                              <span style={{ color: 'var(--t2)' }}>{txn.description || txn.issuer_name || txn.transaction_id}</span>
+                              <span style={{ fontWeight: '600', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(txn.amount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* FONEPAY SETTLEMENT LEDGER */}
+                    {(d.fonepayLedger?.totalCredits > 0 || d.fonepayLedger?.totalDebits > 0) && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          Fonepay Settlement Ledger
+                        </div>
+                        <div className="s-card" style={{ padding: '14px' }}>
+                          {/* Summary row */}
+                          <div style={{ display: 'flex', gap: '16px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                            <div style={{ flex: 1, minWidth: '120px', textAlign: 'center', padding: '8px', background: 'rgba(76,175,80,0.08)', borderRadius: '6px' }}>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)', textTransform: 'uppercase' }}>Collected (Cr)</div>
+                              <div style={{ fontSize: '16px', fontWeight: '800', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(d.fonepayLedger.totalCredits)}</div>
+                              <div style={{ fontSize: '9px', color: 'var(--t4)' }}>{d.fonepayLedger.credits?.length || 0} txn</div>
+                            </div>
+                            <div style={{ flex: 1, minWidth: '120px', textAlign: 'center', padding: '8px', background: 'rgba(244,67,54,0.08)', borderRadius: '6px' }}>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)', textTransform: 'uppercase' }}>Settled to RBB (Dr)</div>
+                              <div style={{ fontSize: '16px', fontWeight: '800', color: 'var(--red)', fontFamily: 'var(--mono)' }}>{fc(d.fonepayLedger.totalDebits)}</div>
+                              <div style={{ fontSize: '9px', color: 'var(--t4)' }}>{d.fonepayLedger.debits?.length || 0} settlement{(d.fonepayLedger.debits?.length || 0) !== 1 ? 's' : ''}</div>
+                            </div>
+                            <div style={{ flex: 1, minWidth: '120px', textAlign: 'center', padding: '8px', background: Math.abs(d.fonepayLedger.balance) < 1 ? 'rgba(76,175,80,0.08)' : 'rgba(255,193,7,0.08)', borderRadius: '6px' }}>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)', textTransform: 'uppercase' }}>Balance</div>
+                              <div style={{ fontSize: '16px', fontWeight: '800', color: Math.abs(d.fonepayLedger.balance) < 1 ? 'var(--green)' : 'var(--amber)', fontFamily: 'var(--mono)' }}>
+                                {Math.abs(d.fonepayLedger.balance) < 1 ? 'Settled' : (d.fonepayLedger.balance > 0 ? `+${fc(d.fonepayLedger.balance)}` : fc(d.fonepayLedger.balance))}
+                              </div>
+                              <div style={{ fontSize: '9px', color: 'var(--t4)' }}>
+                                {Math.abs(d.fonepayLedger.balance) < 1 ? 'All settled' : d.fonepayLedger.balance > 0 ? 'Pending settlement' : 'RBB got more than portal'}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Debit entries (RBB settlements) */}
+                          {d.fonepayLedger.debits?.length > 0 && (
+                            <div style={{ marginBottom: '10px' }}>
+                              <div style={{ fontSize: '10px', fontWeight: '700', color: 'var(--red)', marginBottom: '4px', textTransform: 'uppercase' }}>
+                                Debit — Settled to RBB
+                              </div>
+                              <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse' }}>
+                                <thead>
+                                  <tr style={{ color: 'var(--t4)', borderBottom: '1px solid var(--border)' }}>
+                                    <th style={{ textAlign: 'left', padding: '4px 6px', fontWeight: '600' }}>Description</th>
+                                    <th style={{ textAlign: 'left', padding: '4px 6px', fontWeight: '600', width: '70px' }}>Type</th>
+                                    <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: '600', width: '90px' }}>Amount</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {d.fonepayLedger.debits.map((entry, i) => (
+                                    <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                      <td style={{ padding: '4px 6px', color: 'var(--t2)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.description}</td>
+                                      <td style={{ padding: '4px 6px', color: 'var(--t4)', fontSize: '9px' }}>{entry.type}</td>
+                                      <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: '600', color: 'var(--red)', fontFamily: 'var(--mono)' }}>{fc(entry.amount)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* Credit entries (Fonepay collections) */}
+                          {d.fonepayLedger.credits?.length > 0 && (
+                            <div>
+                              <div style={{ fontSize: '10px', fontWeight: '700', color: 'var(--green)', marginBottom: '4px', textTransform: 'uppercase' }}>
+                                Credit — Fonepay Collections
+                              </div>
+                              <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                                <table style={{ width: '100%', fontSize: '11px', borderCollapse: 'collapse' }}>
+                                  <thead>
+                                    <tr style={{ color: 'var(--t4)', borderBottom: '1px solid var(--border)' }}>
+                                      <th style={{ textAlign: 'left', padding: '4px 6px', fontWeight: '600' }}>Description</th>
+                                      <th style={{ textAlign: 'left', padding: '4px 6px', fontWeight: '600', width: '70px' }}>Issuer</th>
+                                      <th style={{ textAlign: 'right', padding: '4px 6px', fontWeight: '600', width: '90px' }}>Amount</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {d.fonepayLedger.credits.map((entry, i) => (
+                                      <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                                        <td style={{ padding: '4px 6px', color: 'var(--t2)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.description}</td>
+                                        <td style={{ padding: '4px 6px', color: 'var(--t4)', fontSize: '9px' }}>{entry.issuer}</td>
+                                        <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: '600', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(entry.amount)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* RBB BANK ACTIVITY */}
+                    {(d.rbb?.creditCount > 0 || d.rbb?.debitCount > 0) && (
+                      <div style={{ marginBottom: '20px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: '700', color: 'var(--t2)', marginBottom: '10px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          RBB Bank Activity
+                        </div>
+                        <div style={{ display: 'flex', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                          {d.rbb.fonepaySettlementTotal > 0 && (
+                            <div className="s-card" style={{ padding: '10px 14px' }}>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)' }}>Fonepay Settlement (Total)</div>
+                              <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(d.rbb.fonepaySettlementTotal)}</div>
+                              <div style={{ fontSize: '9px', color: 'var(--t4)' }}>ESEWASTLMT: {fc(d.rbb.esewaSettlements)} + FONEPAY: {fc(d.rbb.fonepaySettlements)}</div>
+                            </div>
+                          )}
+                          {d.rbb.otherCredits > 0 && (
+                            <div className="s-card" style={{ padding: '10px 14px' }}>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)' }}>Other Credits</div>
+                              <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--green)', fontFamily: 'var(--mono)' }}>{fc(d.rbb.otherCredits)}</div>
+                            </div>
+                          )}
+                          {d.rbb.totalDebits > 0 && (
+                            <div className="s-card" style={{ padding: '10px 14px' }}>
+                              <div style={{ fontSize: '10px', color: 'var(--t3)' }}>Debits ({d.rbb.debitCount})</div>
+                              <div style={{ fontSize: '14px', fontWeight: '700', color: 'var(--red)', fontFamily: 'var(--mono)' }}>{fc(d.rbb.totalDebits)}</div>
+                            </div>
+                          )}
+                        </div>
+                        {d.rbb.debits?.length > 0 && (
+                          <div className="s-card" style={{ padding: '10px', maxHeight: '120px', overflowY: 'auto' }}>
+                            <div style={{ fontSize: '10px', fontWeight: '600', color: 'var(--t3)', marginBottom: '4px' }}>Debit Details</div>
+                            {d.rbb.debits.map((txn, i) => (
+                              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: '10px', borderBottom: '1px solid var(--border)' }}>
+                                <span style={{ color: 'var(--t3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '8px' }}>{txn.description}</span>
+                                <span style={{ fontWeight: '600', color: 'var(--red)', fontFamily: 'var(--mono)', flexShrink: 0 }}>{fc(txn.debit)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+
+              {!eodLoading && !eodData && (
+                <div style={{ textAlign: 'center', padding: '40px' }}>
+                  <button
+                    className="btn btn-p"
+                    onClick={() => fetchEODRecon()}
+                    style={{ padding: '10px 24px', fontSize: '13px' }}
+                  >
+                    Load EOD Data
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* SETTINGS PAGE */}
@@ -9111,7 +13481,8 @@ export default function RushDashboard() {
                       { key: 'business_name', label: 'Business Name', placeholder: 'Your Business Name' },
                       { key: 'business_address', label: 'Address', placeholder: 'City, District' },
                       { key: 'business_phone', label: 'Phone', placeholder: '01-XXXXXXX' },
-                      { key: 'business_pan', label: 'PAN/VAT No.', placeholder: '000000000' }
+                      { key: 'business_pan', label: 'PAN/VAT No.', placeholder: '000000000' },
+                      { key: 'admin_whatsapp_phone', label: 'Admin WhatsApp Phone', placeholder: '98XXXXXXXX (for notifications when party has no phone)' }
                     ].map(field => (
                       <div key={field.key} className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '6px' }}>
                         <div className="s-name">{field.label}</div>
@@ -9204,6 +13575,32 @@ export default function RushDashboard() {
                           {emailTestResult.success ? (emailTestResult.message || 'Success!') : emailTestResult.error}
                         </div>
                       )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="s-card">
+                  <div className="s-card-h">📋 Voucher Type Configuration</div>
+                  <div className="s-card-b">
+                    {[
+                      { key: 'vt_collection_post', label: 'Collection Post', desc: 'Collection Post page — receipts from field collection', default: 'Dashboard Receipt' },
+                      { key: 'vt_receipt_page', label: 'Receipt Page', desc: 'Receipt page — manual receipt creation', default: 'Dashboard Receipt' },
+                      { key: 'vt_cheque_post', label: 'Cheque Post', desc: 'Cheque Post page — cheque collection receipts', default: 'Receipt' },
+                    ].map(vt => (
+                      <div className="s-row" key={vt.key}>
+                        <div style={{ flex: 1 }}>
+                          <div className="s-name">{vt.label}</div>
+                          <div className="s-desc">{vt.desc}</div>
+                        </div>
+                        <input
+                          value={appSettings[vt.key] || vt.default}
+                          onChange={(e) => setAppSettings(prev => ({ ...prev, [vt.key]: e.target.value }))}
+                          style={{ width: '180px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--t1)', borderRadius: '6px', padding: '6px 10px', fontSize: '13px' }}
+                        />
+                      </div>
+                    ))}
+                    <div style={{ marginTop: '12px', fontSize: '11px', color: 'var(--t3)' }}>
+                      These must match exact voucher type names in Tally. Changes apply on next receipt creation.
                     </div>
                   </div>
                 </div>
@@ -9417,6 +13814,59 @@ export default function RushDashboard() {
                     )}
                   </div>
                 </div>
+
+                {currentUser?.role === 'admin' && (
+                <div className="s-card">
+                  <div className="s-card-h">🔐 Role Permissions</div>
+                  <div className="s-card-b">
+                    <div className="s-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                      <div>
+                        <div className="s-name">Configure Page Visibility</div>
+                        <div className="s-desc">Select a role and toggle which pages are visible</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
+                        {['cashier', 'manager', 'admin'].map(r => (
+                          <button key={r} className={`btn ${rpSelectedRole === r ? 'btn-p' : 'btn-o'}`}
+                            style={{ padding: '5px 14px', fontSize: '12px', textTransform: 'capitalize', flex: 1 }}
+                            onClick={() => { setRpSelectedRole(r); fetchRolePerms(r); }}>
+                            {r}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {rpLoading ? (
+                      <div style={{ textAlign: 'center', padding: '12px', color: 'var(--t3)' }}>Loading...</div>
+                    ) : (
+                      <div style={{ maxHeight: '400px', overflowY: 'auto', marginTop: '8px' }}>
+                        {Object.entries(PAGE_TITLES).map(([key, title]) => (
+                          <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--t1)' }}>{title}</span>
+                            <label style={{ position: 'relative', display: 'inline-block', width: '36px', height: '20px', cursor: 'pointer' }}>
+                              <input type="checkbox"
+                                checked={rpPermissions[key] !== undefined ? rpPermissions[key] : true}
+                                onChange={e => setRpPermissions(p => ({ ...p, [key]: e.target.checked }))}
+                                style={{ opacity: 0, width: 0, height: 0 }} />
+                              <span style={{
+                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '10px', transition: '0.2s',
+                                background: (rpPermissions[key] !== undefined ? rpPermissions[key] : true) ? 'var(--green)' : 'var(--border)',
+                              }}>
+                                <span style={{
+                                  position: 'absolute', height: '16px', width: '16px', left: (rpPermissions[key] !== undefined ? rpPermissions[key] : true) ? '18px' : '2px',
+                                  bottom: '2px', background: '#fff', borderRadius: '50%', transition: '0.2s'
+                                }} />
+                              </span>
+                            </label>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <button className="btn btn-p" style={{ width: '100%', marginTop: '12px', padding: '8px', fontSize: '13px' }}
+                      onClick={handleSaveRolePerms} disabled={rpSaving}>
+                      {rpSaving ? 'Saving...' : 'Save Permissions'}
+                    </button>
+                  </div>
+                </div>
+                )}
 
                 <div className="s-card">
                   <div className="s-card-h">📊 Dashboard Info</div>

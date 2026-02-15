@@ -151,4 +151,35 @@ router.get('/ledger-mappings/lookup/:billingParty', (req, res) => {
   }
 });
 
+// ==================== PHONE → PARTY MAPPINGS ====================
+
+router.get('/phone-mappings', (req, res) => {
+  try {
+    const mappings = db.getAllPhoneMappings(req.query.party || null);
+    res.json({ success: true, mappings, count: mappings.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/phone-mappings', (req, res) => {
+  try {
+    const { phone, partyName } = req.body;
+    if (!phone || !partyName) return res.status(400).json({ success: false, error: 'phone and partyName are required' });
+    db.upsertPartyPhone(phone, partyName, 'manual');
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.delete('/phone-mappings/:phone', (req, res) => {
+  try {
+    db.deletePartyPhone(decodeURIComponent(req.params.phone));
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 export default router;

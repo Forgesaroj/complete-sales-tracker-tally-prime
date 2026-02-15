@@ -6,6 +6,7 @@
 import { Router } from 'express';
 import { db } from '../services/database/database.js';
 import { tallyConnector } from '../services/tally/tallyConnector.js';
+import config from '../config/default.js';
 
 const router = Router();
 
@@ -118,7 +119,7 @@ router.post('/', async (req, res) => {
     let fonepayMatch = null;
     if (qrAmount && qrAmount > 0) {
       const billDate = req.body.billDate || new Date().toISOString().split('T')[0];
-      const companyName = req.body.companyName || 'FOR DB';
+      const companyName = req.body.companyName || config.tally.companyName || 'FOR DB';
 
       // Try to find matching Fonepay transaction
       const matchingTxn = db.findMatchingFonepayTransaction(qrAmount, new Date().toISOString().split('T')[0]);

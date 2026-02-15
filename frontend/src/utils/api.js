@@ -32,6 +32,9 @@ export const emailBill = (billId, toEmail, nepaliDate = '') =>
 
 // Vouchers (ALL types - Sales, Receipt, Payment, Journal, Purchase, etc.)
 export const getAllVouchers = (params = {}) => api.get('/vouchers', { params });
+export const getCombinedVouchers = (params = {}) => api.get('/vouchers/combined', { params });
+export const getCombinedVoucherTypes = () => api.get('/vouchers/combined-types');
+export const backfillTimestamps = () => api.post('/vouchers/backfill-timestamps', {}, { timeout: 120000 });
 export const getVoucherTypesList = () => api.get('/vouchers/types');
 export const getDeletedVouchers = (params = {}) => api.get('/vouchers/deleted', { params });
 export const restoreDeletedVoucher = (guid) => api.post(`/vouchers/restore/${guid}`);
@@ -77,12 +80,18 @@ export const setActiveCompany = (companyName) => api.post('/tally/company', { co
 export const getTallyVoucherTypes = () => api.get('/tally/voucher-types');
 
 // Auth
-export const login = (credentials) => api.post('/auth/login', credentials);
+export const login = (credentials) => api.post('/users/auth/login', credentials);
 
 // Users
 export const getUsers = () => api.get('/users');
 export const createUser = (data) => api.post('/users', data);
 export const updateUserNotifications = (id, prefs) => api.patch(`/users/${id}/notifications`, prefs);
+
+// Role Permissions
+export const getMyPermissions = (userId) => api.get('/users/my-permissions', { params: { userId } });
+export const getRolePermissions = (role) => api.get(`/users/permissions/${role}`);
+export const getAllRolePermissions = () => api.get('/users/permissions');
+export const saveRolePermissions = (role, permissions) => api.post(`/users/permissions/${role}`, { permissions });
 
 // Notifications
 export const getNotifications = (userId) => api.get('/notifications', { params: { userId } });
@@ -104,6 +113,15 @@ export const getFonepayStatus = () => api.get('/fonepay/status');
 export const triggerFonepaySync = () => api.post('/fonepay/sync');
 export const fetchFonepayHistorical = (fromDate, toDate) => api.post('/fonepay/historical', { fromDate, toDate });
 export const generateFonepayQR = (amount, remarks = '') => api.post('/fonepay/qr/generate', { amount, remarks }, { timeout: 60000 });
+export const linkFonepayToBill = (data) => api.post('/fonepay/link-to-bill', data);
+export const unlinkFonepayFromBill = (transactionId) => api.post('/fonepay/unlink', { transactionId });
+export const bulkLinkFonepay = (links) => api.post('/fonepay/bulk-link', { links });
+export const suggestFonepayMatches = (dateFrom, dateTo) => api.post('/fonepay/suggest-matches', { dateFrom, dateTo });
+export const getUnlinkedFonepay = () => api.get('/fonepay/unlinked');
+export const autoMatchFonepay = (data) => api.post('/fonepay/auto-match', data);
+export const getFonepayLedger = (params = {}) => api.get('/fonepay/ledger', { params });
+export const addFonepayAdjustment = (data) => api.post('/fonepay/adjustment', data);
+export const deleteFonepayAdjustment = (id) => api.delete(`/fonepay/adjustment/${id}`);
 
 // RBB Smart Banking
 export const getRBBTransactions = (params = {}) => api.get('/rbb/transactions', { params });
@@ -246,10 +264,46 @@ export const completeBatch = (id) => api.post(`/collection/batches/${id}/complet
 export const createCollectionReceipt = (id) => api.post(`/collection/batches/${id}/create-receipt`, {}, { timeout: 60000 });
 export const getAssignableCheques = () => api.get('/collection/assignable-cheques');
 export const getCollectionStats = () => api.get('/collection/stats');
+export const getCollectionPartyBalances = () => api.get('/collection/party-balances', { timeout: 30000 });
 
 // Cheque Receivable (from ODBC company)
 export const getChequeReceivable = () => api.get('/collection/cheque-receivable', { timeout: 30000 });
 export const getChequeReceivableLocal = (params = {}) => api.get('/collection/cheque-receivable/local', { params });
+
+// Collection Post — Receipt Book Assignments & Batch Entry
+export const getBookAssignments = (params = {}) => api.get('/collection/book-assignments', { params });
+export const createBookAssignment = (data) => api.post('/collection/book-assignments', data);
+export const updateBookAssignment = (id, data) => api.put(`/collection/book-assignments/${id}`, data);
+export const deleteBookAssignment = (id) => api.delete(`/collection/book-assignments/${id}`);
+export const submitCollectionPost = (data) => api.post('/collection/post', data, { timeout: 120000 });
+export const getCollectionPostEntries = (assignmentId) => api.get('/collection/post/entries', { params: { assignmentId } });
+export const getCollectionPostHistory = (params = {}) => api.get('/collection/post/history', { params });
+export const getCollectionPostBooks = () => api.get('/collection/post/books');
+export const searchCollectionPosts = (params = {}) => api.get('/collection/post/search', { params });
+
+// Receipt Books — Inventory Lifecycle
+export const getReceiptBooks = (params = {}) => api.get('/collection/books', { params });
+export const getReceiptBook = (id) => api.get(`/collection/books/${id}`);
+export const createReceiptBooksBulk = (data) => api.post('/collection/books/bulk-create', data);
+export const createReceiptBook = (data) => api.post('/collection/books', data);
+export const updateReceiptBook = (id, data) => api.put(`/collection/books/${id}`, data);
+export const deleteReceiptBook = (id) => api.delete(`/collection/books/${id}`);
+export const markBooksReady = (bookIds) => api.post('/collection/books/mark-ready', { bookIds });
+export const markBooksInactive = (bookIds) => api.post('/collection/books/mark-inactive', { bookIds });
+export const assignBooks = (data) => api.post('/collection/books/assign', data);
+export const returnBook = (id) => api.post(`/collection/books/${id}/return`);
+export const rereadyBook = (id) => api.post(`/collection/books/${id}/reready`);
+export const saveBookSummary = (id, data) => api.put(`/collection/books/${id}/summary`, data);
+export const getBookEntries = (id, cycle) => api.get(`/collection/books/${id}/entries`, { params: { cycle } });
+export const validateBook = (id) => api.get(`/collection/books/${id}/validate`);
+export const getBookHistory = (id) => api.get(`/collection/books/${id}/history`);
+
+// Receipt Creation
+export const createReceipt = (data) => api.post('/receipt', data, { timeout: 30000 });
+export const searchReceiptParties = (q, company) => api.get('/receipt/parties', { params: { q, company } });
+
+// Ledger (Both) - Combined billing + cheque view
+export const getLedgerBoth = () => api.get('/ledger-both', { timeout: 180000 });
 
 // Bank Names
 export const getBankNames = () => api.get('/bank-names');
@@ -262,5 +316,39 @@ export const getLedgerMappings = () => api.get('/bank-names/ledger-mappings');
 export const upsertLedgerMapping = (data) => api.post('/bank-names/ledger-mappings', data);
 export const updateLedgerMappingApi = (id, data) => api.put(`/bank-names/ledger-mappings/${id}`, data);
 export const deleteLedgerMapping = (id) => api.delete(`/bank-names/ledger-mappings/${id}`);
+
+// Phone → Party Mappings (Fonepay initiator)
+export const getPhoneMappings = (party) => api.get('/bank-names/phone-mappings', { params: { party } });
+export const savePhoneMapping = (data) => api.post('/bank-names/phone-mappings', data);
+export const deletePhoneMapping = (phone) => api.delete(`/bank-names/phone-mappings/${encodeURIComponent(phone)}`);
+
+// Data Completeness Tracking
+export const getDataCompleteness = () => api.get('/data-completeness');
+
+// EOD Reconciliation
+export const getEODRecon = (date) => api.get('/eod-recon', { params: { date } });
+
+// Ledger Hierarchy
+export const getHierarchyCompanies = () => api.get('/ledgers/hierarchy/companies');
+export const syncLedgerHierarchy = (company) => api.post('/ledgers/hierarchy/sync', {}, { params: { company }, timeout: 120000 });
+export const getLedgerDetail = (name, company) => api.get('/ledgers/detail', { params: { name, company }, timeout: 30000 });
+export const getLedgerAccountView = (name, from, to, company) => api.get('/ledgers/account-view', { params: { name, from, to, company }, timeout: 60000 });
+
+// WhatsApp
+export const getWhatsAppStatus = () => api.get('/whatsapp/status');
+export const initializeWhatsApp = () => api.post('/whatsapp/initialize', {}, { timeout: 30000 });
+export const logoutWhatsApp = () => api.post('/whatsapp/logout');
+export const sendWhatsAppMessage = (phone, message, partyName) => api.post('/whatsapp/send', { phone, message, partyName });
+export const sendWhatsAppReminder = (partyName, phone) => api.post('/whatsapp/send-reminder', { partyName, phone });
+export const sendWhatsAppReceipt = (data) => api.post('/whatsapp/send-receipt', data);
+export const sendWhatsAppOutstanding = (partyName, phone) => api.post('/whatsapp/send-outstanding', { partyName, phone });
+export const checkWhatsAppNumber = (phone) => api.post('/whatsapp/check-number', { phone });
+export const getWhatsAppContacts = (partyName) => api.get('/whatsapp/contacts', { params: { partyName } });
+export const saveWhatsAppContact = (data) => api.post('/whatsapp/contacts', data);
+export const deleteWhatsAppContact = (id) => api.delete(`/whatsapp/contacts/${id}`);
+export const importWhatsAppContacts = () => api.post('/whatsapp/contacts/import');
+export const verifyWhatsAppContact = (id) => api.post(`/whatsapp/contacts/${id}/verify`);
+export const getWhatsAppMessages = (params) => api.get('/whatsapp/messages', { params });
+export const getWhatsAppMessageStats = () => api.get('/whatsapp/messages/stats');
 
 export default api;

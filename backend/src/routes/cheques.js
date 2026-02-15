@@ -926,10 +926,14 @@ router.post('/cheque-post/sync', async (req, res) => {
       return res.status(400).json({ error: 'partyName and chequeLines are required' });
     }
 
-    // Ensure party exists in ODBC company
-    const partyExists = await tallyConnector.partyExistsInCompany(partyName, co().odbc);
-    if (!partyExists) {
-      return res.status(400).json({ error: `Party "${partyName}" not found in ${co().odbc}. Please select a valid party.` });
+    // Ensure all parties exist in ODBC company (main + overrides)
+    const allParties = [partyName, ...chequeLines.map(l => l.partyOverride).filter(p => p && p.trim())];
+    const uniqueParties = [...new Set(allParties)];
+    for (const p of uniqueParties) {
+      const exists = await tallyConnector.partyExistsInCompany(p, co().odbc);
+      if (!exists) {
+        return res.status(400).json({ error: `Party "${p}" not found in ${co().odbc}. Please select a valid party.` });
+      }
     }
 
     const vchDate = date || new Date().toISOString().split('T')[0].replace(/-/g, '');
@@ -974,11 +978,19 @@ router.post('/cheque-post/sync-all', async (req, res) => {
     // Step 1: Push each receipt to ODBC CHq Mgmt
     for (const r of receipts) {
       try {
-        const partyExists = await tallyConnector.partyExistsInCompany(r.partyName, co().odbc);
-        if (!partyExists) {
-          odbcResults.push({ partyName: r.partyName, success: false, error: `Party not found in ${co().odbc}` });
-          continue;
+        // Validate all parties (main + overrides)
+        const allPs = [r.partyName, ...(r.chequeLines || []).map(l => l.partyOverride).filter(p => p && p.trim())];
+        const uniquePs = [...new Set(allPs)];
+        let partyMissing = false;
+        for (const p of uniquePs) {
+          const exists = await tallyConnector.partyExistsInCompany(p, co().odbc);
+          if (!exists) {
+            odbcResults.push({ partyName: r.partyName, success: false, error: `Party "${p}" not found in ${co().odbc}` });
+            partyMissing = true;
+            break;
+          }
         }
+        if (partyMissing) continue;
 
         const partyShort = r.partyName.split(',')[0].trim().substring(0, 20);
         const seq = String(Date.now()).slice(-4);

@@ -26,7 +26,7 @@ const router = Router();
  */
 router.post('/', async (req, res) => {
   try {
-    const { partyName, voucherType, narration, paymentModes, date } = req.body;
+    const { partyName, voucherType, narration, paymentModes, date, company } = req.body;
 
     if (!partyName) {
       return res.status(400).json({ error: 'partyName is required' });
@@ -73,7 +73,8 @@ router.post('/', async (req, res) => {
       voucherType: voucherType || 'Receipt',
       narration: narration || 'Receipt via Dashboard',
       paymentModes: paymentModes || {},
-      date
+      date,
+      company: company || null
     });
 
     if (result.success) {
@@ -121,6 +122,49 @@ router.get('/voucher-types', (req, res) => {
       { value: 'Contra', label: 'Contra' }
     ]
   });
+});
+
+/**
+ * GET /api/receipt/parties?q=search&company=billing|odbc|both
+ * Search parties by company for receipt creation
+ * company=both merges billing + ODBC, deduplicates by name
+ */
+router.get('/parties', (req, res) => {
+  try {
+    const { q, company } = req.query;
+    if (!q || q.length < 1) return res.json({ success: true, parties: [] });
+
+    let parties;
+    if (company === 'both') {
+      // Search both companies, deduplicate
+      const billing = db.searchParties(q, 50);
+      const odbc = db.db.prepare(
+        `SELECT DISTINCT party_name as name FROM odbc_vouchers
+         WHERE party_name LIKE ? AND party_name != ''
+         ORDER BY party_name LIMIT 50`
+      ).all(`%${q}%`);
+      const seen = new Set();
+      parties = [];
+      for (const p of [...billing, ...odbc]) {
+        const key = p.name.toLowerCase();
+        if (!seen.has(key)) { seen.add(key); parties.push(p); }
+      }
+      parties = parties.slice(0, 30);
+    } else if (company === 'odbc') {
+      // ODBC parties from odbc_vouchers (no separate parties table)
+      parties = db.db.prepare(
+        `SELECT DISTINCT party_name as name FROM odbc_vouchers
+         WHERE party_name LIKE ? AND party_name != ''
+         ORDER BY party_name LIMIT 30`
+      ).all(`%${q}%`);
+    } else {
+      // Billing parties from parties table
+      parties = db.searchParties(q, 30);
+    }
+    res.json({ success: true, parties });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ==================== PENDING SALES BILLS (RECEIPT WORKFLOW) ====================

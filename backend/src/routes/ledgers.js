@@ -160,4 +160,125 @@ router.get('/agents', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/ledgers/detail
+ * Fetch detailed ledger info from Tally (master data + bill allocations)
+ * Query: ?name=LedgerName&company=FOR%20DB
+ */
+router.get('/detail', async (req, res) => {
+  try {
+    const { name, company } = req.query;
+    if (!name) return res.status(400).json({ error: 'Ledger name is required' });
+    const detail = await tallyConnector.getLedgerDetail(name, company || null);
+    if (!detail) return res.status(404).json({ error: 'Ledger not found' });
+    res.json({ success: true, ledger: detail });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ledgers/account-view
+ * Tally-style ledger account view with all transactions and running balance
+ * Query: ?name=LedgerName&from=YYYYMMDD&to=YYYYMMDD&company=FOR%20DB
+ */
+router.get('/account-view', async (req, res) => {
+  try {
+    const { name, from, to, company } = req.query;
+    if (!name) return res.status(400).json({ error: 'Ledger name is required' });
+    const result = await tallyConnector.getLedgerAccountView(name, from || null, to || null, company || null);
+    if (!result) return res.status(404).json({ error: 'Ledger not found or no data' });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/ledgers/hierarchy/companies
+ * Get list of all companies from Tally
+ */
+router.get('/hierarchy/companies', async (req, res) => {
+  try {
+    const companies = await tallyConnector.getCompanies();
+    res.json({ success: true, companies });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/ledgers/hierarchy/sync
+ * Sync ALL ledgers + groups from Tally for a specific company
+ * Query: ?company=FOR%20DB
+ */
+router.post('/hierarchy/sync', async (req, res) => {
+  try {
+    const company = req.query.company || null; // null = default company
+    const companyLabel = company || tallyConnector.companyName || 'default';
+
+    console.log(`[Hierarchy] Syncing groups from ${companyLabel}...`);
+    const groups = await tallyConnector.getAllGroups(company);
+    if (groups.length > 0) {
+      db.syncAccountGroups(groups, companyLabel);
+      console.log(`[Hierarchy] Synced ${groups.length} groups for ${companyLabel}`);
+    }
+
+    console.log(`[Hierarchy] Syncing ledgers from ${companyLabel}...`);
+    const ledgers = await tallyConnector.getAllLedgersWithBalances(company);
+    console.log(`[Hierarchy] Got ${ledgers.length} ledgers from ${companyLabel}`);
+
+    // Build group hierarchy map
+    const groupMap = {};
+    for (const g of groups) {
+      groupMap[g.name] = g.hierarchy_path || '';
+    }
+
+    // Enrich ledgers with hierarchy and group type
+    const enrichedLedgers = ledgers.map(l => {
+      const hierarchy = groupMap[l.parent] || l.parent;
+      let groupType = 'other';
+      if (hierarchy.includes('Sundry Debtors')) groupType = 'debtor';
+      else if (hierarchy.includes('Sundry Creditors')) groupType = 'creditor';
+      else if (hierarchy.includes('Sales Accounts')) groupType = 'sales';
+      else if (hierarchy.includes('Purchase Accounts')) groupType = 'purchase';
+      else if (hierarchy.includes('Bank Accounts') || hierarchy.includes('Bank OD') || hierarchy.includes('Bank OCC')) groupType = 'bank';
+      else if (hierarchy.includes('Cash-in-hand') || hierarchy.includes('Cash-in-Hand')) groupType = 'cash';
+      else if (hierarchy.includes('Direct Expenses') || hierarchy.includes('Indirect Expenses')) groupType = 'expense';
+      else if (hierarchy.includes('Direct Incomes') || hierarchy.includes('Indirect Incomes')) groupType = 'income';
+      else if (hierarchy.includes('Fixed Assets')) groupType = 'fixed_asset';
+      else if (hierarchy.includes('Investments')) groupType = 'investment';
+      else if (hierarchy.includes('Current Assets')) groupType = 'current_asset';
+      else if (hierarchy.includes('Current Liabilities')) groupType = 'current_liability';
+      else if (hierarchy.includes('Capital Account')) groupType = 'capital';
+      else if (hierarchy.includes('Loans')) groupType = 'loan';
+
+      const absBalance = Math.abs(l.closing_balance);
+      return {
+        name: l.name,
+        parent: l.parent,
+        group_type: groupType,
+        closing_balance: l.closing_balance,
+        opening_balance: l.opening_balance,
+        hierarchy_path: hierarchy,
+        balance_type: l.closing_balance >= 0 ? 'Dr' : 'Cr',
+        abs_balance: absBalance
+      };
+    });
+
+    res.json({
+      success: true,
+      company: companyLabel,
+      synced: { groups: groups.length, ledgers: ledgers.length },
+      count: enrichedLedgers.length,
+      groupCount: groups.length,
+      ledgers: enrichedLedgers,
+      groups
+    });
+  } catch (error) {
+    console.error('[Hierarchy] Sync error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

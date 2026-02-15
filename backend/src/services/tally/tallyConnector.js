@@ -16,6 +16,7 @@ class TallyConnector {
   constructor() {
     this.baseUrl = `http://${config.tally.host}:${config.tally.port}`;
     this.companyName = config.tally.companyName;
+    this.odbcCompanyName = config.tally.odbcCompanyName || '';
     this.lastRequestTime = 0;
     this.minRequestInterval = 5000; // Minimum 5 seconds between requests to be gentle on Tally
     this.requestQueue = [];
@@ -179,10 +180,15 @@ class TallyConnector {
 <TDLMESSAGE>
 <COLLECTION NAME="VchColl" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,ALLLEDGERENTRIES.LIST</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,UPDATEDDATETIME,OBJECTUPDATEACTION,ENTEREDBY,ALLLEDGERENTRIES.LIST</FETCH>
 <COMPUTE>UDFSFLTOT: $$AsAmount:$$String:$VCHNarr_AIARSM_SFLTot</COMPUTE>
+<COMPUTE>UDFSFL1: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL1</COMPUTE>
+<COMPUTE>UDFSFL2: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL2</COMPUTE>
 <COMPUTE>UDFSFL3: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL3</COMPUTE>
+<COMPUTE>UDFSFL4: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL4</COMPUTE>
 <COMPUTE>UDFSFL5: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL5</COMPUTE>
+<COMPUTE>UDFSFL6: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL6</COMPUTE>
+<COMPUTE>UDFSFL7: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL7</COMPUTE>
 </COLLECTION>
 </TDLMESSAGE>
 </TDL>
@@ -220,10 +226,15 @@ class TallyConnector {
 <TDLMESSAGE>
 <COLLECTION NAME="VchIncr" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,ALLLEDGERENTRIES.LIST</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,PARTYNAME,AMOUNT,NARRATION,GUID,MASTERID,ALTERID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,UPDATEDDATETIME,OBJECTUPDATEACTION,ENTEREDBY,ALLLEDGERENTRIES.LIST</FETCH>
 <COMPUTE>UDFSFLTOT: $$AsAmount:$$String:$VCHNarr_AIARSM_SFLTot</COMPUTE>
+<COMPUTE>UDFSFL1: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL1</COMPUTE>
+<COMPUTE>UDFSFL2: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL2</COMPUTE>
 <COMPUTE>UDFSFL3: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL3</COMPUTE>
+<COMPUTE>UDFSFL4: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL4</COMPUTE>
 <COMPUTE>UDFSFL5: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL5</COMPUTE>
+<COMPUTE>UDFSFL6: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL6</COMPUTE>
+<COMPUTE>UDFSFL7: $$AsAmount:$$String:$VCHNarr_AIARSM_SFL7</COMPUTE>
 <FILTER>IncrFilter,NotCancelled,NotOptional</FILTER>
 </COLLECTION>
 <SYSTEM TYPE="Formulae" NAME="IncrFilter">$ALTERID > ${lastAlterId}</SYSTEM>
@@ -351,23 +362,80 @@ class TallyConnector {
           }
         }
 
+        // Collect raw ledger entries for daily dashboard (all voucher types)
+        const rawLedgerEntries = [];
+        {
+          let allLE = v['ALLLEDGERENTRIES.LIST'];
+          if (allLE && !Array.isArray(allLE)) allLE = [allLE];
+          if (allLE) {
+            for (const le of allLE) {
+              const ledger = safeStr(le.LEDGERNAME);
+              const amt = Math.abs(parseFloat(String(safeStr(le.AMOUNT)).replace(/[^\d.-]/g, '')) || 0);
+              const isDebit = (safeStr(le.ISDEEMEDPOSITIVE) === 'Yes' || safeStr(le.ISDEEMEDPOSITIVE) === 'yes');
+              if (ledger && amt > 0) {
+                rawLedgerEntries.push({ ledger, amount: amt, isDebit });
+              }
+            }
+          }
+        }
+
+        // Extract all party entries for multi-party voucher support
+        let extraParties = [];
+        let totalVoucherAmount = Math.abs(parseFloat(String(amountRaw).replace(/[^\d.-]/g, '')) || 0);
+
+        if (receiptTypes.includes(voucherType)) {
+          let mpEntries = v['ALLLEDGERENTRIES.LIST'];
+          if (mpEntries && !Array.isArray(mpEntries)) mpEntries = [mpEntries];
+          if (mpEntries) {
+            const partyEntries = mpEntries.filter(le => {
+              const deemed = safeStr(le.ISDEEMEDPOSITIVE);
+              return deemed === 'No' || deemed === 'no';
+            });
+            if (partyEntries.length > 1) {
+              // Total = sum of all debit-side amounts (absolute)
+              const debitEntries = mpEntries.filter(le => {
+                const deemed = safeStr(le.ISDEEMEDPOSITIVE);
+                return deemed === 'Yes' || deemed === 'yes';
+              });
+              totalVoucherAmount = debitEntries.reduce((sum, le) => {
+                return sum + Math.abs(parseFloat(String(safeStr(le.AMOUNT)).replace(/[^\d.-]/g, '')) || 0);
+              }, 0);
+              for (const pe of partyEntries) {
+                const peName = safeStr(pe.LEDGERNAME);
+                if (peName && peName !== partyName) {
+                  extraParties.push({
+                    name: peName,
+                    amount: Math.abs(parseFloat(String(safeStr(pe.AMOUNT)).replace(/[^\d.-]/g, '')) || 0)
+                  });
+                }
+              }
+            }
+          }
+        }
+
         // Timestamp fields from Tally
         const alteredDate = v.ALTEREDDATE?._ || v.ALTEREDDATE || '';
         const priorDate = v.PRIORDATE?._ || v.PRIORDATE || '';
         const statusDate = v.VCHSTATUSDATE?._ || v.VCHSTATUSDATE || '';
+        const updatedDateTimeRaw = v.UPDATEDDATETIME?._ || v.UPDATEDDATETIME || '';
+        const objectUpdateAction = (v.OBJECTUPDATEACTION?._ || v.OBJECTUPDATEACTION || '').trim();
+        const enteredBy = (v.ENTEREDBY?._ || v.ENTEREDBY || '').trim();
 
         // Use PRIORDATE as creation date (when voucher was first entered)
         // ALTEREDDATE is when it was last modified
         const createdDate = priorDate || dateRaw;
         const entryTime = statusDate || alteredDate;
 
-        // UDF payment fields (for critical pending bill detection)
-        const udfSflTotRaw = v.UDFSFLTOT?._ || v.UDFSFLTOT || '0';
-        const udfSfl3Raw = v.UDFSFL3?._ || v.UDFSFL3 || '0';
-        const udfSfl5Raw = v.UDFSFL5?._ || v.UDFSFL5 || '0';
-        const udfPaymentTotal = parseFloat(String(udfSflTotRaw).replace(/[^\d.-]/g, '')) || 0;
-        const udfSfl3 = parseFloat(String(udfSfl3Raw).replace(/[^\d.-]/g, '')) || 0;
-        const udfSfl5 = parseFloat(String(udfSfl5Raw).replace(/[^\d.-]/g, '')) || 0;
+        // UDF payment fields (SFL1-7 = payment mode breakdown on all voucher types)
+        const parseSfl = (key) => Math.abs(parseFloat(String(v[key]?._ || v[key] || '0').replace(/[^\d.-]/g, '')) || 0);
+        const udfPaymentTotal = parseSfl('UDFSFLTOT');
+        const udfSfl1 = parseSfl('UDFSFL1'); // Cash Teller 1
+        const udfSfl2 = parseSfl('UDFSFL2'); // Cash Teller 2
+        const udfSfl3 = parseSfl('UDFSFL3'); // Cheque receipt
+        const udfSfl4 = parseSfl('UDFSFL4'); // Q/R code
+        const udfSfl5 = parseSfl('UDFSFL5'); // Discount
+        const udfSfl6 = parseSfl('UDFSFL6'); // Bank Deposit
+        const udfSfl7 = parseSfl('UDFSFL7'); // Esewa (direct to personal)
 
         return {
           guid: String(guid),
@@ -383,12 +451,19 @@ class TallyConnector {
           createdDate: String(createdDate),
           alteredDate: String(alteredDate),
           entryTime: String(entryTime),
-          // UDF payment fields - if has value, bill is critical/exceptional
-          udfPaymentTotal: Math.abs(udfPaymentTotal),
-          udfSfl3: Math.abs(udfSfl3),
-          udfSfl5: Math.abs(udfSfl5),
+          updatedDateTime: String(updatedDateTimeRaw).trim(),
+          objectUpdateAction: objectUpdateAction || '',  // "Create" or "Resave"
+          enteredBy: enteredBy || '',
+          // UDF payment fields (SFL1-7 payment mode breakdown)
+          udfPaymentTotal,
+          udfSfl1, udfSfl2, udfSfl3, udfSfl4, udfSfl5, udfSfl6, udfSfl7,
           // Payment mode breakdown (receipts only)
-          payCash, payQr, payCheque, payDiscount, payEsewa, payBankDeposit
+          payCash, payQr, payCheque, payDiscount, payEsewa, payBankDeposit,
+          ledgerEntries: rawLedgerEntries,
+          // Multi-party voucher support
+          totalAmount: totalVoucherAmount,
+          extraParties,
+          extraPartiesCount: extraParties.length
         };
       });
 
@@ -409,18 +484,20 @@ class TallyConnector {
   /**
    * Get all party balances (Sundry Debtors)
    */
-  async getAllPartyBalances() {
+  async getAllPartyBalances(targetCompany = null) {
+    const companyVar = this.getCompanyVar(targetCompany);
     const xml = `<ENVELOPE>
 <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>PartyBal</ID></HEADER>
 <BODY>
 <DESC>
-<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${companyVar}</STATICVARIABLES>
 <TDL>
 <TDLMESSAGE>
 <COLLECTION NAME="PartyBal" ISMODIFY="No">
 <TYPE>Ledger</TYPE>
 <CHILDOF>Sundry Debtors</CHILDOF>
-<FETCH>NAME,CLOSINGBALANCE</FETCH>
+<BELONGSTO>Yes</BELONGSTO>
+<FETCH>NAME,PARENT,CLOSINGBALANCE</FETCH>
 </COLLECTION>
 </TDLMESSAGE>
 </TDL>
@@ -429,8 +506,11 @@ class TallyConnector {
 </ENVELOPE>`;
 
     try {
+      console.log(`[PartyBal] Fetching from ${targetCompany || this.companyName || 'default'}...`);
       const response = await this.sendRequest(xml);
-      return this.parsePartyBalances(response);
+      const result = this.parsePartyBalances(response);
+      console.log(`[PartyBal] Got ${result.length} parties from ${targetCompany || this.companyName || 'default'}`);
+      return result;
     } catch (error) {
       console.error('Error fetching party balances:', error.message);
       return [];
@@ -451,7 +531,8 @@ class TallyConnector {
       ledgers = Array.isArray(ledgers) ? ledgers : [ledgers];
 
       return ledgers.map(l => ({
-        name: l.NAME?._ || l.NAME || '',
+        name: l.$?.NAME || l.NAME?._ || l.NAME || '',
+        parent: l.PARENT?._ || l.PARENT || '',
         balance: parseFloat(String(l.CLOSINGBALANCE?._ || l.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0
       }));
     } catch (error) {
@@ -975,8 +1056,10 @@ ${inventoryXml}
     const {
       partyName,
       voucherType = 'Dashboard Receipt',
+      voucherNumber = null,
       date = null,
       narration = 'Receipt via Dashboard',
+      company = null,
       paymentModes = {
         cashTeller1: 0,
         cashTeller2: 0,
@@ -992,7 +1075,7 @@ ${inventoryXml}
     const safePartyName = this.escapeXml(partyName);
     const safeVoucherType = this.escapeXml(voucherType);
     const safeNarration = this.escapeXml(narration);
-    const companyVar = this.companyName ? `<SVCURRENTCOMPANY>${this.escapeXml(this.companyName)}</SVCURRENTCOMPANY>` : '';
+    const companyVar = this.getCompanyVar(company);
 
     // Calculate total from payment modes
     const totalAmount =
@@ -1079,7 +1162,7 @@ ${inventoryXml}
 <TALLYMESSAGE xmlns:UDF="TallyUDF">
 <VOUCHER VCHTYPE="${safeVoucherType}" ACTION="Create">
 <DATE>${receiptDate}</DATE>
-<VOUCHERTYPENAME>${safeVoucherType}</VOUCHERTYPENAME>
+<VOUCHERTYPENAME>${safeVoucherType}</VOUCHERTYPENAME>${voucherNumber ? `\n<VOUCHERNUMBER>${this.escapeXml(voucherNumber)}</VOUCHERNUMBER>` : ''}
 <NARRATION>${safeNarration}</NARRATION>
 <PARTYLEDGERNAME>${safePartyName}</PARTYLEDGERNAME>
 <UDF:VCHNarr_AIARSM_SFL1.LIST><UDF:VCHNarr_AIARSM_SFL1>${paymentModes.cashTeller1 || 0}</UDF:VCHNarr_AIARSM_SFL1></UDF:VCHNarr_AIARSM_SFL1.LIST>
@@ -2005,7 +2088,8 @@ ${companyVar ? `<STATICVARIABLES>${companyVar}</STATICVARIABLES>` : ''}
    * @param {string} chequeData.narration - Narration/notes
    * @param {string} targetCompany - Target Tally company name (default: Cheque Management Company)
    */
-  async createChequeReceipt(chequeData, targetCompany = 'ODBC CHq Mgmt') {
+  async createChequeReceipt(chequeData, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const {
       partyName,
       amount,
@@ -2087,7 +2171,8 @@ ${companyVar ? `<STATICVARIABLES>${companyVar}</STATICVARIABLES>` : ''}
    * Create Post-Dated Cheque (PDC) entry in Tally
    * PDC entries use a special ledger for tracking before deposit date
    */
-  async createPDCEntry(chequeData, targetCompany = 'ODBC CHq Mgmt') {
+  async createPDCEntry(chequeData, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const {
       partyName,
       amount,
@@ -2260,7 +2345,9 @@ ${companyVar}
    * - Cheque Receipt (For DB): balance > 0 = cheques not yet posted to ODBC
    * - Cheque Management (For DB) vs Counter Sales (ODBC CHq Mgmt): must match
    */
-  async getChequeReconBalances(billingCompany = 'For DB', chequeCompany = 'ODBC CHq Mgmt') {
+  async getChequeReconBalances(billingCompany, chequeCompany) {
+    billingCompany = billingCompany || this.companyName || 'For DB';
+    chequeCompany = chequeCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     try {
       const [chequeReceipt, chequeManagement, counterSales] = await Promise.all([
         this.getLedgerBalance('Cheque Receipt', billingCompany),
@@ -2440,7 +2527,8 @@ ${batch.join('\n')}
    * Fetch all cheques from ODBC Cheque Management company
    * Pulls Sales Vouchers with Bill Allocations and Bank Allocations
    */
-  async getODBCCheques(targetCompany = 'ODBC CHq Mgmt') {
+  async getODBCCheques(targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
 
     const xml = `<ENVELOPE>
@@ -2455,7 +2543,7 @@ ${companyVar}
 <TDLMESSAGE>
 <COLLECTION NAME="ODBCVch" ISMODIFY="No">
 <TYPE>Voucher</TYPE>
-<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,MASTERID,ALTERID,GUID,ALLLEDGERENTRIES.LIST,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.NAME,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLTYPE,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.AMOUNT,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLDATE,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLCREDITPERIOD</FETCH>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,MASTERID,ALTERID,GUID,ALTEREDDATE,PRIORDATE,VCHSTATUSDATE,UPDATEDDATETIME,OBJECTUPDATEACTION,ENTEREDBY,ALLLEDGERENTRIES.LIST,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.NAME,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLTYPE,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.AMOUNT,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLDATE,ALLLEDGERENTRIES.LIST.BILLALLOCATIONS.LIST.BILLCREDITPERIOD</FETCH>
 </COLLECTION>
 </TDLMESSAGE>
 </TDL>
@@ -2477,7 +2565,8 @@ ${companyVar}
    * Fetch today's cheque receipt vouchers from billing company
    * Returns vouchers where "Cheque Receipt" ledger appears in entries
    */
-  async getChequeReceiptVouchers(date = null, billingCompany = 'For DB') {
+  async getChequeReceiptVouchers(date = null, billingCompany) {
+    billingCompany = billingCompany || this.companyName || 'For DB';
     const voucherDate = date || this.formatDate(new Date());
     const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(billingCompany)}</SVCURRENTCOMPANY>`;
 
@@ -2575,7 +2664,8 @@ ${companyVar}
    * Create Sales Voucher in ODBC CHq Mgmt with multiple cheque lines
    * Each cheque line becomes a bank entry with bill allocation + bank allocation
    */
-  async createODBCSalesVoucher(data, targetCompany = 'ODBC CHq Mgmt') {
+  async createODBCSalesVoucher(data, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const {
       partyName,
       chequeLines,
@@ -2589,42 +2679,51 @@ ${companyVar}
     const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
     const totalAmount = chequeLines.reduce((s, c) => s + Math.abs(parseFloat(c.amount) || 0), 0);
 
-    // Build bill allocations XML (one per cheque, all under party ledger entry)
-    // Bill Name format: "chequeNumber/bankShortName" (account holder stored in narration)
-    console.log('Cheque lines received:', JSON.stringify(chequeLines.map(c => ({ chequeNumber: c.chequeNumber, chequeDate: c.chequeDate, amount: c.amount, bankName: c.bankName, accountHolderName: c.accountHolderName }))));
-    const billAllocationsXml = chequeLines.map(c => {
+    // Helper: build bill allocation XML for a cheque line
+    const buildBillAlloc = (c) => {
       const amt = Math.abs(parseFloat(c.amount) || 0);
       const chqNum = (c.chequeNumber || '').trim();
       const bankShort = (c.bankName || '').trim();
       const billName = this.escapeXml(bankShort ? `${chqNum}/${bankShort}` : chqNum);
-
-      // Format cheque date as Tally Due Date with TYPE and JD attributes
-      // Tally requires TYPE="Due Date" and JD (Julian Day) for BILLCREDITPERIOD to work
       let dueDateTag = '';
       if (c.chequeDate) {
         const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        // Handle both YYYYMMDD and YYYY-MM-DD formats
         let dateStr = String(c.chequeDate);
-        if (/^\d{8}$/.test(dateStr)) {
-          dateStr = `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
-        }
+        if (/^\d{8}$/.test(dateStr)) dateStr = `${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`;
         const cd = new Date(dateStr);
         if (!isNaN(cd.getTime())) {
           const tallyDate = `${cd.getDate()}-${months[cd.getMonth()]}-${cd.getFullYear()}`;
-          // Tally JD = serial date (days since Dec 31, 1899)
           const tallyEpoch = new Date('1899-12-31T00:00:00Z');
           const jd = Math.floor((cd.getTime() - tallyEpoch.getTime()) / 86400000);
           dueDateTag = `<BILLCREDITPERIOD TYPE="Due Date" JD="${jd}">${tallyDate}</BILLCREDITPERIOD>`;
         }
       }
+      return `<BILLALLOCATIONS.LIST>\n<NAME>${billName}</NAME>\n<BILLTYPE>New Ref</BILLTYPE>\n${dueDateTag}\n<AMOUNT>-${amt}</AMOUNT>\n</BILLALLOCATIONS.LIST>`;
+    };
 
-      console.log(`  Bill "${billName}": chequeDate="${c.chequeDate}" -> dueDateTag="${dueDateTag}"`);
-      return `<BILLALLOCATIONS.LIST>
-<NAME>${billName}</NAME>
-<BILLTYPE>New Ref</BILLTYPE>
-${dueDateTag}
-<AMOUNT>-${amt}</AMOUNT>
-</BILLALLOCATIONS.LIST>`;
+    // Group cheque lines by effective party (partyOverride or main partyName)
+    const partyGroups = {};
+    for (const c of chequeLines) {
+      const effectiveParty = (c.partyOverride && c.partyOverride.trim()) || partyName;
+      if (!partyGroups[effectiveParty]) partyGroups[effectiveParty] = [];
+      partyGroups[effectiveParty].push(c);
+    }
+
+    const partyNames = Object.keys(partyGroups);
+    const isMultiParty = partyNames.length > 1;
+    console.log(`Cheque post: ${chequeLines.length} lines, ${partyNames.length} parties${isMultiParty ? ` (${partyNames.join(', ')})` : ''}`);
+
+    // Build ledger entries XML — one ALLLEDGERENTRIES.LIST per party
+    const partyEntriesXml = partyNames.map(pn => {
+      const lines = partyGroups[pn];
+      const partyTotal = lines.reduce((s, c) => s + Math.abs(parseFloat(c.amount) || 0), 0);
+      const billAllocsXml = lines.map(buildBillAlloc).join('\n');
+      return `<ALLLEDGERENTRIES.LIST>
+<LEDGERNAME>${this.escapeXml(pn)}</LEDGERNAME>
+<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+<AMOUNT>-${partyTotal.toFixed(2)}</AMOUNT>
+${billAllocsXml}
+</ALLLEDGERENTRIES.LIST>`;
     }).join('\n');
 
     const xml = `<ENVELOPE>
@@ -2639,12 +2738,7 @@ ${dueDateTag}
 <PARTYLEDGERNAME>${safeParty}</PARTYLEDGERNAME>
 ${voucherNumber ? `<VOUCHERNUMBER>${this.escapeXml(voucherNumber)}</VOUCHERNUMBER>` : ''}
 <NARRATION>${safeNarration}</NARRATION>
-<ALLLEDGERENTRIES.LIST>
-<LEDGERNAME>${safeParty}</LEDGERNAME>
-<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-<AMOUNT>-${totalAmount.toFixed(2)}</AMOUNT>
-${billAllocationsXml}
-</ALLLEDGERENTRIES.LIST>
+${partyEntriesXml}
 <ALLLEDGERENTRIES.LIST>
 <LEDGERNAME>Counter Sales Account</LEDGERNAME>
 <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
@@ -2680,7 +2774,8 @@ ${billAllocationsXml}
    * Get a single ODBC voucher detail by MASTERID (live from Tally)
    * Returns bill allocations with cheque details
    */
-  async getODBCVoucherDetail(masterId, targetCompany = 'ODBC CHq Mgmt') {
+  async getODBCVoucherDetail(masterId, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
     const xml = `<ENVELOPE>
 <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>ODBCVchDetail</ID></HEADER>
@@ -2796,7 +2891,8 @@ ${companyVar}
    * @param {string} data.date - Voucher date (YYYYMMDD)
    * @param {string} targetCompany - Billing company name
    */
-  async createChequeJournal(data, targetCompany = 'For DB') {
+  async createChequeJournal(data, targetCompany) {
+    targetCompany = targetCompany || this.companyName || 'For DB';
     const {
       totalAmount,
       chequeCount = 0,
@@ -2968,7 +3064,12 @@ ${companyVar}
           ledgerEntries,
           masterId,
           alterId,
-          guid
+          guid,
+          alteredDate: str(vch.ALTEREDDATE),
+          priorDate: str(vch.PRIORDATE),
+          updatedDateTime: str(vch.UPDATEDDATETIME),
+          objectUpdateAction: str(vch.OBJECTUPDATEACTION),
+          enteredBy: str(vch.ENTEREDBY)
         });
       }
 
@@ -2985,7 +3086,8 @@ ${companyVar}
    * Gets all outstanding (unsettled) bills from Sales vouchers = cheques not yet collected
    * Each bill = one cheque with NAME format "chequeNumber, bankName, accountHolder"
    */
-  async getODBCChequeReceivable(targetCompany = 'ODBC CHq Mgmt') {
+  async getODBCChequeReceivable(targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const companyVar = `<SVCURRENTCOMPANY>${this.escapeXml(targetCompany)}</SVCURRENTCOMPANY>`;
 
     // Use Tally's Bill collection to get outstanding bills under Sundry Debtors
@@ -3096,7 +3198,8 @@ ${companyVar}
    * This gives us BILLPARTY + BILLREF + BILLCL in a flat format
    * Returns: [{ partyName, bills: [{ billName, billDate, closingBalance, dueDate, overdueDays }] }]
    */
-  async getOutstandingBillsReport(targetCompany = 'ODBC CHq Mgmt') {
+  async getOutstandingBillsReport(targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const xml = `<ENVELOPE>
 <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
 <BODY><EXPORTDATA>
@@ -3181,7 +3284,8 @@ ${companyVar}
    * Create a new ledger (party) in target company if it doesn't exist
    * Used to sync parties between main company and cheque management company
    */
-  async createLedgerInCompany(ledgerData, targetCompany = 'ODBC CHq Mgmt') {
+  async createLedgerInCompany(ledgerData, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const {
       name,
       parentGroup = 'Sundry Debtors',
@@ -3233,7 +3337,8 @@ ${safeGstin ? `<GSTIN>${safeGstin}</GSTIN>` : ''}
    * DR: Staff tracking ledger (e.g., "Cash By MINI Gurung")
    * CR: Each collected party with bill allocation
    */
-  async createCollectionReceipt(data, targetCompany = 'ODBC CHq Mgmt') {
+  async createCollectionReceipt(data, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const {
       staffLedger,
       collectedItems,  // [{ partyName, amount, chequeNumber, chequeDate, bankName, billRef }]
@@ -3307,7 +3412,8 @@ ${partyEntries}
    * 2. Check/create each party ledger (under Sundry Debtors)
    * 3. Create the multi-party Receipt
    */
-  async pushCollectionReceipt(data, targetCompany = 'ODBC CHq Mgmt') {
+  async pushCollectionReceipt(data, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const { staffLedger, collectedItems } = data;
 
     try {
@@ -3347,7 +3453,8 @@ ${partyEntries}
    * 2. Creating party if needed
    * 3. Creating the cheque receipt/PDC entry
    */
-  async pushChequeToCompany(chequeData, targetCompany = 'ODBC CHq Mgmt') {
+  async pushChequeToCompany(chequeData, targetCompany) {
+    targetCompany = targetCompany || this.odbcCompanyName || 'ODBC CHq Mgmt';
     const { partyName, chequeDate } = chequeData;
 
     try {
@@ -4973,6 +5080,406 @@ ${companyVar}
     } catch (error) {
       console.error('Error fetching voucher raw XML:', error.message);
       throw error;
+    }
+  }
+
+  /**
+   * Fetch ALL account groups from Tally with parent info
+   */
+  async getAllGroups(companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllGroups</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${companyVar}</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="AllGroups">
+<TYPE>Group</TYPE>
+<FETCH>NAME, PARENT</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+      let groups = collection.GROUP;
+      if (!groups) return [];
+      if (!Array.isArray(groups)) groups = [groups];
+
+      // Build hierarchy map
+      const groupMap = {};
+      const result = groups.map(g => {
+        const name = (g.$?.NAME || g.NAME?._ || g.NAME || '').trim();
+        const parent = (g.PARENT?._ || g.PARENT || '').trim();
+        groupMap[name] = parent;
+        return { name, parent };
+      });
+
+      // Compute full hierarchy path for each group
+      function getHierarchy(groupName) {
+        const path = [groupName];
+        let current = groupName;
+        let depth = 0;
+        while (groupMap[current] && depth < 10) {
+          current = groupMap[current];
+          path.push(current);
+          depth++;
+        }
+        return path.join(' → ');
+      }
+
+      return result.map(g => ({
+        ...g,
+        hierarchy_path: getHierarchy(g.name)
+      }));
+    } catch (error) {
+      console.error('Error fetching all groups:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch ALL ledgers with closing balance, opening balance, and parent group
+   */
+  async getAllLedgersWithBalances(companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const xml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>AllLedgers</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${companyVar}</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="AllLedgers">
+<TYPE>Ledger</TYPE>
+<FETCH>NAME, PARENT, CLOSINGBALANCE, OPENINGBALANCE</FETCH>
+</COLLECTION>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const response = await this.sendRequest(xml);
+      const collection = response?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return [];
+      let ledgers = collection.LEDGER;
+      if (!ledgers) return [];
+      if (!Array.isArray(ledgers)) ledgers = [ledgers];
+
+      return ledgers.map(l => {
+        let name = '';
+        if (l.$?.NAME) name = l.$.NAME;
+        else if (l.NAME?._) name = l.NAME._;
+        else if (typeof l.NAME === 'string') name = l.NAME;
+
+        const closingBal = parseFloat(String(l.CLOSINGBALANCE?._ || l.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+        const openingBal = parseFloat(String(l.OPENINGBALANCE?._ || l.OPENINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+        const parent = (l.PARENT?._ || l.PARENT || '').trim();
+
+        return {
+          name: String(name).trim(),
+          parent,
+          closing_balance: closingBal,
+          opening_balance: openingBal,
+          dr_cr: closingBal >= 0 ? 'Dr' : 'Cr'
+        };
+      }).filter(l => l.name);
+    } catch (error) {
+      console.error('Error fetching all ledgers:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch detailed info for a single ledger: master data + bill allocations + recent vouchers
+   */
+  async getLedgerDetail(ledgerName, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const escapedName = this.escapeXml(ledgerName);
+
+    // 1. Fetch ledger master with bill allocations
+    const masterXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerDetail</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${companyVar}</STATICVARIABLES>
+<TDL>
+<TDLMESSAGE>
+<COLLECTION NAME="LedgerDetail">
+<TYPE>Ledger</TYPE>
+<FILTER>NameFilter</FILTER>
+<FETCH>NAME, PARENT, OPENINGBALANCE, CLOSINGBALANCE, ADDRESS, STATENAME, PINCODE, COUNTRYNAME, LEDGERCONTACT, LEDGERPHONE, LEDGERFAX, EMAIL, WEBSITE, INCOMETAXNUMBER, GSTIN, GSTREGISTRATIONTYPE, CREDITLIMIT, CREDITDAYS, BILLALLOCATIONS.LIST, BILLALLOCATIONS.LIST.NAME, BILLALLOCATIONS.LIST.BILLDATE, BILLALLOCATIONS.LIST.OPENINGBALANCE, BILLALLOCATIONS.LIST.CLOSINGBALANCE, BILLALLOCATIONS.LIST.BILLCREDITPERIOD</FETCH>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="NameFilter">$NAME = "${escapedName}"</SYSTEM>
+</TDLMESSAGE>
+</TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      const masterResp = await this.sendRequest(masterXml);
+      const collection = masterResp?.ENVELOPE?.BODY?.DATA?.COLLECTION;
+      if (!collection) return null;
+
+      let ledger = collection.LEDGER;
+      if (Array.isArray(ledger)) ledger = ledger[0];
+      if (!ledger) return null;
+
+      const getName = (obj) => obj?.$?.NAME || obj?.NAME?._ || obj?.NAME || obj?._ || (typeof obj === 'string' ? obj : '');
+      const getVal = (obj) => obj?._ || obj || '';
+      const parseNum = (v) => parseFloat(String(getVal(v)).replace(/[^\d.-]/g, '')) || 0;
+
+      // Parse address (can be multi-line)
+      let address = '';
+      const addr = ledger.ADDRESS;
+      if (addr) {
+        if (Array.isArray(addr)) address = addr.map(a => getVal(a)).join(', ');
+        else address = getVal(addr);
+      }
+
+      // Parse bill allocations - check both nested BILLALLOCATIONS.LIST and flat BILL in collection
+      let bills = [];
+      // Method 1: nested in ledger object
+      let billAllocs = ledger['BILLALLOCATIONS.LIST'];
+      if (billAllocs && typeof billAllocs === 'string' && !billAllocs.trim()) billAllocs = null;
+      if (billAllocs) {
+        if (!Array.isArray(billAllocs)) billAllocs = [billAllocs];
+        bills = billAllocs.map(b => {
+          if (typeof b === 'string') return null;
+          const billName = getVal(b.NAME);
+          const billDate = getVal(b.BILLDATE);
+          const closBal = parseNum(b.CLOSINGBALANCE);
+          const openBal = parseNum(b.OPENINGBALANCE);
+          const creditPeriod = getVal(b.BILLCREDITPERIOD);
+          return {
+            name: billName,
+            date: billDate,
+            opening_balance: openBal,
+            closing_balance: closBal,
+            abs_balance: Math.abs(closBal),
+            balance_type: closBal >= 0 ? 'Dr' : 'Cr',
+            credit_period: creditPeriod
+          };
+        }).filter(b => b && b.name);
+      }
+      // Method 2: flat BILL objects in collection (Tally sometimes returns this format)
+      if (bills.length === 0 && collection.BILL) {
+        let flatBills = collection.BILL;
+        if (!Array.isArray(flatBills)) flatBills = [flatBills];
+        bills = flatBills.map(b => {
+          if (typeof b === 'string') return null;
+          const billName = b.$?.NAME || getVal(b.NAME);
+          const billDate = getVal(b.BILLDATE || b.DATE);
+          const closBal = parseNum(b.CLOSINGBALANCE);
+          const creditPeriod = getVal(b.BILLCREDITPERIOD);
+          return {
+            name: billName,
+            date: billDate,
+            opening_balance: 0,
+            closing_balance: closBal,
+            abs_balance: Math.abs(closBal),
+            balance_type: closBal >= 0 ? 'Dr' : 'Cr',
+            credit_period: creditPeriod
+          };
+        }).filter(b => b && b.name);
+      }
+
+      const closingBal = parseNum(ledger.CLOSINGBALANCE);
+      const openingBal = parseNum(ledger.OPENINGBALANCE);
+
+      // Extract aliases from LANGUAGENAME.LIST (often has phone + contact person)
+      let aliases = [];
+      const langList = ledger['LANGUAGENAME.LIST'];
+      if (langList) {
+        const nameList = langList['NAME.LIST'];
+        const names = nameList?.NAME;
+        if (Array.isArray(names)) {
+          aliases = names.map(n => getVal(n)).filter(Boolean);
+        }
+      }
+
+      // Use aliases as fallback for phone/contact
+      let phone = getVal(ledger.LEDGERPHONE);
+      let contact = getVal(ledger.LEDGERCONTACT);
+      if (!phone && aliases.length > 1) {
+        // Second alias is often the phone number
+        const maybePhone = aliases[1];
+        if (/^\d{10,}$/.test(maybePhone)) phone = maybePhone;
+      }
+      if (!contact && aliases.length > 2) {
+        contact = aliases[2]; // Third alias is often the contact person
+      }
+
+      return {
+        name: getName(ledger),
+        parent: getVal(ledger.PARENT),
+        closing_balance: closingBal,
+        opening_balance: openingBal,
+        abs_balance: Math.abs(closingBal),
+        balance_type: closingBal >= 0 ? 'Dr' : 'Cr',
+        address,
+        state: getVal(ledger.STATENAME),
+        pincode: getVal(ledger.PINCODE),
+        country: getVal(ledger.COUNTRYNAME),
+        contact,
+        phone,
+        fax: getVal(ledger.LEDGERFAX),
+        email: getVal(ledger.EMAIL),
+        website: getVal(ledger.WEBSITE),
+        pan: getVal(ledger.INCOMETAXNUMBER),
+        gstin: getVal(ledger.GSTIN),
+        gst_type: getVal(ledger.GSTREGISTRATIONTYPE),
+        credit_limit: parseNum(ledger.CREDITLIMIT),
+        credit_days: parseNum(ledger.CREDITDAYS),
+        aliases,
+        bills,
+        bill_count: bills.length,
+        total_outstanding: bills.reduce((s, b) => s + b.closing_balance, 0)
+      };
+    } catch (error) {
+      console.error('Error fetching ledger detail:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Get Ledger Account View — like Tally's ledger view
+   * Returns opening balance, all transactions with running balance, closing balance
+   */
+  async getLedgerAccountView(ledgerName, fromDate = null, toDate = null, companyOverride = null) {
+    const companyVar = this.getCompanyVar(companyOverride);
+    const escapedName = this.escapeXml(ledgerName);
+    const dateVars = fromDate && toDate
+      ? `<SVFROMDATE>${fromDate}</SVFROMDATE><SVTODATE>${toDate}</SVTODATE>`
+      : '';
+
+    // 1. Fetch opening + closing balance
+    const balXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerBal</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${companyVar}${dateVars}</STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="LedgerBal"><TYPE>Ledger</TYPE><FILTER>LBNameFilter</FILTER>
+<FETCH>NAME,PARENT,OPENINGBALANCE,CLOSINGBALANCE</FETCH>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="LBNameFilter">$NAME = "${escapedName}"</SYSTEM>
+</TDLMESSAGE></TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    // 2. Fetch all vouchers for this ledger
+    const vchXml = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerVch</ID></HEADER>
+<BODY>
+<DESC>
+<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>${companyVar}${dateVars}</STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="LedgerVch" ISMODIFY="No">
+<TYPE>Voucher</TYPE>
+<FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,PARTYLEDGERNAME,AMOUNT,NARRATION,GUID,MASTERID,ALLLEDGERENTRIES.LIST.LEDGERNAME,ALLLEDGERENTRIES.LIST.AMOUNT,ALLLEDGERENTRIES.LIST.ISDEEMEDPOSITIVE</FETCH>
+<FILTER>LVPartyFilter,LVNotCancelled</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="LVPartyFilter">$PARTYLEDGERNAME = "${escapedName}"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="LVNotCancelled">NOT $ISCANCELLED</SYSTEM>
+</TDLMESSAGE></TDL>
+</DESC>
+</BODY>
+</ENVELOPE>`;
+
+    try {
+      // Fetch both in parallel
+      const [balRes, vchRes] = await Promise.all([
+        this.sendRequest(balXml),
+        this.sendRequest(vchXml)
+      ]);
+
+      // Parse balance
+      const ledger = balRes?.ENVELOPE?.BODY?.DATA?.COLLECTION?.LEDGER;
+      const openingBalance = parseFloat(String(ledger?.OPENINGBALANCE?._ || ledger?.OPENINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+      const closingBalance = parseFloat(String(ledger?.CLOSINGBALANCE?._ || ledger?.CLOSINGBALANCE || '0').replace(/[^\d.-]/g, '')) || 0;
+      const parent = ledger?.PARENT?._ || ledger?.PARENT || '';
+
+      // Parse vouchers
+      let vouchers = vchRes?.ENVELOPE?.BODY?.DATA?.COLLECTION?.VOUCHER;
+      if (!vouchers) vouchers = [];
+      if (!Array.isArray(vouchers)) vouchers = [vouchers];
+
+      // Build transactions with running balance
+      let runningBalance = openingBalance;
+      const transactions = [];
+
+      for (const v of vouchers) {
+        const date = v.DATE?._ || v.DATE || '';
+        const voucherType = v.VOUCHERTYPENAME?._ || v.VOUCHERTYPENAME || '';
+        const voucherNumber = v.VOUCHERNUMBER?._ || v.VOUCHERNUMBER || '';
+        const narration = v.NARRATION?._ || '';
+        const guid = v.GUID?._ || v.GUID || '';
+        const masterId = String(v.MASTERID?._ || v.MASTERID || '').trim();
+
+        // Find the amount for THIS ledger from ALLLEDGERENTRIES.LIST
+        let entries = v['ALLLEDGERENTRIES.LIST'];
+        if (!entries) entries = [];
+        if (!Array.isArray(entries)) entries = [entries];
+
+        let ledgerAmount = 0;
+        const particulars = [];
+
+        for (const e of entries) {
+          const eName = e.LEDGERNAME?._ || e.LEDGERNAME || '';
+          const eAmt = parseFloat(String(e.AMOUNT?._ || e.AMOUNT || '0').replace(/[^\d.-]/g, '')) || 0;
+
+          if (eName.toLowerCase() === ledgerName.toLowerCase()) {
+            ledgerAmount = eAmt;
+          } else if (eAmt !== 0) {
+            particulars.push(eName);
+          }
+        }
+
+        // In Tally: negative amount in ledger entry = Debit for party (Dr)
+        // positive amount = Credit for party (Cr)
+        // For Sundry Debtors: Dr = sale (increases balance), Cr = receipt (decreases balance)
+        const debit = ledgerAmount < 0 ? Math.abs(ledgerAmount) : 0;
+        const credit = ledgerAmount > 0 ? ledgerAmount : 0;
+
+        runningBalance += (debit - credit);
+
+        transactions.push({
+          date,
+          voucherType,
+          voucherNumber,
+          particulars: particulars.join(', ') || voucherType,
+          narration,
+          debit,
+          credit,
+          runningBalance,
+          guid,
+          masterId
+        });
+      }
+
+      return {
+        ledgerName,
+        parent,
+        openingBalance,
+        closingBalance,
+        transactionCount: transactions.length,
+        transactions
+      };
+    } catch (error) {
+      console.error('Error fetching ledger account view:', error.message);
+      return null;
     }
   }
 }

@@ -1,7 +1,7 @@
 // Configuration for Tally Dashboard Server
-// Load dotenv here to ensure it runs before config is used
+// Load dotenv — supports ENV_FILE for live mode: ENV_FILE=.env.live node src/index.js
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ path: process.env.ENV_FILE || '.env' });
 
 export const config = {
   // Server settings
@@ -14,7 +14,8 @@ export const config = {
   tally: {
     host: process.env.TALLY_HOST || 'localhost',
     port: parseInt(process.env.TALLY_PORT) || 9000,
-    companyName: process.env.TALLY_COMPANY || '',  // Set your company name
+    companyName: process.env.TALLY_COMPANY || '',  // Billing company name
+    odbcCompanyName: process.env.ODBC_COMPANY || '',  // Cheque/ODBC company name
     syncInterval: parseInt(process.env.SYNC_INTERVAL) || 120000  // Poll every 2 minutes (gentle on Tally)
   },
 

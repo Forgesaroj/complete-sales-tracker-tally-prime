@@ -21,6 +21,7 @@ import { db } from './services/database/database.js';
 import { syncService } from './services/sync/syncService.js';
 import { fonepayService } from './services/payment/fonepayService.js';
 import { rbbService } from './services/payment/rbbService.js';
+import { whatsappService } from './services/whatsapp/whatsappService.js';
 import apiRoutes from './routes/index.js';
 import { tallyConnector } from './services/tally/tallyConnector.js';
 import { createMcpServer } from './services/mcp/mcpServer.js';
@@ -214,6 +215,15 @@ async function start() {
     console.log('  Set RBB_USERNAME and RBB_PASSWORD in .env to enable');
   }
 
+  // Initialize WhatsApp service (non-blocking)
+  console.log('\n[6/6] Initializing WhatsApp service...');
+  whatsappService.setSocketIO(io);
+  whatsappService.initialize().then(() => {
+    console.log('✓ WhatsApp service connected');
+  }).catch(err => {
+    console.log(`⚠ WhatsApp not connected (${err.message}) — initialize from dashboard`);
+  });
+
   console.log('\n' + '═'.repeat(50));
   console.log('  Server ready!');
   console.log('═'.repeat(50) + '\n');
@@ -225,6 +235,7 @@ process.on('SIGINT', async () => {
   syncService.stop();
   await fonepayService.stop();
   await rbbService.stop();
+  await whatsappService.destroy();
   db.close();
   process.exit(0);
 });
@@ -234,6 +245,7 @@ process.on('SIGTERM', async () => {
   syncService.stop();
   await fonepayService.stop();
   await rbbService.stop();
+  await whatsappService.destroy();
   db.close();
   process.exit(0);
 });

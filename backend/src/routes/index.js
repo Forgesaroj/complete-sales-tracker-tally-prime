@@ -54,6 +54,10 @@ import voucherLockRoutes from './voucher-lock.js';
 import chatRoutes from './chat.js';
 import collectionRoutes from './collection.js';
 import bankNamesRoutes from './bank-names.js';
+import ledgerBothRoutes from './ledger-both.js';
+import dataCompletenessRoutes from './data-completeness.js';
+import eodReconRoutes from './eod-recon.js';
+import whatsappRoutes from './whatsapp.js';
 
 const router = Router();
 
@@ -94,6 +98,10 @@ router.use('/voucher-lock', voucherLockRoutes);
 router.use('/chat', chatRoutes);
 router.use('/collection', collectionRoutes);
 router.use('/bank-names', bankNamesRoutes);
+router.use('/ledger-both', ledgerBothRoutes);
+router.use('/data-completeness', dataCompletenessRoutes);
+router.use('/eod-recon', eodReconRoutes);
+router.use('/whatsapp', whatsappRoutes);
 
 // Frontend error logging endpoint
 import fs from 'fs';

@@ -95,7 +95,11 @@ class DatabaseService {
     const tallyTimestampMigrations = [
       'ALTER TABLE bills ADD COLUMN tally_created_date TEXT',
       'ALTER TABLE bills ADD COLUMN tally_altered_date TEXT',
-      'ALTER TABLE bills ADD COLUMN tally_entry_time TEXT'
+      'ALTER TABLE bills ADD COLUMN tally_entry_time TEXT',
+      'ALTER TABLE bills ADD COLUMN tally_created_datetime TEXT',
+      'ALTER TABLE bills ADD COLUMN tally_updated_datetime TEXT',
+      'ALTER TABLE bills ADD COLUMN object_update_action TEXT',
+      'ALTER TABLE bills ADD COLUMN entered_by TEXT'
     ];
     for (const sql of tallyTimestampMigrations) {
       try { this.db.exec(sql); } catch (e) { /* Column exists */ }
@@ -121,6 +125,21 @@ class DatabaseService {
     ];
     for (const sql of udfPaymentMigrations) {
       try { this.db.exec(sql); } catch (e) { /* Column exists */ }
+    }
+
+    // Add SFL1-7 columns for per-payment-mode breakdown (migration)
+    // SFL1=Cash Teller 1, SFL2=Cash Teller 2, SFL3=Cheque, SFL4=QR, SFL5=Discount, SFL6=Bank Deposit, SFL7=Esewa
+    const sflMigrations = [
+      'ALTER TABLE bills ADD COLUMN udf_sfl1 REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN udf_sfl2 REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN udf_sfl3 REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN udf_sfl4 REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN udf_sfl5 REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN udf_sfl6 REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN udf_sfl7 REAL DEFAULT 0',
+    ];
+    for (const sql of sflMigrations) {
+      try { this.db.exec(sql); } catch (e) { /* exists */ }
     }
 
     // Add critical_reason column (migration) - tracks WHY voucher was marked critical
@@ -155,6 +174,16 @@ class DatabaseService {
       try { this.db.exec(`ALTER TABLE bills ADD COLUMN ${col} REAL DEFAULT 0`); } catch (e) { /* exists */ }
     }
 
+    // Multi-party voucher support (migration)
+    const multiPartyMigrations = [
+      'ALTER TABLE bills ADD COLUMN total_amount REAL DEFAULT 0',
+      'ALTER TABLE bills ADD COLUMN extra_parties TEXT DEFAULT NULL',
+      'ALTER TABLE bills ADD COLUMN extra_parties_count INTEGER DEFAULT 0'
+    ];
+    for (const sql of multiPartyMigrations) {
+      try { this.db.exec(sql); } catch (e) { /* Column exists */ }
+    }
+
     // ==================== BILL ITEMS TABLE ====================
     // Stores inventory line items for each bill (cached from Tally)
     this.db.exec(`
@@ -183,6 +212,11 @@ class DatabaseService {
     // Add items_synced column to bills to track if items are cached
     try {
       this.db.exec('ALTER TABLE bills ADD COLUMN items_synced INTEGER DEFAULT 0');
+    } catch (e) { /* Column exists */ }
+
+    // Add ledger_entries JSON column (for daily dashboard ledger breakdown)
+    try {
+      this.db.exec("ALTER TABLE bills ADD COLUMN ledger_entries TEXT DEFAULT '[]'");
     } catch (e) { /* Column exists */ }
 
     // ==================== VOUCHER HISTORY SYSTEM ====================
@@ -416,6 +450,34 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_party_group_type ON parties(group_type);
     `);
 
+    // Add opening_balance column to parties (migration)
+    try { this.db.exec(`ALTER TABLE parties ADD COLUMN opening_balance REAL DEFAULT 0`); } catch (e) {}
+
+    // Account Groups table (Tally group hierarchy) - per company
+    // Migration: check if old schema has name UNIQUE (column-level) — must recreate
+    try {
+      const createSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='account_groups'").get();
+      if (createSql && createSql.sql && createSql.sql.includes('name TEXT UNIQUE')) {
+        this.db.exec(`DROP TABLE account_groups`);
+      }
+    } catch (e) {}
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS account_groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        parent TEXT,
+        hierarchy_path TEXT,
+        company TEXT NOT NULL DEFAULT 'FOR DB',
+        synced_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(name, company)
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_ag_name ON account_groups(name);
+      CREATE INDEX IF NOT EXISTS idx_ag_parent ON account_groups(parent);
+      CREATE INDEX IF NOT EXISTS idx_ag_company ON account_groups(company);
+    `);
+
     // Master sync state (separate from voucher sync)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS master_sync_state (
@@ -507,6 +569,7 @@ class DatabaseService {
         ('business_address', '', 'Business address line'),
         ('business_phone', '', 'Business phone number'),
         ('business_pan', '', 'Business PAN/VAT number'),
+        ('admin_whatsapp_phone', '', 'Admin WhatsApp number for notifications when party has no phone'),
         ('smtp_host', '', 'SMTP server hostname'),
         ('smtp_port', '587', 'SMTP server port'),
         ('smtp_secure', 'false', 'Use SSL/TLS (true for port 465)'),
@@ -518,8 +581,19 @@ class DatabaseService {
         ('voucher_lock_auto_time', '18:00', 'Time to auto-lock vouchers'),
         ('voucher_lock_last_action', '[]', 'Log of lock/unlock actions'),
         ('billing_company', 'For DB', 'Billing company name in Tally'),
-        ('odbc_company', 'ODBC CHq Mgmt', 'ODBC Cheque Management company name in Tally')
+        ('odbc_company', 'ODBC CHq Mgmt', 'ODBC Cheque Management company name in Tally'),
+        ('vt_collection_post', 'Dashboard Receipt', 'Voucher type for Collection Post receipts'),
+        ('vt_receipt_page', 'Dashboard Receipt', 'Voucher type for Receipt page'),
+        ('vt_cheque_post', 'Receipt', 'Voucher type for Cheque Post receipts')
     `);
+
+    // Override company names from env if provided (for live instance with different companies)
+    if (config.tally.companyName) {
+      this.db.prepare(`UPDATE app_settings SET value = ? WHERE key = 'billing_company'`).run(config.tally.companyName);
+    }
+    if (config.tally.odbcCompanyName) {
+      this.db.prepare(`UPDATE app_settings SET value = ? WHERE key = 'odbc_company'`).run(config.tally.odbcCompanyName);
+    }
 
     // Update existing setting if it was the old default
     this.db.exec(`
@@ -603,6 +677,17 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_fonepay_txn_voucher ON fonepay_transactions(voucher_number);
     `);
 
+    // Fonepay party phone mappings (initiator phone → party name)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS fonepay_party_phones (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL UNIQUE,
+        party_name TEXT NOT NULL COLLATE NOCASE,
+        source TEXT DEFAULT 'auto',
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+
     // Fonepay settlements
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS fonepay_settlements (
@@ -635,6 +720,18 @@ class DatabaseService {
     // Initialize fonepay sync state
     this.db.exec(`
       INSERT OR IGNORE INTO fonepay_sync_state (id, sync_status) VALUES (1, 'idle')
+    `);
+
+    // Fonepay adjustments (service charges, manual corrections)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS fonepay_adjustments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        amount REAL NOT NULL,
+        description TEXT DEFAULT 'Service Charge',
+        type TEXT DEFAULT 'charge',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
     `);
 
     // ==================== RBB SMART BANKING ====================
@@ -951,6 +1048,13 @@ class DatabaseService {
     // Migration: add guid and ledger_entries columns
     try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN guid TEXT DEFAULT ""'); } catch {}
     try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN ledger_entries TEXT DEFAULT "[]"'); } catch {}
+    // Migration: add timestamp columns (match billing company)
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN tally_created_datetime TEXT'); } catch {}
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN tally_updated_datetime TEXT'); } catch {}
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN object_update_action TEXT'); } catch {}
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN entered_by TEXT'); } catch {}
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN altered_date TEXT'); } catch {}
+    try { this.db.exec('ALTER TABLE odbc_vouchers ADD COLUMN prior_date TEXT'); } catch {}
 
     // ODBC Outstanding Bills (ledger-level bill allocations from Tally — reliable source of bill names)
     this.db.exec(`
@@ -1031,6 +1135,140 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_coll_items_cheque ON collection_batch_items(cheque_id);
       CREATE INDEX IF NOT EXISTS idx_coll_items_status ON collection_batch_items(status);
     `);
+
+    // Role permissions table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS role_permissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        page_key TEXT NOT NULL,
+        visible INTEGER DEFAULT 1,
+        UNIQUE(role, page_key)
+      )
+    `);
+
+    // Receipt book assignments (collection post)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS receipt_book_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        staff_name TEXT NOT NULL,
+        book_start INTEGER NOT NULL,
+        book_end INTEGER NOT NULL,
+        available_from INTEGER NOT NULL,
+        assigned_date TEXT NOT NULL,
+        status TEXT DEFAULT 'assigned',
+        route_name TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Migration: add route_name column if not exists
+    try { this.db.exec('ALTER TABLE receipt_book_assignments ADD COLUMN route_name TEXT'); } catch (e) { /* already exists */ }
+
+    // Collection post entries (receipt book data entry)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS collection_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        book_number TEXT NOT NULL,
+        receipt_number TEXT,
+        party_name TEXT NOT NULL,
+        cash REAL DEFAULT 0,
+        fonepay REAL DEFAULT 0,
+        cheque REAL DEFAULT 0,
+        bank_deposit REAL DEFAULT 0,
+        discount REAL DEFAULT 0,
+        total REAL NOT NULL,
+        staff_name TEXT,
+        assignment_id INTEGER,
+        tally_success INTEGER DEFAULT 0,
+        tally_error TEXT,
+        tally_master_id TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Migration: add tally_master_id column if not exists
+    try { this.db.exec('ALTER TABLE collection_posts ADD COLUMN tally_master_id TEXT'); } catch (e) { /* already exists */ }
+
+    // Migration: add book_id and cycle_number to collection_posts
+    try { this.db.exec('ALTER TABLE collection_posts ADD COLUMN book_id INTEGER'); } catch (e) { /* already exists */ }
+    try { this.db.exec('ALTER TABLE collection_posts ADD COLUMN cycle_number INTEGER DEFAULT 1'); } catch (e) { /* already exists */ }
+
+    // Receipt books (inventory with lifecycle tracking)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS receipt_books (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_number INTEGER NOT NULL,
+        book_label TEXT,
+        page_start INTEGER NOT NULL,
+        page_end INTEGER NOT NULL,
+        pages INTEGER NOT NULL,
+        numbering_mode TEXT DEFAULT 'sequential',
+        batch_id TEXT,
+        status TEXT DEFAULT 'inactive',
+        current_cycle INTEGER DEFAULT 0,
+        available_from INTEGER,
+        assigned_to TEXT,
+        assigned_date TEXT,
+        returned_date TEXT,
+        route_name TEXT,
+        notes TEXT,
+        summary_entry_count INTEGER,
+        summary_cash REAL,
+        summary_fonepay REAL,
+        summary_cheque REAL,
+        summary_bank_deposit REAL,
+        summary_discount REAL,
+        summary_total REAL,
+        summary_entered_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // WhatsApp contacts (party → phone mapping with manual override)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        party_name TEXT NOT NULL COLLATE NOCASE,
+        phone TEXT NOT NULL,
+        label TEXT DEFAULT 'primary',
+        is_verified INTEGER DEFAULT 0,
+        source TEXT DEFAULT 'manual',
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(party_name, phone)
+      )
+    `);
+
+    // WhatsApp message log
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS whatsapp_message_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL,
+        party_name TEXT,
+        direction TEXT DEFAULT 'outgoing',
+        message_type TEXT DEFAULT 'text',
+        template_name TEXT,
+        message_body TEXT,
+        status TEXT DEFAULT 'sent',
+        wa_message_id TEXT,
+        related_voucher TEXT,
+        error_message TEXT,
+        sent_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Seed default admin user if no users exist
+    const userCount = this.db.prepare('SELECT COUNT(*) as cnt FROM users').get();
+    if (userCount.cnt === 0) {
+      this.db.prepare(`
+        INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)
+      `).run('admin', 'admin', 'Administrator', 'admin');
+      console.log('[DB] Created default admin user (admin/admin)');
+    }
   }
 
   // ==================== BILLS ====================
@@ -1089,10 +1327,15 @@ class DatabaseService {
         tally_guid, tally_master_id, voucher_number, voucher_type,
         voucher_date, party_name, amount, narration, alter_id,
         tally_created_date, tally_altered_date, tally_entry_time,
+        tally_created_datetime, tally_updated_datetime,
+        object_update_action, entered_by,
         udf_payment_total, is_critical, critical_reason,
+        udf_sfl1, udf_sfl2, udf_sfl3, udf_sfl4, udf_sfl5, udf_sfl6, udf_sfl7,
         pay_cash, pay_qr, pay_cheque, pay_discount, pay_esewa, pay_bank_deposit,
+        total_amount, extra_parties, extra_parties_count,
+        ledger_entries,
         synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(tally_guid) DO UPDATE SET
         voucher_number = excluded.voucher_number,
         voucher_type = excluded.voucher_type,
@@ -1103,15 +1346,30 @@ class DatabaseService {
         alter_id = excluded.alter_id,
         tally_altered_date = excluded.tally_altered_date,
         tally_entry_time = excluded.tally_entry_time,
+        tally_updated_datetime = excluded.tally_updated_datetime,
+        tally_created_datetime = CASE WHEN bills.tally_created_datetime IS NULL OR bills.tally_created_datetime = '' THEN excluded.tally_created_datetime ELSE bills.tally_created_datetime END,
+        object_update_action = excluded.object_update_action,
+        entered_by = CASE WHEN bills.entered_by IS NULL OR bills.entered_by = '' THEN excluded.entered_by ELSE bills.entered_by END,
         udf_payment_total = excluded.udf_payment_total,
         is_critical = excluded.is_critical,
         critical_reason = excluded.critical_reason,
+        udf_sfl1 = excluded.udf_sfl1,
+        udf_sfl2 = excluded.udf_sfl2,
+        udf_sfl3 = excluded.udf_sfl3,
+        udf_sfl4 = excluded.udf_sfl4,
+        udf_sfl5 = excluded.udf_sfl5,
+        udf_sfl6 = excluded.udf_sfl6,
+        udf_sfl7 = excluded.udf_sfl7,
         pay_cash = excluded.pay_cash,
         pay_qr = excluded.pay_qr,
         pay_cheque = excluded.pay_cheque,
         pay_discount = excluded.pay_discount,
         pay_esewa = excluded.pay_esewa,
         pay_bank_deposit = excluded.pay_bank_deposit,
+        total_amount = excluded.total_amount,
+        extra_parties = excluded.extra_parties,
+        extra_parties_count = excluded.extra_parties_count,
+        ledger_entries = excluded.ledger_entries,
         synced_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     `);
@@ -1129,15 +1387,30 @@ class DatabaseService {
       bill.createdDate || bill.date,
       bill.alteredDate || null,
       bill.entryTime || null,
+      bill.updatedDateTime || null,   // tally_created_datetime (first insert only)
+      bill.updatedDateTime || null,   // tally_updated_datetime (always updated)
+      bill.objectUpdateAction || null,  // "Create" or "Resave"
+      bill.enteredBy || null,           // who created the voucher
       udfPaymentTotal,
       isCritical,
       criticalReason,
+      bill.udfSfl1 || 0,
+      bill.udfSfl2 || 0,
+      bill.udfSfl3 || 0,
+      bill.udfSfl4 || 0,
+      bill.udfSfl5 || 0,
+      bill.udfSfl6 || 0,
+      bill.udfSfl7 || 0,
       bill.payCash || 0,
       bill.payQr || 0,
       bill.payCheque || 0,
       bill.payDiscount || 0,
       bill.payEsewa || 0,
-      bill.payBankDeposit || 0
+      bill.payBankDeposit || 0,
+      bill.totalAmount || Math.abs(bill.amount),
+      bill.extraParties?.length ? JSON.stringify(bill.extraParties) : null,
+      bill.extraPartiesCount || 0,
+      JSON.stringify(bill.ledgerEntries || [])
     );
   }
 
@@ -1453,6 +1726,94 @@ class DatabaseService {
     const vouchers = this.db.prepare(sql).all(...params, limit, offset);
 
     return { vouchers, total };
+  }
+
+  /**
+   * Get vouchers from BOTH companies (bills + odbc_vouchers) with unified columns
+   * company filter: 'billing', 'odbc', or null/undefined for both
+   */
+  getAllVouchersCombined(options = {}) {
+    const { limit = 500, offset = 0, voucherType, dateFrom, dateTo, search, company } = options;
+
+    // Build WHERE clause for billing company (bills table)
+    const buildBillingWhere = () => {
+      let w = '';
+      const p = [];
+      w += ' AND (is_deleted = 0 OR is_deleted IS NULL)';
+      if (voucherType) { w += ' AND voucher_type = ?'; p.push(voucherType); }
+      if (dateFrom) { w += ' AND voucher_date >= ?'; p.push(dateFrom); }
+      if (dateTo) { w += ' AND voucher_date <= ?'; p.push(dateTo); }
+      if (search) {
+        w += ' AND (party_name LIKE ? OR voucher_number LIKE ? OR narration LIKE ?)';
+        const q = `%${search}%`; p.push(q, q, q);
+      }
+      return { w, p };
+    };
+
+    // Build WHERE clause for ODBC company (odbc_vouchers table)
+    const buildOdbcWhere = () => {
+      let w = '';
+      const p = [];
+      if (voucherType) { w += ' AND voucher_type = ?'; p.push(voucherType); }
+      if (dateFrom) { w += ' AND voucher_date >= ?'; p.push(dateFrom); }
+      if (dateTo) { w += ' AND voucher_date <= ?'; p.push(dateTo); }
+      if (search) {
+        w += ' AND (party_name LIKE ? OR voucher_number LIKE ? OR narration LIKE ?)';
+        const q = `%${search}%`; p.push(q, q, q);
+      }
+      return { w, p };
+    };
+
+    const showBilling = !company || company === 'billing';
+    const showOdbc = !company || company === 'odbc';
+
+    const parts = [];
+    const countParts = [];
+    const allParams = [];
+    const countParams = [];
+
+    if (showBilling) {
+      const { w, p } = buildBillingWhere();
+      parts.push(`SELECT id, tally_guid, tally_master_id, voucher_number, voucher_type, voucher_date, party_name, amount, narration, alter_id, audit_status, is_critical, critical_reason, udf_payment_total, tally_created_datetime, tally_updated_datetime, object_update_action, entered_by, 'FOR DB' as company FROM bills WHERE 1=1${w}`);
+      countParts.push(`SELECT COUNT(*) as cnt FROM bills WHERE 1=1${w}`);
+      allParams.push(...p);
+      countParams.push(...p);
+    }
+
+    if (showOdbc) {
+      const { w, p } = buildOdbcWhere();
+      parts.push(`SELECT id, guid as tally_guid, master_id as tally_master_id, voucher_number, voucher_type, voucher_date, party_name, amount, narration, CAST(alter_id AS INTEGER) as alter_id, NULL as audit_status, 0 as is_critical, NULL as critical_reason, 0 as udf_payment_total, tally_created_datetime, tally_updated_datetime, object_update_action, entered_by, '${(this.getSetting('odbc_company') || 'ODBC CHq Mgmt').replace(/'/g, "''")}' as company FROM odbc_vouchers WHERE 1=1${w}`);
+      countParts.push(`SELECT COUNT(*) as cnt FROM odbc_vouchers WHERE 1=1${w}`);
+      allParams.push(...p);
+      countParams.push(...p);
+    }
+
+    if (parts.length === 0) return { vouchers: [], total: 0 };
+
+    // Count total
+    let total = 0;
+    for (let i = 0; i < countParts.length; i++) {
+      // Need to rebuild params for each count query separately
+      total += this.db.prepare(countParts[i]).get(...(i === 0 ? (showBilling ? buildBillingWhere().p : buildOdbcWhere().p) : buildOdbcWhere().p)).cnt;
+    }
+
+    const unionSql = parts.join(' UNION ALL ') + ' ORDER BY voucher_date DESC, alter_id DESC LIMIT ? OFFSET ?';
+    const vouchers = this.db.prepare(unionSql).all(...allParams, limit, offset);
+
+    return { vouchers, total };
+  }
+
+  /**
+   * Get distinct voucher types from both companies
+   */
+  getCombinedVoucherTypes() {
+    const billing = this.db.prepare("SELECT DISTINCT voucher_type, COUNT(*) as count FROM bills WHERE (is_deleted = 0 OR is_deleted IS NULL) GROUP BY voucher_type ORDER BY voucher_type").all();
+    const odbc = this.db.prepare("SELECT DISTINCT voucher_type, COUNT(*) as count FROM odbc_vouchers WHERE voucher_type != '' GROUP BY voucher_type ORDER BY voucher_type").all();
+    // Merge types
+    const map = {};
+    for (const t of billing) { map[t.voucher_type] = (map[t.voucher_type] || 0) + t.count; }
+    for (const t of odbc) { map[t.voucher_type] = (map[t.voucher_type] || 0) + t.count; }
+    return Object.entries(map).map(([voucher_type, count]) => ({ voucher_type, count })).sort((a, b) => a.voucher_type.localeCompare(b.voucher_type));
   }
 
   /**
@@ -2022,7 +2383,9 @@ class DatabaseService {
         COUNT(CASE WHEN voucher_type = 'A Pto Bill' THEN 1 END) as apto_count,
         COUNT(CASE WHEN voucher_type = 'Debit Note' THEN 1 END) as debit_note_count,
         COUNT(CASE WHEN voucher_type IN ('Bank Receipt','Counter Receipt','Receipt','Dashboard Receipt') THEN 1 END) as receipt_only_count,
-        COUNT(CASE WHEN voucher_type = 'Credit Note' THEN 1 END) as credit_note_count
+        COUNT(CASE WHEN voucher_type = 'Credit Note' THEN 1 END) as credit_note_count,
+        SUM(COALESCE(extra_parties_count, 0)) as extra_parties_count,
+        GROUP_CONCAT(CASE WHEN extra_parties IS NOT NULL THEN extra_parties END) as all_extra_parties
       FROM bills
       WHERE voucher_date = ?
         AND (is_deleted = 0 OR is_deleted IS NULL)
@@ -2095,7 +2458,25 @@ class DatabaseService {
         is_critical: !!dup,
         is_mismatch: isMismatch,
         critical_reason: dup || null,
-        warnings
+        warnings,
+        extra_parties_count: r.extra_parties_count || 0,
+        extra_parties: (() => {
+          if (!r.all_extra_parties) return [];
+          try {
+            // all_extra_parties is GROUP_CONCAT of JSON arrays, e.g. '[{"name":"A","amount":100}],[{"name":"B","amount":200}]'
+            const parts = r.all_extra_parties.split('],[').map((p, i, arr) => {
+              if (arr.length === 1) return p;
+              if (i === 0) return p + ']';
+              if (i === arr.length - 1) return '[' + p;
+              return '[' + p + ']';
+            });
+            const merged = [];
+            for (const part of parts) {
+              try { merged.push(...JSON.parse(part)); } catch {}
+            }
+            return merged;
+          } catch { return []; }
+        })()
       };
     });
   }
@@ -2374,6 +2755,36 @@ class DatabaseService {
     `).run(token, userId);
   }
 
+  // ==================== ROLE PERMISSIONS ====================
+
+  getRolePermissions(role) {
+    return this.db.prepare('SELECT page_key, visible FROM role_permissions WHERE role = ?').all(role);
+  }
+
+  getAllRolePermissions() {
+    return this.db.prepare('SELECT role, page_key, visible FROM role_permissions ORDER BY role, page_key').all();
+  }
+
+  setRolePermission(role, pageKey, visible) {
+    return this.db.prepare(`
+      INSERT INTO role_permissions (role, page_key, visible) VALUES (?, ?, ?)
+      ON CONFLICT(role, page_key) DO UPDATE SET visible = excluded.visible
+    `).run(role, pageKey, visible ? 1 : 0);
+  }
+
+  bulkSetRolePermissions(role, permissions) {
+    const insert = this.db.prepare(`
+      INSERT INTO role_permissions (role, page_key, visible) VALUES (?, ?, ?)
+      ON CONFLICT(role, page_key) DO UPDATE SET visible = excluded.visible
+    `);
+    const txn = this.db.transaction((perms) => {
+      for (const p of perms) {
+        insert.run(role, p.pageKey, p.visible ? 1 : 0);
+      }
+    });
+    txn(permissions);
+  }
+
   // ==================== SYNC STATE ====================
 
   /**
@@ -2597,12 +3008,13 @@ class DatabaseService {
   upsertParty(party) {
     const stmt = this.db.prepare(`
       INSERT INTO parties (
-        name, parent, group_type, closing_balance, address, state, gstin, phone, email, alter_id, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        name, parent, group_type, closing_balance, opening_balance, address, state, gstin, phone, email, alter_id, synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(name) DO UPDATE SET
         parent = excluded.parent,
         group_type = excluded.group_type,
         closing_balance = excluded.closing_balance,
+        opening_balance = excluded.opening_balance,
         address = excluded.address,
         state = excluded.state,
         gstin = excluded.gstin,
@@ -2616,6 +3028,7 @@ class DatabaseService {
       party.parent || '',
       party.groupType || 'debtor',
       party.balance || 0,
+      party.openingBalance || 0,
       party.address || '',
       party.state || '',
       party.gstin || '',
@@ -2636,6 +3049,60 @@ class DatabaseService {
     });
     upsert(parties);
     return parties.length;
+  }
+
+  /**
+   * Sync account groups from Tally (per company)
+   */
+  syncAccountGroups(groups, company = 'FOR DB') {
+    const stmt = this.db.prepare(`
+      INSERT INTO account_groups (name, parent, hierarchy_path, company, synced_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(name, company) DO UPDATE SET
+        parent = excluded.parent,
+        hierarchy_path = excluded.hierarchy_path,
+        synced_at = CURRENT_TIMESTAMP
+    `);
+    const upsert = this.db.transaction((groups) => {
+      for (const g of groups) {
+        stmt.run(g.name, g.parent || '', g.hierarchy_path || g.hierarchyPath || '', company);
+      }
+    });
+    upsert(groups);
+    return groups.length;
+  }
+
+  /**
+   * Get all account groups (optionally filtered by company)
+   */
+  getAccountGroups(company = null) {
+    if (company) {
+      return this.db.prepare('SELECT * FROM account_groups WHERE company = ? ORDER BY name').all(company);
+    }
+    return this.db.prepare('SELECT * FROM account_groups ORDER BY name').all();
+  }
+
+  /**
+   * Get ledgers with hierarchy path (joined with account_groups)
+   */
+  getLedgersWithHierarchy(groupFilter = null) {
+    let sql = `
+      SELECT p.name, p.parent, p.group_type, p.closing_balance, p.opening_balance,
+             p.address, p.state, p.gstin, p.phone,
+             ag.hierarchy_path,
+             CASE WHEN p.closing_balance >= 0 THEN 'Dr' ELSE 'Cr' END as balance_type,
+             ABS(p.closing_balance) as abs_balance
+      FROM parties p
+      LEFT JOIN account_groups ag ON p.parent = ag.name
+      WHERE 1=1
+    `;
+    const params = [];
+    if (groupFilter) {
+      sql += ` AND (p.parent = ? OR ag.hierarchy_path LIKE ?)`;
+      params.push(groupFilter, `%${groupFilter}%`);
+    }
+    sql += ` ORDER BY p.parent, p.name`;
+    return this.db.prepare(sql).all(...params);
   }
 
   /**
@@ -3197,14 +3664,23 @@ class DatabaseService {
 
   /**
    * Get unlinked Fonepay transactions (not assigned to any bill)
+   * @param {string} [dateFrom] - Optional start date YYYY-MM-DD
+   * @param {string} [dateTo] - Optional end date YYYY-MM-DD
    */
-  getUnlinkedFonepayTransactions() {
-    return this.db.prepare(`
-      SELECT * FROM fonepay_transactions
-      WHERE voucher_number IS NULL
-      ORDER BY transaction_date DESC
-      LIMIT 100
-    `).all();
+  getUnlinkedFonepayTransactions(dateFrom, dateTo) {
+    let sql = `SELECT * FROM fonepay_transactions WHERE voucher_number IS NULL`;
+    const params = [];
+    if (dateFrom) {
+      sql += ` AND transaction_date >= ?`;
+      params.push(dateFrom);
+    }
+    if (dateTo) {
+      sql += ` AND transaction_date <= ?`;
+      params.push(dateTo + ' 23:59:59');
+    }
+    sql += ` ORDER BY transaction_date DESC`;
+    if (!dateFrom && !dateTo) sql += ` LIMIT 100`;
+    return this.db.prepare(sql).all(...params);
   }
 
   /**
@@ -3229,6 +3705,89 @@ class DatabaseService {
       ORDER BY transaction_date DESC
       LIMIT 1
     `).get(amount, date);
+  }
+
+  /**
+   * Unlink a Fonepay transaction from its bill
+   */
+  unlinkFonepayFromBill(transactionId) {
+    return this.db.prepare(`
+      UPDATE fonepay_transactions SET
+        voucher_number = NULL,
+        party_name = NULL,
+        company_name = NULL,
+        linked_at = NULL
+      WHERE transaction_id = ?
+    `).run(transactionId);
+  }
+
+  /**
+   * Bulk link multiple Fonepay transactions to bills in a single transaction
+   */
+  bulkLinkFonepay(links) {
+    const stmt = this.db.prepare(`
+      UPDATE fonepay_transactions SET
+        voucher_number = ?,
+        party_name = ?,
+        company_name = ?,
+        description = ?,
+        linked_at = CURRENT_TIMESTAMP
+      WHERE transaction_id = ?
+    `);
+    const run = this.db.transaction((items) => {
+      let linked = 0;
+      for (const item of items) {
+        const desc = `${item.companyName || 'FOR DB'} | ${item.voucherNumber} | ${item.billDate || ''}`;
+        const r = stmt.run(item.voucherNumber, item.partyName, item.companyName || 'FOR DB', desc, item.transactionId);
+        if (r.changes > 0) linked++;
+      }
+      return linked;
+    });
+    return run(links);
+  }
+
+  // ==================== FONEPAY PARTY PHONE MAPPINGS ====================
+
+  getPhonePartyMap() {
+    const rows = this.db.prepare(`SELECT phone, party_name FROM fonepay_party_phones`).all();
+    const map = {};
+    for (const r of rows) map[r.phone] = r.party_name;
+    return map;
+  }
+
+  getPartyPhones(partyName) {
+    return this.db.prepare(`SELECT * FROM fonepay_party_phones WHERE party_name = ? COLLATE NOCASE`).all(partyName);
+  }
+
+  upsertPartyPhone(phone, partyName, source = 'auto') {
+    return this.db.prepare(`
+      INSERT INTO fonepay_party_phones (phone, party_name, source) VALUES (?, ?, ?)
+      ON CONFLICT(phone) DO UPDATE SET party_name = excluded.party_name, source = excluded.source
+    `).run(phone, partyName, source);
+  }
+
+  deletePartyPhone(phone) {
+    return this.db.prepare(`DELETE FROM fonepay_party_phones WHERE phone = ?`).run(phone);
+  }
+
+  bulkSavePhoneMappings(mappings) {
+    const stmt = this.db.prepare(`
+      INSERT INTO fonepay_party_phones (phone, party_name, source) VALUES (?, ?, ?)
+      ON CONFLICT(phone) DO UPDATE SET party_name = excluded.party_name, source = excluded.source
+    `);
+    const run = this.db.transaction((items) => {
+      for (const item of items) {
+        stmt.run(item.phone, item.partyName, item.source || 'auto');
+      }
+    });
+    run(mappings);
+  }
+
+  getAllPhoneMappings(partyFilter) {
+    if (partyFilter) {
+      return this.db.prepare(`SELECT * FROM fonepay_party_phones WHERE party_name LIKE ? COLLATE NOCASE ORDER BY party_name`).all(`%${partyFilter}%`);
+    }
+    return this.db.prepare(`SELECT * FROM fonepay_party_phones ORDER BY party_name`).all();
   }
 
   // ==================== FULL HISTORICAL SYNC ====================
@@ -3954,6 +4513,54 @@ class DatabaseService {
     return this.db.prepare(`SELECT * FROM ${table} WHERE 1=1${overdueFilter} ORDER BY closing_balance DESC`).all();
   }
 
+  /**
+   * Get QR receipts from both companies for Fonepay matching
+   * Billing company: receipts with "QR Code" / "Q/R code" ledger (pay_qr column)
+   * ODBC company: receipts with "QR Received" ledger (in ledger_entries JSON)
+   */
+  getQRReceipts() {
+    // Get already-linked voucher numbers to exclude
+    const linkedVouchers = this.db.prepare(
+      `SELECT DISTINCT voucher_number FROM fonepay_transactions WHERE voucher_number IS NOT NULL`
+    ).all().map(r => r.voucher_number);
+
+    // Billing company: receipts with QR payment
+    const billingReceipts = this.db.prepare(`
+      SELECT voucher_number, voucher_date, party_name, pay_qr as qr_amount, 'billing' as source
+      FROM bills
+      WHERE voucher_type IN ('Bank Receipt', 'Counter Receipt', 'Receipt', 'Dashboard Receipt')
+      AND COALESCE(pay_qr, 0) > 0
+      ORDER BY voucher_date DESC
+    `).all();
+
+    // ODBC company: receipts with QR ledger in entries
+    const odbcReceipts = this.db.prepare(`
+      SELECT voucher_number, voucher_date, party_name, amount, ledger_entries, 'odbc' as source
+      FROM odbc_vouchers
+      WHERE ledger_entries LIKE '%QR%' OR ledger_entries LIKE '%qr%' OR ledger_entries LIKE '%Q/R%'
+      ORDER BY voucher_date DESC
+    `).all();
+
+    // Parse ODBC receipts to extract QR amount from ledger_entries JSON
+    const odbcQR = odbcReceipts.map(r => {
+      let qrAmount = 0;
+      try {
+        const entries = JSON.parse(r.ledger_entries || '[]');
+        for (const entry of entries) {
+          const name = (entry.ledger || '').toLowerCase();
+          if (name.includes('qr') || name.includes('q/r')) {
+            qrAmount += entry.amount || 0;
+          }
+        }
+      } catch {}
+      return { voucher_number: r.voucher_number, voucher_date: r.voucher_date, party_name: r.party_name, qr_amount: qrAmount, source: 'odbc' };
+    }).filter(r => r.qr_amount > 0);
+
+    // Combine and exclude already-linked receipts
+    const all = [...billingReceipts, ...odbcQR];
+    return all.filter(r => !linkedVouchers.includes(r.voucher_number));
+  }
+
   getAgeingSummary(overdue = false) {
     const table = 'odbc_outstanding_bills';
     const overdueFilter = overdue ? " WHERE ageing_bucket != '0-30'" : '';
@@ -4257,8 +4864,10 @@ class DatabaseService {
       INSERT INTO odbc_vouchers (
         master_id, alter_id, guid, voucher_number, voucher_type, voucher_date,
         party_name, bank_name, amount, cheque_number, cheque_date,
-        narration, bill_allocations, ledger_entries, synced_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        narration, bill_allocations, ledger_entries,
+        tally_created_datetime, tally_updated_datetime, object_update_action, entered_by, altered_date, prior_date,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(master_id) DO UPDATE SET
         alter_id = excluded.alter_id,
         guid = excluded.guid,
@@ -4273,6 +4882,12 @@ class DatabaseService {
         narration = excluded.narration,
         bill_allocations = excluded.bill_allocations,
         ledger_entries = excluded.ledger_entries,
+        tally_created_datetime = excluded.tally_created_datetime,
+        tally_updated_datetime = excluded.tally_updated_datetime,
+        object_update_action = excluded.object_update_action,
+        entered_by = excluded.entered_by,
+        altered_date = excluded.altered_date,
+        prior_date = excluded.prior_date,
         synced_at = CURRENT_TIMESTAMP
     `);
 
@@ -4293,7 +4908,13 @@ class DatabaseService {
           v.chequeDate || '',
           v.narration || '',
           JSON.stringify(v.billAllocations || []),
-          JSON.stringify(v.ledgerEntries || [])
+          JSON.stringify(v.ledgerEntries || []),
+          v.updatedDateTime || null,
+          v.updatedDateTime || null,
+          v.objectUpdateAction || null,
+          v.enteredBy || null,
+          v.alteredDate || null,
+          v.priorDate || null
         );
         count++;
       }
@@ -4888,6 +5509,72 @@ class DatabaseService {
     if (this.db) {
       this.db.close();
     }
+  }
+
+  // ==================== WHATSAPP CONTACTS ====================
+
+  getWhatsAppContacts(partyName = null) {
+    if (partyName) {
+      return this.db.prepare('SELECT * FROM whatsapp_contacts WHERE party_name LIKE ? ORDER BY party_name, label').all(`%${partyName}%`);
+    }
+    return this.db.prepare('SELECT * FROM whatsapp_contacts ORDER BY party_name, label').all();
+  }
+
+  getWhatsAppContactByParty(partyName) {
+    return this.db.prepare('SELECT * FROM whatsapp_contacts WHERE party_name = ? ORDER BY CASE label WHEN \'primary\' THEN 0 ELSE 1 END').all(partyName);
+  }
+
+  upsertWhatsAppContact(partyName, phone, label = 'primary', source = 'manual', notes = '') {
+    const existing = this.db.prepare('SELECT id FROM whatsapp_contacts WHERE party_name = ? AND phone = ?').get(partyName, phone);
+    if (existing) {
+      this.db.prepare('UPDATE whatsapp_contacts SET label = ?, source = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(label, source, notes, existing.id);
+      return existing.id;
+    }
+    const result = this.db.prepare('INSERT INTO whatsapp_contacts (party_name, phone, label, source, notes) VALUES (?, ?, ?, ?, ?)').run(partyName, phone, label, source, notes);
+    return result.lastInsertRowid;
+  }
+
+  deleteWhatsAppContact(id) {
+    return this.db.prepare('DELETE FROM whatsapp_contacts WHERE id = ?').run(id);
+  }
+
+  verifyWhatsAppContact(id, isVerified) {
+    return this.db.prepare('UPDATE whatsapp_contacts SET is_verified = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(isVerified ? 1 : 0, id);
+  }
+
+  // ==================== WHATSAPP MESSAGE LOG ====================
+
+  logWhatsAppMessage({ phone, party_name, direction = 'outgoing', message_type = 'text', template_name, message_body, status = 'sent', wa_message_id, related_voucher, error_message }) {
+    return this.db.prepare(
+      `INSERT INTO whatsapp_message_log (phone, party_name, direction, message_type, template_name, message_body, status, wa_message_id, related_voucher, error_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(phone, party_name || null, direction, message_type, template_name || null, message_body || null, status, wa_message_id || null, related_voucher || null, error_message || null);
+  }
+
+  getWhatsAppMessageLog({ partyName, phone, fromDate, toDate, status, limit = 50, offset = 0 } = {}) {
+    let sql = 'SELECT * FROM whatsapp_message_log WHERE 1=1';
+    const params = [];
+    if (partyName) { sql += ' AND party_name LIKE ?'; params.push(`%${partyName}%`); }
+    if (phone) { sql += ' AND phone = ?'; params.push(phone); }
+    if (fromDate) { sql += ' AND sent_at >= ?'; params.push(fromDate); }
+    if (toDate) { sql += ' AND sent_at <= ?'; params.push(toDate + ' 23:59:59'); }
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    sql += ' ORDER BY sent_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return this.db.prepare(sql).all(...params);
+  }
+
+  getWhatsAppMessageStats() {
+    const today = new Date().toISOString().slice(0, 10);
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    return {
+      today: this.db.prepare('SELECT COUNT(*) as count FROM whatsapp_message_log WHERE sent_at >= ?').get(today).count,
+      thisWeek: this.db.prepare('SELECT COUNT(*) as count FROM whatsapp_message_log WHERE sent_at >= ?').get(weekAgo).count,
+      total: this.db.prepare('SELECT COUNT(*) as count FROM whatsapp_message_log').get().count,
+      byTemplate: this.db.prepare('SELECT template_name, COUNT(*) as count FROM whatsapp_message_log WHERE template_name IS NOT NULL GROUP BY template_name').all(),
+      byStatus: this.db.prepare('SELECT status, COUNT(*) as count FROM whatsapp_message_log GROUP BY status').all(),
+      failed: this.db.prepare('SELECT COUNT(*) as count FROM whatsapp_message_log WHERE status = \'failed\'').get().count
+    };
   }
 }
 
